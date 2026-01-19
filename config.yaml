@@ -1,0 +1,45 @@
+
+
+#  1. pyrender配置
+# fast_scene专用配置, 在 fast_scene_bpy 中没有用到
+floor_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/floor_texture2.png
+ceiling_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/wall_texture3.png
+wall_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/wall_texture3.png
+door_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/door.png
+window_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/window.png
+wall_color:  # 墙体颜色, 在 fast_scene_bpy 中为材质不存在下的备选
+- 1.2
+- 1.2
+- 1.2
+- 1.0
+texture_scale: 2.0  # 地板和墙体的纹理缩放系数，值越大纹理平铺次数越多
+wall_edge_enabled: true  # 是否显示墙体边缘线条让墙体看起来更明显
+wall_edge_color:  # 边缘线条颜色 [R, G, B, A]
+- 0.1
+- 0.1
+- 0.1
+- 1.0
+wall_edge_offset: 0.01  # 边缘线向房间内部偏移距离（米），避免相邻墙边缘重叠
+
+
+
+# fast_scene_bpy中使用的配置
+floor_blender_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/wood_floor_2k.blend/wood_floor_2k.blend
+ceiling_blender_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/wood_floor_2k.blend/wood_floor_2k.blend
+wall_blender_texture_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/wood_floor_2k.blend/wood_floor_2k.blend
+hdri_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/precessed/cedar_bridge_sunset_1_4k.exr
+
+
+model_path: /data-nas/data/dataset/qunhe/Manycore-Future/models # 家具模型路径
+model_hole_path: /data-nas/data/dataset/qunhe/Manycore-Future/holes # 门窗模型路径
+
+
+
+# 3. 通用配置
+wall_thickness: 0.1 # 墙体厚度
+indoor_fov: 90  # 相机在房间内时的固定FOV（度）
+outdoor_fov_scale: 1.1  # 相机在房间外时FOV的缩放系数
+
+
+
+
