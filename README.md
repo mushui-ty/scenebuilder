@@ -28,12 +28,19 @@ pip install numpy shapely scipy imageio yaml
   ```
 - **Blender 版**: `pip install bpy`
   ```bash
+  apt update
   apt install -y libxi6 libxrender1 libxrandr2 libxfixes3 libxcursor1 libxinerama1 libxxf86vm1 libgl1-mesa-glx libglu1-mesa libxkbcommon0 libxkbcommon-dev libgl1-mesa-glx libgl1-mesa-dev libxi6 libxrender1 libxrandr2 libxfixes3 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxss1 libgtk-3-0 libgtk-3-dev libgconf-2-4 libasound2 libpulse0
   ```
 
 ---
 
 ## 2. Quickstart
+
+渲染 ssl 使用 render_ssl.py
+
+渲染指定房间 id 使用 render_room_id.py
+
+渲染 json 文件使用 fast_scene_bpy.py 中的例子
 
 ```python
 # 以 Blender 版本为例, 可选版本 pyrender
