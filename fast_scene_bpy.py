@@ -18,7 +18,7 @@ import json
 import yaml
 import numpy as np
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 
 # 导入 util 的数据处理函数（不使用其 mesh 创建函数）
 try:
@@ -96,6 +96,30 @@ class BpySceneCtx:
         self.scene_collection = self.scene.collection
         
         print(f"✅ Blender 场景初始化完成 (Cycles + CUDA)")
+
+    def clear_scene(self):
+        """彻底清空所有物体、灯光和相机，并重置状态"""
+        # 切换到 Object 模式以防万一
+        if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+            
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete(use_global=False)
+        
+        # 清空所有孤立的数据块（材质、网格等）以节省内存
+        bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
+        
+        # 重置引用状态
+        self.mesh_nodes = {
+            "walls": {},      
+            "doors": {},      
+            "windows": {},    
+            "boxes": {},      
+            "floor": None,    
+            "ceiling": None,  
+        }
+        self.if_set_lights = False
+        print("🧹 场景已完全清空并重置状态")
 
     # ==================== 数据管理函数（与 fast_scene.py 完全一致）====================
     def add_walls(self, walls: List[Dict[str, Any]]):
@@ -203,7 +227,7 @@ class BpySceneCtx:
 
     # ==================== 场景构建（与 fast_scene.py 逻辑完全一致）====================
     
-    def construct_floor(self, show_wall=True, show_window=True, show_door=True, show_ceiling=True):
+    def construct_floor(self, show_wall=True, show_window=True, show_door=True, show_ceiling=True, align_height: bool = True):
         """构建地板和墙体（与 fast_scene.py 完全一致的逻辑）"""
         # 注意：这里不创建 self.scene = pyrender.Scene()，而是使用已有的 bpy scene
         vertices = self.context["meta"]["vertices"]
@@ -213,8 +237,14 @@ class BpySceneCtx:
 
         # 创建地板
         bounds = self.context["meta"]["bounds"]
+        z_max = self.context["meta"]["z_max"]
         wall_thickness = self.config.get("wall_thickness", 0.1)
-        floor_obj = util_bpy.create_floor_mesh_bpy(self.scene_collection, vertices)
+        
+        f_scale = self.config.get("floor_texture_scale", 1.0)
+        w_scale = self.config.get("wall_texture_scale", 1.0)
+        c_scale = self.config.get("ceiling_texture_scale", 1.0)
+
+        floor_obj = util_bpy.create_floor_mesh_bpy(self.scene_collection, vertices, texture_scale=f_scale)
         if floor_obj is None:
             print("⚠️ 地板几何体创建失败，跳过后续处理")
             return
@@ -239,26 +269,30 @@ class BpySceneCtx:
             wall_outer_points = util_bpy.calculate_miter_joints(self.context["walls"], wall_thickness)
 
             for wall_id, wall in self.context["walls"].items():
-                # 收集门窗信息
+                # 收集门窗信息 (携带类型)
                 openings = []
                 for door in wall.get("doors", {}).values():
-                    openings.append(door)
+                    openings.append((door, "door"))
                 for window in wall.get("windows", {}).values():
-                    openings.append(window)
+                    openings.append((window, "window"))
                 
                 # 获取预计算的偏移点
                 outer_s, outer_e = wall_outer_points.get(wall_id, (None, None))
 
+                # 墙体高度：对齐或使用原始高度
+                wall_h = z_max if align_height else wall["height"]
+
                 # 创建墙体mesh（带门窗挖洞）
                 wall_obj = util_bpy.create_single_wall_mesh_bpy(
                     self.scene_collection,
-                    wall["s"], wall["e"], wall["height"], wall["orientation"],
+                    wall["s"], wall["e"], wall_h, wall["orientation"],
                     chip=False,
                     openings=openings if openings else None,
                     wall_thickness=wall_thickness,
                     name=f"Wall_{wall_id[:4]}",
                     outer_s=outer_s,
-                    outer_e=outer_e
+                    outer_e=outer_e,
+                    texture_scale=w_scale
                 )
 
                 # 应用纹理或颜色
@@ -352,7 +386,7 @@ class BpySceneCtx:
         # 创建天花板
         if show_ceiling:
             z_max = self.context["meta"]["z_max"]
-            ceiling_obj = util_bpy.create_ceiling_mesh_bpy(self.scene_collection, vertices, z_max)
+            ceiling_obj = util_bpy.create_ceiling_mesh_bpy(self.scene_collection, vertices, z_max, texture_scale=c_scale)
             if ceiling_obj:
                 ceiling_texture_path = self.config["ceiling_blender_texture_path"]
                 if ceiling_texture_path and os.path.exists(ceiling_texture_path):
@@ -371,7 +405,8 @@ class BpySceneCtx:
 
     def construct_scene(self, show_wall: bool = True, show_window: bool = True, 
                        show_door: bool = True, show_ceiling: bool = True,
-                       geometry_mode: str = "gltf"):
+                       geometry_mode: str = "gltf", align_height: bool = True,
+                       rebuild: bool = False):
         """
         构建完整场景。
         
@@ -381,18 +416,27 @@ class BpySceneCtx:
                 - "gltf": 仅加载 GLTF 模型，若无 mesh_id 或文件不存在则跳过该物体
                 - "mixed": 优先加载 GLTF 模型，若失败则回退到 bbox 几何体
                 - "bbox": 所有物体均强制使用 bbox 几何体表示
+            align_height: 是否对齐墙体高度到 z_max
+            rebuild: 是否重新构建场景（清空当前所有物体）
         """
+        if rebuild:
+            self.clear_scene()
+
         total_start = time.perf_counter()
 
         self.construct_floor(show_wall=show_wall, show_window=show_window, 
-                             show_door=show_door, show_ceiling=show_ceiling)
+                             show_door=show_door, show_ceiling=show_ceiling, align_height=align_height)
 
         print(f"📦 加载家具 ({len(self.context['boxes'])} 个物体, 模式: {geometry_mode})...")
         success_count = 0
         load_time = 0
         transform_time = 0
         
-        model_path = self.config.get("model_path")
+        model_paths = []
+        path1 = self.config.get("model_path")
+        path2 = self.config.get("model_generate_path")
+        if path1: model_paths.append(path1)
+        if path2: model_paths.append(path2)
 
         for box_id, box in self.context["boxes"].items():
             mesh_id = box.get("mesh_id")
@@ -417,7 +461,8 @@ class BpySceneCtx:
             mesh_root = None
             if should_load_gltf:
                 load_start = time.perf_counter()
-                mesh_root = util_bpy.load_mesh_to_origin(mesh_id, model_path)
+                # 尝试从多个路径加载模型
+                mesh_root = util_bpy.load_mesh_to_origin(mesh_id, model_paths)
                 load_time += time.perf_counter() - load_start
                 
                 if mesh_root:
@@ -434,7 +479,8 @@ class BpySceneCtx:
                             "node": mesh_root, "mesh": mesh_root, "box_data": box
                         }
                         success_count += 1
-                        print(f"  ✅ {box.get('class', 'unknown')} 添加成功")
+                        name = box.get('label', box.get('class', 'unknown'))
+                        print(f"  ✅ {name} 添加成功")
                         continue
                 
                 # 如果 gltf 加载失败，判断是否需要回退
@@ -454,9 +500,11 @@ class BpySceneCtx:
                         "node": bbox_mesh, "mesh": bbox_mesh, "box_data": box
                     }
                     success_count += 1
-                    print(f"  ✅ {box.get('class', 'unknown')} (bbox几何体) 添加成功")
+                    name = box.get('label', box.get('class', 'unknown'))
+                    print(f"  ✅ {name} (bbox几何体) 添加成功")
                 except Exception as e:
-                    print(f"  ❌ {box.get('class', 'unknown')} (bbox几何体): {e}")
+                    name = box.get('label', box.get('class', 'unknown'))
+                    print(f"  ❌ {name} (bbox几何体): {e}")
 
         total_time = time.perf_counter() - total_start
         print(f"✅ 场景构建完成! 成功添加 {success_count}/{len(self.context['boxes'])} 个物体")
@@ -466,19 +514,28 @@ class BpySceneCtx:
         print(f"✅ 场景构建完成! 成功添加 {success_count}/{len(self.context['boxes'])} 个物体")
         print(f"   构建耗时: {total_time:.2f}s (加载: {load_time:.2f}s, 变换: {transform_time:.2f}s)")
 
-    def setup_lighting(self, point_light_intensity: float = 1000,
-                      use_point_lights: bool = True, ambient_light_color: list = None,
+    def setup_lighting(self, intensity: float = 250,
+                      lighting_type: Literal["area", "array", "none"] = "array",
+                      ambient_light_color: list = None,
                       ambient_strength: float = 2.0):
-        """设置场景光照（与 fast_scene.py 逻辑一致，但使用 bpy 实现）"""
+        """设置场景光照，支持单盏大面积区域光、阵列光或不设置"""
         if self.if_set_lights:
             print("⚠️  光照已设置，跳过重复设置")
             return
         
+        if lighting_type == "none":
+            print("🌑 已选择 'none' 模式，不添加人造灯光")
+            self.if_set_lights = True
+            return
+
         center = self.context["meta"]["center"]
         z_max = self.context["meta"]["z_max"]
         span = self.context["meta"]["span"]
         
-        # 设置环境光
+        # 柔和黄白色 (Soft Warm White)
+        warm_white = [1.0, 0.95, 0.8]
+
+        # 1. 设置环境光
         world = self.scene.world
         if not world:
             world = bpy.data.worlds.new("World")
@@ -488,28 +545,74 @@ class BpySceneCtx:
         bg_node = world.node_tree.nodes.get('Background')
         if bg_node:
             if ambient_light_color is None:
-                ambient_light_color = [1.0, 1.0, 1.0, 1.0]
+                # 真实的自然环境光通常带一点点蓝色 (Daylight Blue)
+                ambient_light_color = [0.95, 0.97, 1.0, 1.0]
             elif len(ambient_light_color) == 3:
                 ambient_light_color = ambient_light_color + [1.0]
             bg_node.inputs['Color'].default_value = ambient_light_color
             bg_node.inputs['Strength'].default_value = ambient_strength
         
-        # 添加点光源
-        if use_point_lights:
-            corner_positions = [
-                [center[0] - span[0]/2, center[1] - span[1]/2, z_max+3],
-                [center[0] + span[0]/2, center[1] - span[1]/2, z_max+3],
-                [center[0] - span[0]/2, center[1] + span[1]/2, z_max+3],
-                [center[0] + span[0]/2, center[1] + span[1]/2, z_max+3],
-            ]
-            for i, pos in enumerate(corner_positions):
-                light_data = bpy.data.lights.new(name=f"PointLight_{i}", type='POINT')
-                light_data.energy = point_light_intensity
-                light_obj = bpy.data.objects.new(name=f"PointLight_{i}", object_data=light_data)
-                self.scene_collection.objects.link(light_obj)
-                light_obj.location = pos
+        # 2. 添加室内人造灯 (高度在 z_max - 0.1)
+        light_z = z_max - 0.1
+        
+        # 更加符合摄影感的室内暖白光 (Warm White ~3500K)
+        # 这种颜色与环境光的淡蓝色对比会产生非常真实的室内氛围
+        realistic_warm = [1.0, 0.88, 0.75]
+        
+        if lighting_type == "area":
+            # 方案一：单盏大面积区域光
+            light_data = bpy.data.lights.new(name="MainAreaLight", type='AREA')
+            light_data.shape = 'RECTANGLE'
+            # 覆盖房间 80% 的面积
+            light_data.size = span[0] * 0.8
+            light_data.size_y = span[1] * 0.8
+            light_data.energy = intensity
+            light_data.color = realistic_warm
             
-            print(f"💡 已添加点光源x{len(corner_positions)}，强度={point_light_intensity}")
+            light_obj = bpy.data.objects.new(name="MainAreaLight", object_data=light_data)
+            self.scene_collection.objects.link(light_obj)
+            light_obj.location = (center[0], center[1], light_z)
+            print(f"💡 已添加单盏大面积区域光 (Intensity={intensity})")
+            
+        elif lighting_type == "array":
+            # 方案二：阵列区域光 (筒灯风格)
+            # 每隔 1.5 米布置一盏，且避开边缘
+            nx = int(span[0] / 1.5)
+            ny = int(span[1] / 1.5)
+            
+            # 计算 X 轴坐标 (居中排布)
+            if nx <= 1:
+                x_coords = [center[0]]
+                nx = 1
+            else:
+                total_w = (nx - 1) * 1.5
+                x_coords = np.linspace(center[0] - total_w/2, center[0] + total_w/2, nx)
+                
+            # 计算 Y 轴坐标 (居中排布)
+            if ny <= 1:
+                y_coords = [center[1]]
+                ny = 1
+            else:
+                total_h = (ny - 1) * 1.5
+                y_coords = np.linspace(center[1] - total_h/2, center[1] + total_h/2, ny)
+            
+            # 每个光源使用恒定强度，确保大房间亮度自动增加
+            each_intensity = self.config.get("array_light_intensity", 50.0)
+            count = 0
+            for x in x_coords:
+                for y in y_coords:
+                    count += 1
+                    l_name = f"ArrayLight_{count}"
+                    l_data = bpy.data.lights.new(name=l_name, type='AREA')
+                    l_data.shape = 'DISK'
+                    l_data.size = 0.3  # 直径 0.3 米的圆盘
+                    l_data.energy = each_intensity
+                    l_data.color = realistic_warm
+                    
+                    l_obj = bpy.data.objects.new(name=l_name, object_data=l_data)
+                    self.scene_collection.objects.link(l_obj)
+                    l_obj.location = (x, y, light_z)
+            print(f"💡 已添加加密阵列区域光 x{count} (Each Intensity={each_intensity}, Total={each_intensity*count})")
         
         self.if_set_lights = True
 
@@ -520,29 +623,47 @@ class BpySceneCtx:
                      auto_fov: bool = True, manual_fov: float = None,
                      auto_transparent: bool = True, transparent_alpha: float = 0.3,
                      render_depth: bool = False, use_HDRI: bool = True,
-                     hdri_transparent_background: bool = True):
+                     hdri_transparent_background: bool = True,
+                     visible_shadow: bool = True,
+                     lighting_type: Literal["area", "array", "none"] = "array",
+                     align_height: bool = True,
+                     rebuild: bool = False):
         """俯视图渲染（与 fast_scene.py 逻辑完全一致）"""
         total_start = time.perf_counter()
 
         construct_time = 0
-        if self.mesh_nodes["floor"] is None:
+        if rebuild or self.mesh_nodes["floor"] is None:
             construct_start = time.perf_counter()
             self.construct_scene(geometry_mode=geometry_mode, 
                                show_wall=show_wall, show_window=show_window, 
-                               show_door=show_door, show_ceiling=show_ceiling)
+                               show_door=show_door, show_ceiling=show_ceiling, 
+                               align_height=align_height, rebuild=rebuild)
             construct_time = time.perf_counter() - construct_start
+
+        # 设置阴影可见性
+        for wall_info in self.mesh_nodes["walls"].values():
+            wall_obj = wall_info.get("node")
+            if wall_obj:
+                wall_obj.visible_shadow = visible_shadow
+        ceiling_info = self.mesh_nodes.get("ceiling")
+        if ceiling_info:
+            ceiling_obj = ceiling_info.get("node")
+            if ceiling_obj:
+                ceiling_obj.visible_shadow = visible_shadow
 
         # Setup lighting
         setup_start = time.perf_counter()
         if not self.if_set_lights:
-            # 顶视图使用纯环境光，避免大面积阴影
-            self.setup_lighting(use_point_lights=False, ambient_light_color=[1.0, 1.0, 1.0], ambient_strength=3.0)
+            # 顶视图合并环境光与指定的人造灯
+            self.setup_lighting(lighting_type=lighting_type, ambient_light_color=[1.0, 1.0, 1.0], ambient_strength=3.0)
+        
+        # 显式控制背景透明度
+        self.scene.render.film_transparent = hdri_transparent_background
+
         if use_HDRI:
             hdri_path = self.config.get("hdri_path")
             if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
                 print(f"🌇 使用 HDRI 环境光: {hdri_path}")
-                if hdri_transparent_background:
-                    self.scene.render.film_transparent = True
             else:
                 print(f"⚠️ HDRI 文件不可用或未配置: {hdri_path}")
         # 禁用所有阴影，匹配 fast_scene.py 无阴影的效果
@@ -660,6 +781,10 @@ class BpySceneCtx:
         self.scene.render.resolution_y = height
         self.scene.render.filepath = output_path
 
+        render = self.scene.render
+        render.image_settings.color_mode = 'RGBA'
+        render.film_transparent = hdri_transparent_background
+
         print(f"🎬 渲染中 ({width}x{height})...")
         try:
             render_start = time.perf_counter()
@@ -697,8 +822,7 @@ class BpySceneCtx:
 
         total_time = time.perf_counter() - total_start
         print(f"✅ 渲染完成! 保存至: {output_path}")
-        print(f"   构建: {construct_time:.2f}s, 设置: {setup_time:.2f}s, 渲染: {render_time:.2f}s, 保存: {save_time:.2f}s")
-        print(f"   总耗时: {total_time:.2f}s")
+        print(f"   构建: {construct_time:.2f}s, 设置: {setup_time:.2f}s, 渲染: {render_time:.2f}s, 保存: {save_time:.2f}s, 总耗时: {total_time:.2f}s")
 
     def render_view(self, output_path: str, camera_position: list, look_at_target: list = None, 
                     width: int = 1024, height: int = 1024, up_vector: list = None, 
@@ -706,26 +830,42 @@ class BpySceneCtx:
                     auto_transparent: bool = True, transparent_alpha: float = 0.3,
                     geometry_mode: str = "gltf", render_depth: bool = False,
                     show_wall: bool = True, show_window: bool = True, show_door: bool = True, show_ceiling: bool = True,
-                    use_HDRI: bool = True, hdri_transparent_background: bool = False):
+                    use_HDRI: bool = True, hdri_transparent_background: bool = False,
+                    visible_shadow: bool = True,
+                    lighting_type: Literal["area", "array", "none"] = "array",
+                    align_height: bool = True,
+                    rebuild: bool = False):
         total_start = time.perf_counter()
 
         construct_time = 0.0
-        if self.mesh_nodes["floor"] is None:
+        if rebuild or self.mesh_nodes["floor"] is None:
             construct_start = time.perf_counter()
             self.construct_scene(geometry_mode=geometry_mode,
                                  show_wall=show_wall, show_window=show_window,
-                                 show_door=show_door, show_ceiling=show_ceiling)
+                                 show_door=show_door, show_ceiling=show_ceiling, 
+                                 align_height=align_height, rebuild=rebuild)
             construct_time = time.perf_counter() - construct_start
+
+        # 设置阴影可见性
+        for wall_info in self.mesh_nodes["walls"].values():
+            wall_obj = wall_info.get("node")
+            if wall_obj:
+                wall_obj.visible_shadow = visible_shadow
+        ceiling_info = self.mesh_nodes.get("ceiling")
+        if ceiling_info:
+            ceiling_obj = ceiling_info.get("node")
+            if ceiling_obj:
+                ceiling_obj.visible_shadow = visible_shadow
 
         setup_start = time.perf_counter()
         if not self.if_set_lights:
-            self.setup_lighting()
+            self.setup_lighting(lighting_type=lighting_type)
         if use_HDRI:
             hdri_path = self.config.get("hdri_path")
             if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
                 print(f"🌇 使用 HDRI 环境光: {hdri_path}")
-                if hdri_transparent_background:
-                    self.scene.render.film_transparent = True
+                # 显式控制：True 则透明，False 则显示 HDRI 贴图
+                self.scene.render.film_transparent = hdri_transparent_background
             else:
                 print(f"⚠️ HDRI 文件不可用或未配置: {hdri_path}")
         setup_time = time.perf_counter() - setup_start
@@ -838,6 +978,10 @@ class BpySceneCtx:
         self.scene.render.resolution_y = height
         self.scene.render.filepath = output_path
 
+        render = self.scene.render
+        render.image_settings.color_mode = 'RGBA'
+        render.film_transparent = hdri_transparent_background
+
         print(f"🎬 渲染中 ({width}x{height})...")
         try:
             render_start = time.perf_counter()
@@ -851,10 +995,7 @@ class BpySceneCtx:
                 util_bpy.render_depth_exr(self.scene, depth_path)
             total_time = time.perf_counter() - total_start
             print(f"✅ 渲染完成! 保存至: {output_path}")
-            print(f"   构建: {construct_time:.2f}s, 设置: {setup_time:.2f}s, 渲染: {render_time:.2f}s")
-            if render_depth:
-                print("   深度图已生成")
-            print(f"   总耗时: {total_time:.2f}s")
+            print(f"   构建: {construct_time:.2f}s, 设置: {setup_time:.2f}s, 渲染: {render_time:.2f}s, 总耗时: {total_time:.2f}s")
         except Exception as e:
             print(f"❌ 渲染失败: {e}")
             raise
@@ -898,7 +1039,7 @@ if __name__ == "__main__":
     
     # 测试场景渲染
     line = 15
-    jsonl_path = '/root/datasets/manycore/spatialllm_raw.jsonl'
+    jsonl_path = '/data-nas/data/experiments/mushui/datasets/manycore/spatialllm_raw.jsonl'
     base_dir = os.path.join(os.path.dirname(__file__), '..')
     test_dir = os.path.join(base_dir, 'test_bpy')
     os.makedirs(test_dir, exist_ok=True)

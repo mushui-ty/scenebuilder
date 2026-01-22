@@ -355,7 +355,7 @@ class MeshRetriever:
 # 全局单例（可选，避免重复加载）
 _global_retriever = None
 
-def get_retriever(db_path="/root/projects/utils/fast-scene/fast_scene/mesh_database.pkl") -> MeshRetriever:
+def get_retriever(db_path="/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/mesh_database.pkl") -> MeshRetriever:
     """获取全局检索器单例"""
     global _global_retriever
     if _global_retriever is None:

@@ -5,7 +5,8 @@ Blender 版本的辅助工具函数，供 fast_scene_bpy.py 使用。
 import os
 import colorsys
 import hashlib
-from typing import Any, Dict, List, Optional
+import contextlib
+from typing import Any, Dict, List, Optional, Union
 
 try:
     import imageio
@@ -23,7 +24,7 @@ except ImportError:  # pragma: no cover
     Matrix = None
 
 
-def create_floor_mesh_bpy(scene_collection, vertices, thickness=0.1, name="Floor"):
+def create_floor_mesh_bpy(scene_collection, vertices, thickness=0.1, name="Floor", texture_scale=1.0):
     if bpy is None or len(vertices) < 3:
         return None
 
@@ -43,6 +44,14 @@ def create_floor_mesh_bpy(scene_collection, vertices, thickness=0.1, name="Floor
 
     mesh.from_pydata(verts, [], faces)
     mesh.update()
+
+    # 添加地板 UV 坐标 (x, y)
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    for poly in mesh.polygons:
+        for loop_index in poly.loop_indices:
+            v_idx = mesh.loops[loop_index].vertex_index
+            vx, vy, _ = verts[v_idx]
+            uv_layer.data[loop_index].uv = (vx * texture_scale, vy * texture_scale)
 
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
@@ -108,7 +117,7 @@ def apply_hdri_to_world(scene, hdri_path: str, strength: float = 1.0):
 
 def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
                                 chip=False, openings=None, wall_thickness=0.1, name="Wall",
-                                outer_s=None, outer_e=None):
+                                outer_s=None, outer_e=None, texture_scale=1.0):
     if bpy is None:
         return None
 
@@ -168,9 +177,28 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
     mesh.from_pydata(verts, [], faces)
     mesh.update()
 
+    # 添加墙体 UV 坐标
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+
+    for f_idx, poly in enumerate(mesh.polygons):
+        for loop_index in poly.loop_indices:
+            v_idx = mesh.loops[loop_index].vertex_index
+            vx, vy, vz = verts[v_idx]
+            
+            if f_idx == 0: # 内侧面
+                u = np.dot(np.array([vx, vy]) - s_arr, wall_dir)
+                uv_layer.data[loop_index].uv = (u * texture_scale, vz * texture_scale)
+            elif f_idx == 1: # 外侧面
+                u = np.dot(np.array([vx, vy]) - outer_s_val[:2], wall_dir)
+                uv_layer.data[loop_index].uv = (u * texture_scale, vz * texture_scale)
+            elif f_idx == 2: # 顶面
+                uv_layer.data[loop_index].uv = (vx * texture_scale, vy * texture_scale)
+            else:
+                uv_layer.data[loop_index].uv = ((vx + vy) * texture_scale, vz * texture_scale)
+
     if openings:
-        for opening in openings:
-            opening_box = create_opening_box_bpy(opening, s_arr, e_arr, wall_dir, normal, height)
+        for opening_data, opening_type in openings:
+            opening_box = create_opening_box_bpy(opening_data, s_arr, e_arr, wall_dir, normal, height, wall_thickness, opening_type)
             if opening_box:
                 mod = obj.modifiers.new(name="Boolean", type='BOOLEAN')
                 mod.operation = 'DIFFERENCE'
@@ -258,7 +286,7 @@ def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict
     return wall_outer_points
 
 
-def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_height):
+def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_height, wall_thickness=0.1, opening_type="window"):
     if bpy is None:
         return None
 
@@ -266,15 +294,38 @@ def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_heigh
     width = opening["width"]
     height = opening["height"]
 
+    # 1. 基础投影点 (在内圈线上)
     proj = wall_s + wall_dir * np.dot(center[:2] - wall_s, wall_dir)
+    
+    # 2. 修正中心点：墙体是从内圈向外扩的，所以切刀中心也要向外偏移
+    # normal 是指向室内的法线，向外偏移应该是 -normal
+    outward_normal = -np.array(normal)
+    # 将切刀中心移到墙体厚度的中心, 这里我特意小了一丢丢, 希望别切完
+    center_offset = outward_normal * (wall_thickness / 2.0) * 0.90
+    final_center_2d = proj + center_offset
+
     z_bottom = center[2] - height / 2
     z_top = center[2] + height / 2
 
     bpy.ops.mesh.primitive_cube_add(size=1.0)
     box_obj = bpy.context.object
-    box_obj.name = "OpeningBox"
-    box_obj.scale = (width, 0.2, height)
-    box_obj.location = (proj[0], proj[1], (z_bottom + z_top) / 2)
+    box_obj.name = f"OpeningBox_{opening_type}"
+    
+    # 分类讨论：窗户使用 2 倍厚度保证切透，门使用 1 倍厚度配合 0.9 偏移保证外侧不切透
+    if opening_type == "door":
+        cutter_thickness = wall_thickness
+    else:
+        # 使用 2 倍墙厚作为切刀厚度，确保两端都有足够的“过冲”
+        cutter_thickness = wall_thickness * 2
+
+    box_obj.scale = (width, cutter_thickness, height)
+    
+    final_z = (z_bottom + z_top) / 2
+    # 对于门，中心上移 0.01m，给底部留出一点距离
+    if opening_type == "door":
+        final_z += 0.01
+        
+    box_obj.location = (final_center_2d[0], final_center_2d[1], final_z)
     angle = np.arctan2(wall_dir[1], wall_dir[0])
     box_obj.rotation_euler = (0, 0, angle)
 
@@ -370,7 +421,7 @@ def create_door_or_window_mesh_bpy(scene_collection, opening, wall_s, wall_e, wa
     return obj
 
 
-def create_ceiling_mesh_bpy(scene_collection, vertices, z_max, thickness=0.2, name="Ceiling"):
+def create_ceiling_mesh_bpy(scene_collection, vertices, z_max, thickness=0.2, name="Ceiling", texture_scale=1.0):
     if bpy is None or len(vertices) < 3:
         return None
 
@@ -390,6 +441,14 @@ def create_ceiling_mesh_bpy(scene_collection, vertices, z_max, thickness=0.2, na
 
     mesh.from_pydata(verts, [], faces)
     mesh.update()
+
+    # 添加天花板 UV 坐标 (x, y)
+    uv_layer = mesh.uv_layers.new(name="UVMap")
+    for poly in mesh.polygons:
+        for loop_index in poly.loop_indices:
+            v_idx = mesh.loops[loop_index].vertex_index
+            vx, vy, _ = verts[v_idx]
+            uv_layer.data[loop_index].uv = (vx * texture_scale, vy * texture_scale)
 
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
@@ -510,17 +569,24 @@ def _calculate_center(objects: List[Any]):
     return (bounds[0] + bounds[1]) / 2
 
 
-def load_mesh_to_origin(mesh_id: int, model_root: str):
+def load_mesh_to_origin(mesh_id: int, model_root: Union[str, List[str]]):
     """
     导入指定 mesh_id 的 GLTF/GLB 模型，并将几何体中心移至原点。
+    支持从多个根目录中查找。
     """
     if bpy is None or Vector is None or not model_root:
         return None
 
-    candidates = [
-        os.path.join(model_root, f"{mesh_id}.glb"),
-        os.path.join(model_root, f"{mesh_id}.gltf")
-    ]
+    # 统一转换为列表处理
+    if isinstance(model_root, str):
+        roots = [model_root]
+    else:
+        roots = model_root
+
+    candidates = []
+    for root in roots:
+        candidates.append(os.path.join(root, f"{mesh_id}.glb"))
+        candidates.append(os.path.join(root, f"{mesh_id}.gltf"))
 
     for candidate in candidates:
         if not os.path.exists(candidate):
@@ -529,11 +595,11 @@ def load_mesh_to_origin(mesh_id: int, model_root: str):
         # 记录导入前场景中已有对象的指针，导入完成后用来识别新加入的对象
         before_ids = {obj.as_pointer() for obj in bpy.data.objects}
         try:
-            bpy.ops.import_scene.gltf(
-                filepath=candidate,
-                # axis_up='Z',
-                # axis_forward='-Y',
-            )
+            # 抑制 Blender 内部的 glTF 导入日志
+            with contextlib.redirect_stdout(None), contextlib.redirect_stderr(None):
+                bpy.ops.import_scene.gltf(
+                    filepath=candidate,
+                )
         except Exception:
             continue
 
@@ -607,11 +673,12 @@ def apply_box_transform(container_obj: Any, box: Dict):
                          float(target_center[2])))
 
     # 调试输出
-    print(f"    [调试] 当前几何中心: ({current_center[0]:.3f}, {current_center[1]:.3f}, {current_center[2]:.3f})")
-    print(f"    [调试] 当前extent: ({extent[0]:.3f}, {extent[1]:.3f}, {extent[2]:.3f})")
-    print(f"    [调试] 目标center: ({target_center[0]:.3f}, {target_center[1]:.3f}, {target_center[2]:.3f})")
-    print(f"    [调试] 目标scale: ({target_scale[0]:.3f}, {target_scale[1]:.3f}, {target_scale[2]:.3f})")
-    print(f"    [调试] 底部z (min): {min_corner[2]:.3f}, 顶部z (max): {max_corner[2]:.3f}")
+    # print(f"    [调试] 物体 Label: {box.get('label', 'unknown')}")
+    # print(f"    [调试] 当前几何中心: ({current_center[0]:.3f}, {current_center[1]:.3f}, {current_center[2]:.3f})")
+    # print(f"    [调试] 当前extent: ({extent[0]:.3f}, {extent[1]:.3f}, {extent[2]:.3f})")
+    # print(f"    [调试] 目标center: ({target_center[0]:.3f}, {target_center[1]:.3f}, {target_center[2]:.3f})")
+    # print(f"    [调试] 目标scale: ({target_scale[0]:.3f}, {target_scale[1]:.3f}, {target_scale[2]:.3f})")
+    # print(f"    [调试] 底部z (min): {min_corner[2]:.3f}, 顶部z (max): {max_corner[2]:.3f}")
 
     rotation_mat = Matrix.Rotation(theta, 4, 'Z')
     # rotation_mat_fixed = Matrix.Rotation(np.radians(-90), 4, 'X')
@@ -631,8 +698,8 @@ def apply_box_transform(container_obj: Any, box: Dict):
     final_bounds = _get_combined_bounds(child_objects)
     if final_bounds and final_bounds[0] is not None:
         final_center = (final_bounds[0] + final_bounds[1]) / 2
-        print(f"    [调试] 变换后几何中心: ({final_center[0]:.3f}, {final_center[1]:.3f}, {final_center[2]:.3f})")
-        print(f"    [调试] 变换后底部z: {final_bounds[0][2]:.3f}")
+        # print(f"    [调试] 变换后几何中心: ({final_center[0]:.3f}, {final_center[1]:.3f}, {final_center[2]:.3f})")
+        # print(f"    [调试] 变换后底部z: {final_bounds[0][2]:.3f}")
         
         # 检查是否有浮空问题
         expected_bottom = target_center[2] - target_scale[2] / 2

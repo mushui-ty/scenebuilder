@@ -5,12 +5,16 @@
 """
 
 import os
-import re
 import json
 import time
 import yaml
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
+
+try:
+    from .util_data import parse_ssl_to_json, get_mesh
+except (ImportError, ValueError):
+    from util_data import parse_ssl_to_json, get_mesh
 
 # 默认 SSL 示例
 ssl_example = '''
@@ -49,103 +53,41 @@ Bbox(id="19", room_id="D54g", label="dining chair", center=[6.23, 1.97, 0.42], a
 Bbox(id="20", room_id="D54g", label="dining chair", center=[6.91, 2.76, 0.42], angle_z=270, scale=[0.6, 0.58, 0.84], mesh_id="5829816")
 '''
 
-def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
-    """
-    解析SSL格式场景描述并返回指定的JSON结构
-    """
-    data = {
-        "wall": [],
-        "door": [],
-        "window": [],
-        "bbox": [],
-        "room": {"id": "", "room_type": ""}
-    }
-
-    # 提取属性的正则辅助函数
-    def get_attr(pattern, text, default=""):
-        match = re.search(pattern, text)
-        return match.group(1) if match else default
-
-    def get_list_attr(pattern, text, default=None):
-        match = re.search(pattern, text)
-        if match:
-            return [float(x.strip()) for x in match.group(1).split(',')]
-        return default or []
-
-    for line in ssl_text.strip().split('\n'):
-        line = line.strip()
-        if not line: continue
-
-        # Room(id="...", room_type="...")
-        if line.startswith('Room('):
-            data["room"]["id"] = get_attr(r'id="([^"]+)"', line)
-            data["room"]["room_type"] = get_attr(r'room_type="([^"]+)"', line)
-
-        # Wall(id="...", p=[...], q=[...], height=...)
-        elif line.startswith('Wall('):
-            data["wall"].append({
-                "id": get_attr(r'id="([^"]+)"', line),
-                "p": get_list_attr(r'p=\[([^\]]+)\]', line),
-                "q": get_list_attr(r'q=\[([^\]]+)\]', line),
-                "height": float(get_attr(r'height=([\d.]+)', line, "2.8"))
-            })
-
-        # Door(id="...", wall_id="...", center=[...], width=..., height=..., mesh_id="...", category="...")
-        elif line.startswith('Door('):
-            data["door"].append({
-                "id": get_attr(r'id="([^"]+)"', line),
-                "wall_id": get_attr(r'wall_id="([^"]+)"', line),
-                "center": get_list_attr(r'center=\[([^\]]+)\]', line),
-                "width": float(get_attr(r'width=([\d.]+)', line, "0")),
-                "height": float(get_attr(r'height=([\d.]+)', line, "0")),
-                "category": get_attr(r'category="([^"]+)"', line),
-                "mesh_id": get_attr(r'mesh_id="([^"]+)"', line)
-            })
-
-        # Window(...) - 同 Door 逻辑
-        elif line.startswith('Window('):
-            data["window"].append({
-                "id": get_attr(r'id="([^"]+)"', line),
-                "wall_id": get_attr(r'wall_id="([^"]+)"', line),
-                "center": get_list_attr(r'center=\[([^\]]+)\]', line),
-                "width": float(get_attr(r'width=([\d.]+)', line, "0")),
-                "height": float(get_attr(r'height=([\d.]+)', line, "0")),
-                "category": get_attr(r'category="([^"]+)"', line),
-                "mesh_id": get_attr(r'mesh_id="([^"]+)"', line)
-            })
-
-        # Bbox(id="...", mesh_id="...", center=[...], angle_z=..., scale=[...], caption="...", label="...")
-        elif line.startswith('Bbox('):
-            data["bbox"].append({
-                "id": get_attr(r'id="([^"]+)"', line),
-                "mesh_id": get_attr(r'mesh_id="([^"]+)"', line),
-                "center": get_list_attr(r'center=\[([^\]]+)\]', line),
-                "angle_z": float(get_attr(r'angle_z=([\d.-]+)', line, "0")),
-                "scale": get_list_attr(r'scale=\[([^\]]+)\]', line),
-                "caption": get_attr(r'caption="([^"]+)"', line),
-                "label": get_attr(r'label="([^"]+)"', line)
-            })
-
-    return data
-
-def render_ssl(ssl_text: str, backend: str = 'bpy', output_root: str = 'output_ssl', geometry_mode: str = 'mixed'):
+def render_ssl(
+    ssl_text: str, 
+    backend: str = 'bpy', 
+    output_root: str = 'output_ssl', 
+    image: Optional[str] = None, 
+    retrieve_hole: bool = True,
+    asset_mode: Literal["none", "retrieve", "generate"] = "none"
+):
     """
     主渲染函数
     Args:
         ssl_text: SSL文本
         backend: 'bpy' 或 'pyrender'
         output_root: 输出根目录
-        geometry_mode: 针对 bpy 后端的几何体加载模式
+        image: 可选的输入图片路径
+        retrieve_hole: 是否检索门窗的 mesh_id
+        asset_mode: 资产处理模式 ("none", "retrieve", "generate")
     """
-    print(f"\n🚀 开始渲染 [后端: {backend}]")
+    print(f"\n🚀 开始渲染 [后端: {backend}, 资产模式: {asset_mode}]")
     
     # 1. 解析为 JSON
     scene_json = parse_ssl_to_json(ssl_text)
     # print(scene_json)
-    room_id = scene_json["room"]["id"] or "unnamed"
-    room_type = scene_json["room"]["room_type"] or "default"
+    room_type = scene_json["room"]["room_type"]
     
-    # 2. 选择 Context
+    # 2. 资产处理
+    scene_json = get_mesh(
+        scene_json, 
+        image_path=image, 
+        retrieve_hole=retrieve_hole, 
+        asset_mode=asset_mode
+    )
+      
+
+    # 3. 选择 Context
     if backend == 'bpy':
         try:
             from .fast_scene_bpy import BpySceneCtx
@@ -159,7 +101,7 @@ def render_ssl(ssl_text: str, backend: str = 'bpy', output_root: str = 'output_s
             from fast_scene import SceneCtx
         ctx = SceneCtx(room_type)
 
-    # 3. 填充数据
+    # 4. 填充数据
     ctx.add_walls(scene_json["wall"])
     if scene_json["door"]: ctx.add_doors(scene_json["door"])
     if scene_json["window"]: ctx.add_windows(scene_json["window"])
@@ -169,12 +111,12 @@ def render_ssl(ssl_text: str, backend: str = 'bpy', output_root: str = 'output_s
     ctx.add_boxes(scene_json["bbox"])
 
 
-    # 4. 准备输出目录
+    # 5. 准备输出目录
     timestamp = int(time.time())
-    output_dir = os.path.join(os.path.dirname(__file__), output_root, f"{timestamp}_{room_id}")
+    output_dir = os.path.join(os.path.dirname(__file__), output_root, f"{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
-    # 5. 执行渲染 (俯视图 + 前视图)
+    # 6. 执行渲染 (俯视图 + 前视图)
     print("🎨 正在生成视图...")
     ctx.topdown_view(os.path.join(output_dir, "topdown.png"), show_ceiling=False)
     
@@ -201,4 +143,4 @@ def render_ssl(ssl_text: str, backend: str = 'bpy', output_root: str = 'output_s
 
 if __name__ == "__main__":
     # 示例运行
-    render_ssl(ssl_example, backend='bpy')
+    render_ssl(ssl_example)

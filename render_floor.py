@@ -25,13 +25,13 @@ def read_jsonl_line(file_path, line_number):
     
     raise ValueError(f"行号 {line_number} 超出文件范围")
 
-def render_floor(line_number, output_dir='/root/projects/react/output/floor', width=1024, height=1024):
+def render_floor(line_number, output_dir='/data-nas/data/experiments/mushui/projects/react/output/floor', width=1024, height=1024):
     print("=" * 60)
     print(f"🏠 渲染Layout场景 (第 {line_number} 行)")
     print("=" * 60)
 
     # 读取数据
-    jsonl_path = '/root/projects/utils/fast-scene/data-agent/spatial-layout.jsonl'
+    jsonl_path = '/data-nas/data/experiments/mushui/projects/utils/fast-scene/data-agent/spatial-layout.jsonl'
     print(f"\n📂 读取数据: {jsonl_path}")
     print(f"   行号: {line_number}")
 
@@ -89,5 +89,5 @@ if __name__ == "__main__":
     parser.add_argument('line_number', type=int, help='要渲染的行号（从0开始）')
 
     args = parser.parse_args()
-    render_floor(args.line_number, output_dir='/root/projects/utils/fast-scene/output')
+    render_floor(args.line_number, output_dir='/data-nas/data/experiments/mushui/projects/utils/fast-scene/output')
    

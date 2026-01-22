@@ -512,8 +512,8 @@ class SceneCtx:
         
         # 添加门窗
         if show_door or show_window:
-            door_texture_path = self.config.get("door_texture_path", "/root/projects/utils/fast-scene/gltf/door.png")
-            window_texture_path = self.config.get("window_texture_path", "/root/projects/utils/fast-scene/gltf/window.png")
+            door_texture_path = self.config.get("door_texture_path", "/data-nas/data/experiments/mushui/projects/utils/fast-scene/gltf/door.png")
+            window_texture_path = self.config.get("window_texture_path", "/data-nas/data/experiments/mushui/projects/utils/fast-scene/gltf/window.png")
             
             doors_and_windows = util.create_windows_and_doors(
                 self.context["walls"],
@@ -1408,7 +1408,7 @@ def read_jsonl_line(file_path, line_number):
 if __name__ == "__main__":
     """测试场景渲染"""
     line = 16
-    jsonl_path = '/root/projects/utils/fast-scene/data-agent/spatial-layout.jsonl'
+    jsonl_path = '/data-nas/data/experiments/mushui/projects/utils/fast-scene/data-agent/spatial-layout.jsonl'
     base_dir = os.path.join(os.path.dirname(__file__), '..')
     # example_path = os.path.join(base_dir, 'example.json')
     test_dir = os.path.join(base_dir, 'test')

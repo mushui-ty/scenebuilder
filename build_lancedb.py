@@ -103,11 +103,11 @@ def prepare_batch_with_images(inputs_batch: list, download_workers: int = 16) ->
 
 
 def build_asset_db(
-    mesh_info_path: str = "/root/datasets/manycore/mesh_info.json",
-    bgids_data_path: str = "/root/datasets/manycore/bgids_data.json",
+    mesh_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/mesh_info.json",
+    bgids_data_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/bgids_data.json",
     db_uri: str = "manycore",
     table_name: str = "furniture",
-    model_path: str = "/root/.cache/huggingface/hub/Qwen/Qwen3-VL-Embedding-2B",
+    model_path: str = "/data-nas/data/experiments/mushui/.cache/huggingface/hub/Qwen/Qwen3-VL-Embedding-2B",
     batch_size: int = 32,
     embedding_cache_path: str = "embeddings.pkl",
     download_workers: int = 16,  # 异步并发数（实测16为最优）
@@ -329,12 +329,80 @@ def build_asset_db(
     return table
 
 
+def build_hole_table(
+    window_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/window_info.json",
+    door_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/door_info.json",
+    db_uri: str = "manycore"
+):
+    """
+    构建 window 和 door 向量数据库表
+    """
+    print(f"\n[Hole] 开始构建 window 和 door 表...")
+    print(f"  - 数据库路径: {db_uri}")
+    
+    # 连接数据库
+    db = lancedb.connect(db_uri)
+    
+    configs = [
+        {"name": "window", "path": window_info_path},
+        {"name": "door", "path": door_info_path}
+    ]
+    
+    for config in configs:
+        table_name = config["name"]
+        file_path = config["path"]
+        
+        print(f"  - 正在处理 {table_name} 表, 文件: {file_path}")
+        
+        if not os.path.exists(file_path):
+            print(f"    警告: 文件 {file_path} 不存在，跳过")
+            continue
+            
+        with open(file_path, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+            
+        table_data = []
+        for mesh_id, info in raw_data.items():
+            # 提取信息并构建数据项
+            # vector 为 [width, height]
+            table_data.append({
+                "mesh_id": str(mesh_id),
+                "exist": info.get("exist", False),
+                "category": info.get("category", ""),
+                "vector": [float(info.get("width", 0.0)), float(info.get("height", 0.0))]
+            })
+            
+        if table_data:
+            db.create_table(table_name, data=table_data, mode="overwrite")
+            print(f"    ✓ {table_name} 表创建完成, 共 {len(table_data)} 条记录")
+        else:
+            print(f"    警告: {table_name} 数据为空，未创建表")
+
+
 if __name__ == "__main__":
     # 直接运行此文件时，执行构建
-    table = build_asset_db(batch_size=128, download_workers=12)
-    
-    # 测试查询
-    print("\n测试查询...")
+    # table = build_asset_db(batch_size=128, download_workers=12)
+    # db_uri = "manycore"
+    # table_name = "furniture"
+    # db = lancedb.connect(db_uri)
+    # table = db.open_table(table_name)
+    # # 测试查询
+    # print("\n测试查询...")
+    # query_vector = table.to_pandas()['vector'].iloc[0]
+    # result = table.search(query_vector).select(["mesh_id", "category_zh", "label"]).limit(3).to_polars()
+    # print(result)
+
+
+
+    # build_hole_table()
+    db_uri = "manycore"
+    db = lancedb.connect(db_uri)
+
+    table_name = "window"
+    table = db.open_table(table_name)
     query_vector = table.to_pandas()['vector'].iloc[0]
-    result = table.search(query_vector).select(["mesh_id", "category_zh", "label"]).limit(3).to_polars()
+    result = table.search(query_vector).where("exist = true").metric("l2").select(["mesh_id", "category", "exist", "vector"]).limit(3).to_polars()
     print(result)
+    best_mesh_id = result["mesh_id"].to_list()[0]
+    print("Best mesh_id:", best_mesh_id)
+    

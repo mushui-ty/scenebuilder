@@ -46,9 +46,9 @@ def parse_feature(feature_str):
 
 
 def build_database(
-    csv_path="/root/projects/utils/fast-scene/mesh-download/mesh_info.csv",
+    csv_path="/data-nas/data/experiments/mushui/projects/utils/fast-scene/mesh-download/mesh_info.csv",
     mesh_base_path="/data-nas/data/dataset/qunhe/Manycore-Future/processed",
-    output_path="/root/projects/utils/fast-scene/fast_scene/mesh_database.pkl",
+    output_path="/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/mesh_database.pkl",
     use_gpu=True
 ):
     """

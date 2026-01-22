@@ -222,5 +222,5 @@ def render_all_bboxes(json_path):
 
 if __name__ == '__main__':
     # 测试渲染
-    json_file = '/root/projects/utils/fast-scene/test_3dbbox.txt'
+    json_file = '/data-nas/data/experiments/mushui/projects/utils/fast-scene/test_3dbbox.txt'
     render_all_bboxes(json_file)
