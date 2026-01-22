@@ -133,9 +133,12 @@ ctx.render_view("side_view.png", camera_position=[6, 4, 2], look_at_target=[0, 0
 
 ---
 
-# 二. 检索模块
+# 二. 资产处理模块 (get_mesh)
 
-在执行 `render_ssl.py` 进行资产检索之前，必须先完成 LanceDB 向量数据库的构建。
+在 `render_ssl.py` 的执行流程中，系统首先从 SSL 文本中提取出场景 JSON。在将 JSON 传递给 Blender 渲染引擎之前，会调用 `get_mesh` 函数对资产进行处理（检索或生成）。
+
+- **默认行为**：`asset_mode` 默认设置为 `"none"`。在这种模式下，`get_mesh` 不会对 JSON 进行任何修改，直接返回包含原始占位方块信息的场景描述。
+- **检索前提**：若要执行检索逻辑，必须先完成 LanceDB 向量数据库的构建。
 
 ## 1. 数据库构建
 
