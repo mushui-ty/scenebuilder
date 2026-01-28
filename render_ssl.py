@@ -12,9 +12,9 @@ import numpy as np
 from typing import Dict, Any, List, Optional, Literal
 
 try:
-    from .util_data import parse_ssl_to_json, get_mesh
+    from .util_data import parse_ssl_to_json, get_mesh, update_ssl_with_mesh_id
 except (ImportError, ValueError):
-    from util_data import parse_ssl_to_json, get_mesh
+    from util_data import parse_ssl_to_json, get_mesh, update_ssl_with_mesh_id # type: ignore
 
 # 默认 SSL 示例
 ssl_example = '''
@@ -85,6 +85,9 @@ def render_ssl(
         retrieve_hole=retrieve_hole, 
         asset_mode=asset_mode
     )
+    
+    # 将更新后的 mesh_id 填回 SSL
+    updated_ssl = update_ssl_with_mesh_id(ssl_text, scene_json)
       
 
     # 3. 选择 Context
@@ -92,7 +95,7 @@ def render_ssl(
         try:
             from .fast_scene_bpy import BpySceneCtx
         except (ImportError, ValueError):
-            from fast_scene_bpy import BpySceneCtx
+            from fast_scene_bpy import BpySceneCtx # type: ignore
         ctx = BpySceneCtx(room_type)
     else:
         try:
@@ -136,10 +139,10 @@ def render_ssl(
     with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(scene_json, f, indent=2, ensure_ascii=False)
     with open(os.path.join(output_dir, "ssl.txt"), "w", encoding="utf-8") as f:
-        f.write(ssl_text)
+        f.write(updated_ssl)
 
     print(f"✅ 渲染完成！结果保存在: {os.path.abspath(output_dir)}")
-    return output_dir
+    return output_dir, updated_ssl
 
 if __name__ == "__main__":
     # 示例运行

@@ -311,7 +311,7 @@ def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_heigh
     box_obj = bpy.context.object
     box_obj.name = f"OpeningBox_{opening_type}"
     
-    # 分类讨论：窗户使用 2 倍厚度保证切透，门使用 1 倍厚度配合 0.9 偏移保证外侧不切透
+    # 分类：窗户使用 2 倍厚度保证切透，门使用 1 倍厚度配合 0.9 偏移保证外侧不切透
     if opening_type == "door":
         cutter_thickness = wall_thickness
     else:

@@ -105,11 +105,11 @@ def prepare_batch_with_images(inputs_batch: list, download_workers: int = 16) ->
 def build_asset_db(
     mesh_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/mesh_info.json",
     bgids_data_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/bgids_data.json",
-    db_uri: str = "manycore",
+    db_uri: str = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore",
     table_name: str = "furniture",
     model_path: str = "/data-nas/data/experiments/mushui/.cache/huggingface/hub/Qwen/Qwen3-VL-Embedding-2B",
     batch_size: int = 32,
-    embedding_cache_path: str = "embeddings.pkl",
+    embedding_cache_path: str = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/embeddings.pkl",
     download_workers: int = 16,  # 异步并发数（实测16为最优）
     torch_dtype=torch.bfloat16,
     attn_implementation: str = "flash_attention_2",

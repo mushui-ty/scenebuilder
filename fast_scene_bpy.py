@@ -222,6 +222,190 @@ class BpySceneCtx:
         """获取所有家具boxes"""
         return self.context["boxes"]
 
+    def export_wall_ssl(self, output_dir: str):
+        """
+        导出墙体SSL格式文件 (只包含 Room 和 Wall)
+        基于计算出的最小面积多边形的vertices
+        
+        Args:
+            output_dir: 输出目录路径
+        """
+        output_path = os.path.join(output_dir, 'wall_ssl.txt')
+        os.makedirs(output_dir, exist_ok=True)
+        
+        lines = []
+        
+        # 生成 room_id
+        room_id = util.generate_unique_id()
+        room_type = self.context["meta"]["scene_type"]
+        lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
+        
+        # 从计算出的vertices生成墙体
+        vertices = self.context["meta"]["vertices"]
+        height = self.context["meta"]["z_max"]  # 使用场景的最大高度
+        
+        # 将连续的顶点对转换为墙体
+        for i in range(len(vertices)):
+            wall_id = util.generate_unique_id()
+            # 当前顶点和下一个顶点（循环）
+            p = list(vertices[i]) + [0.0]  # 转换为3D坐标
+            q = list(vertices[(i + 1) % len(vertices)]) + [0.0]
+            lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
+        
+        # 写入文件
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        
+        print(f"✅ 墙体SSL已导出: {output_path} ({len(vertices)} 面墙)")
+        return output_path
+
+    def export_wall_hole_ssl(self, output_dir: str):
+        """
+        导出墙体和门窗SSL格式文件 (包含 Room, Wall, Door, Window)
+        基于计算出的最小面积多边形的vertices
+        
+        Args:
+            output_dir: 输出目录路径
+        """
+        output_path = os.path.join(output_dir, 'wall_hole_ssl.txt')
+        os.makedirs(output_dir, exist_ok=True)
+        
+        lines = []
+        
+        # 生成 room_id
+        room_id = util.generate_unique_id()
+        room_type = self.context["meta"]["scene_type"]
+        lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
+        
+        # 从计算出的vertices生成墙体，并记录wall_id和墙体几何信息的映射
+        vertices = self.context["meta"]["vertices"]
+        height = self.context["meta"]["z_max"]
+        
+        # 存储新墙体的ID和几何信息 [(wall_id, p, q), ...]
+        new_walls = []
+        for i in range(len(vertices)):
+            wall_id = util.generate_unique_id()
+            p = list(vertices[i]) + [0.0]
+            q = list(vertices[(i + 1) % len(vertices)]) + [0.0]
+            new_walls.append((wall_id, p, q))
+            lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
+        
+        # 收集所有门窗，并找到它们最接近的新墙体
+        doors = []
+        windows = []
+        
+        for wall_id, wall in self.context["walls"].items():
+            for door_id, door in wall.get("doors", {}).items():
+                doors.append((door_id, door))
+            for window_id, window in wall.get("windows", {}).items():
+                windows.append((window_id, window))
+        
+        # 为每个门找到最接近的新墙体并导出
+        for door_id, door in doors:
+            center = door["center"]
+            width = door["width"]
+            door_height = door["height"]
+            
+            # 找到最接近的新墙体
+            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
+            lines.append(f'Door(id="{door_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={door_height})')
+        
+        # 为每个窗找到最接近的新墙体并导出
+        for window_id, window in windows:
+            center = window["center"]
+            width = window["width"]
+            window_height = window["height"]
+            
+            # 找到最接近的新墙体
+            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
+            lines.append(f'Window(id="{window_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={window_height})')
+        
+        # 写入文件
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        
+        print(f"✅ 墙体和门窗SSL已导出: {output_path} ({len(vertices)} 面墙, {len(doors)} 个门, {len(windows)} 个窗)")
+        return output_path
+
+    def export_ssl(self, output_dir: str):
+        """
+        导出完整SSL格式文件 (包含 Room, Wall, Door, Window, Bbox)
+        基于计算出的最小面积多边形的vertices
+        
+        Args:
+            output_dir: 输出目录路径
+        """
+        output_path = os.path.join(output_dir, 'ssl.txt')
+        os.makedirs(output_dir, exist_ok=True)
+        
+        lines = []
+        
+        # 生成 room_id
+        room_id = util.generate_unique_id()
+        room_type = self.context["meta"]["scene_type"]
+        lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
+        
+        # 从计算出的vertices生成墙体
+        vertices = self.context["meta"]["vertices"]
+        height = self.context["meta"]["z_max"]
+        
+        new_walls = []
+        for i in range(len(vertices)):
+            wall_id = util.generate_unique_id()
+            p = list(vertices[i]) + [0.0]
+            q = list(vertices[(i + 1) % len(vertices)]) + [0.0]
+            new_walls.append((wall_id, p, q))
+            lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
+        
+        # 收集所有门窗
+        doors = []
+        windows = []
+        
+        for wall_id, wall in self.context["walls"].items():
+            for door_id, door in wall.get("doors", {}).items():
+                doors.append((door_id, door))
+            for window_id, window in wall.get("windows", {}).items():
+                windows.append((window_id, window))
+        
+        # 导出门
+        for door_id, door in doors:
+            center = door["center"]
+            width = door["width"]
+            door_height = door["height"]
+            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
+            lines.append(f'Door(id="{door_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={door_height})')
+        
+        # 导出窗
+        for window_id, window in windows:
+            center = window["center"]
+            width = window["width"]
+            window_height = window["height"]
+            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
+            lines.append(f'Window(id="{window_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={window_height})')
+        
+        # 导出所有家具
+        for box_id, box in self.context["boxes"].items():
+            label = box.get("label", box.get("class", "unknown"))
+            center = box["center"]
+            angle_z = box["angle_z"]
+            scale = box["scale"]
+            
+            # 构建 Bbox 行，包含 mesh_id（如果有的话）
+            bbox_str = f'Bbox(id="{box_id}", room_id="{room_id}", label="{label}", center={center}, angle_z={angle_z}, scale={scale}'
+            
+            if box.get("mesh_id") is not None:
+                bbox_str += f', mesh_id={box["mesh_id"]}'
+            
+            bbox_str += ')'
+            lines.append(bbox_str)
+        
+        # 写入文件
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+        
+        print(f"✅ 完整SSL已导出: {output_path} ({len(vertices)} 面墙, {len(doors)} 个门, {len(windows)} 个窗, {len(self.context['boxes'])} 个家具)")
+        return output_path
+
     # ==================== 纯 bpy 几何体创建（替代 util 中的 trimesh 函数）====================
     # helper functions now live in util_bpy
 
@@ -480,7 +664,7 @@ class BpySceneCtx:
                         }
                         success_count += 1
                         name = box.get('label', box.get('class', 'unknown'))
-                        print(f"  ✅ {name} 添加成功")
+                        print(f"  ✅ {name} (mesh_id={mesh_id}) 添加成功")
                         continue
                 
                 # 如果 gltf 加载失败，判断是否需要回退

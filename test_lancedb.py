@@ -2,7 +2,7 @@
 import lancedb
 
 
-db_uri = "manycore"
+db_uri = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore"
 
 table_name = "furniture"
 

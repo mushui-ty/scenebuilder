@@ -37,9 +37,8 @@ pip install numpy shapely scipy imageio yaml
 
 ### 安装到python 环境
   ```bash
-  pip install -e .
+  pip install -e . --config-settings editable_mode=strict
   ```
-  这样安装导入会报 Linting 错误, 但是可以正常运行
 
 ## 2. Quickstart
 
@@ -140,7 +139,9 @@ ctx.render_view("side_view.png", camera_position=[6, 4, 2], look_at_target=[0, 0
 - **默认行为**：`asset_mode` 默认设置为 `"none"`。在这种模式下，`get_mesh` 不会对 JSON 进行任何修改，直接返回包含原始占位方块信息的场景描述。
 - **检索前提**：若要执行检索逻辑，必须先完成 LanceDB 向量数据库的构建。
 
-## 1. 数据库构建
+## 检索分支
+
+### 1. 数据库构建
 
 运行以下脚本以构建检索所需的三个表（`door`, `window`, `furniture`）：
 
@@ -153,15 +154,15 @@ python build_lancedb.py
 - **构建耗时**：由于 `furniture` 表需要对全量资产计算 Embedding 向量，首次构建大约需要 **16 小时**（取决于 GPU 性能）。
 - **环境依赖**：确保已安装 `lancedb` 并在 `fast_scene/util_data.py` 中正确配置了 `Qwen3VLEmbedder` 的路径。
 
-## 2. 检索逻辑说明
+### 2. 检索逻辑说明
 
 系统会自动根据 `scene_json` 中的信息匹配最接近的 3D 资产：
 
-### A. 门与窗 (Holes)
+#### A. 门与窗 (Holes)
 - **匹配特征**：使用物体的 `width` 和 `height` 构造 2D 向量。
 - **检索度量**：使用 **L2 距离** 查找尺寸最接近的模型。
 
-### B. 家具 (Bboxes)
+#### B. 家具 (Bboxes)
 检索逻辑支持两种模式，均采用 **余弦相似度 (Cosine Similarity)** 进行匹配：
 
 1. **有图像输入 (retrieve 模式下提供 image_path)**:
@@ -173,7 +174,7 @@ python build_lancedb.py
 
 ---
 
-# 三. 生成模块 (generate)
+## 生成分支 (generate)
 
 当 `asset_mode="generate"` 时，系统将进入 3D 资产生成流程（目前为占位实现）：
 - **前置条件**：必须提供 `image_path`。

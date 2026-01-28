@@ -144,9 +144,11 @@ def get_mesh(
     if asset_mode == "generate":
         assert base_image is not None, "Image must be provided for generate mode"
         
-        # 按 asset_id 分组
+        # 按 asset_id 分组，只处理没有 mesh_id 的
         asset_groups = {}
         for bbox in scene_json.get("bbox", []):
+            if bbox.get("mesh_id"):
+                continue
             aid = bbox.get("asset_id")
             if aid:
                 if aid not in asset_groups:
@@ -154,6 +156,7 @@ def get_mesh(
                 asset_groups[aid].append(bbox)
         
         for aid, bboxes in asset_groups.items():
+            if not bboxes: continue
             # 取第一个 bbox 进行处理
             first_bbox = bboxes[0]
             bbox_2d = first_bbox.get("bbox_2d")
@@ -167,6 +170,7 @@ def get_mesh(
                 
                 # 生成 3D 资产
                 mesh_id = str(uuid.uuid4())[:8]
+                print(f"✨ 为 {first_bbox.get('label')} 生成新 mesh_id: {mesh_id} (asset_id: {aid})")
                 glb_path = generate_3d_mesh(processed_img, mesh_id)
                 
                 # 更新这一组所有 bbox 的 mesh_id
@@ -176,7 +180,7 @@ def get_mesh(
         return scene_json
 
     # 下面是 asset_mode == "retrieve" 的逻辑
-    db_uri = "manycore"
+    db_uri = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore"
     db = lancedb.connect(db_uri)
     
     # 1. 处理 hole (door/window)
@@ -191,6 +195,7 @@ def get_mesh(
                             result = table.search(query_vector).where("exist = true").metric("l2").limit(1).to_list()
                             if result:
                                 item["mesh_id"] = result[0]["mesh_id"]
+                                print(f"🔍 检索到 {hole_type} mesh_id: {item['mesh_id']} (width: {item.get('width')}, height: {item.get('height')})")
                 except Exception as e:
                     print(f"Error retrieving {hole_type}: {e}")
 
@@ -278,9 +283,65 @@ def get_mesh(
                     result = furniture_table.search(query_vector).where("exist = true").distance_type("cosine").limit(1).to_list()
                     if result:
                         mesh_id = result[0]["mesh_id"]
+                        first_bbox = groups_info[i][0]
+                        print(f"🔍 检索到 {first_bbox.get('label')} mesh_id: {mesh_id} (asset_id: {first_bbox.get('asset_id')})")
                         for b in groups_info[i]:
                             b["mesh_id"] = mesh_id
             except Exception as e:
                 print(f"Error processing batch embedding/search: {e}")
 
     return scene_json
+
+def update_ssl_with_mesh_id(ssl_text: str, scene_json: Dict[str, Any]) -> str:
+    """
+    将 scene_json 中的 mesh_id 填回原始 ssl_text 中
+    """
+    # 建立 (type, id) -> mesh_id 的映射
+    mesh_map = {}
+    for item in scene_json.get("door", []):
+        if item.get("id") and item.get("mesh_id"):
+            mesh_map[("Door", item["id"])] = item["mesh_id"]
+    for item in scene_json.get("window", []):
+        if item.get("id") and item.get("mesh_id"):
+            mesh_map[("Window", item["id"])] = item["mesh_id"]
+    for item in scene_json.get("bbox", []):
+        if item.get("id") and item.get("mesh_id"):
+            mesh_map[("Bbox", item["id"])] = item["mesh_id"]
+
+    new_lines = []
+    for line in ssl_text.splitlines():
+        trimmed_line = line.strip()
+        if not trimmed_line:
+            new_lines.append(line)
+            continue
+            
+        # 识别类型和 id
+        obj_type = None
+        for t in ["Door", "Window", "Bbox"]:
+            if trimmed_line.startswith(t + "("):
+                obj_type = t
+                break
+        
+        if obj_type:
+            id_match = re.search(r'id="([^"]+)"', trimmed_line)
+            if id_match:
+                obj_id = id_match.group(1)
+                mesh_id = mesh_map.get((obj_type, obj_id))
+                if mesh_id:
+                    # 更新或添加 mesh_id
+                    if 'mesh_id=' in trimmed_line:
+                        # 替换已有的 mesh_id
+                        line = re.sub(r'mesh_id="[^"]*"', f'mesh_id="{mesh_id}"', line)
+                    else:
+                        # 在最后一个 ')' 之前插入 mesh_id
+                        r_idx = line.rfind(')')
+                        if r_idx != -1:
+                            # 检查前面是否有参数，有的话加逗号
+                            prefix = line[:r_idx].strip()
+                            if prefix.endswith('('):
+                                line = line[:r_idx] + f'mesh_id="{mesh_id}"' + line[r_idx:]
+                            else:
+                                line = line[:r_idx] + f', mesh_id="{mesh_id}"' + line[r_idx:]
+        new_lines.append(line)
+    
+    return "\n".join(new_lines)
