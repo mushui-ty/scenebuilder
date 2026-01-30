@@ -48,7 +48,7 @@ class SceneCtx:
         }
     }
 
-    def __init__(self, scene_type: str):
+    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None):
         self.context = {
             "meta": {"scene_type": scene_type},
             "walls": {},
@@ -56,6 +56,7 @@ class SceneCtx:
         }
         self.scene = None
         self.if_set_lights = False
+        self.model_extra_path = model_extra_path
         
         # 保存所有节点引用，key为唯一ID
         self.mesh_nodes = {
@@ -515,10 +516,16 @@ class SceneCtx:
             door_texture_path = self.config.get("door_texture_path", "/data-nas/data/experiments/mushui/projects/utils/fast-scene/gltf/door.png")
             window_texture_path = self.config.get("window_texture_path", "/data-nas/data/experiments/mushui/projects/utils/fast-scene/gltf/window.png")
             
+            # 如果提供了 model_extra_path，也可以尝试从中加载（虽然当前util代码可能还需要适配，但先把配置传进去）
+            config_with_extra = self.config.copy()
+            if self.model_extra_path:
+                config_with_extra["model_extra_path"] = self.model_extra_path
+
             doors_and_windows = util.create_windows_and_doors(
                 self.context["walls"],
                 door_texture_path if show_door else None,
-                window_texture_path if show_window else None
+                window_texture_path if show_window else None,
+                config=config_with_extra
             )
             
             print(f"🚪 添加门窗 ({len(doors_and_windows)} 个)...")
@@ -653,7 +660,10 @@ class SceneCtx:
 
             # 统计加载时间
             load_start = time.perf_counter()
-            loaded = util.load_mesh(box["mesh_id"], self.config)
+            config_with_extra = self.config.copy()
+            if self.model_extra_path:
+                config_with_extra["model_extra_path"] = self.model_extra_path
+            loaded = util.load_mesh(box["mesh_id"], config_with_extra)
             load_time += time.perf_counter() - load_start
 
             if not loaded:

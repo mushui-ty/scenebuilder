@@ -59,7 +59,10 @@ def render_ssl(
     output_root: str = 'output_ssl', 
     image: Optional[str] = None, 
     retrieve_hole: bool = True,
-    asset_mode: Literal["none", "retrieve", "generate"] = "none"
+    asset_mode: Literal["none", "retrieve", "generate"] = "none",
+    outpaint_image_dir: Optional[str] = None,
+    gen_asset_dir: Optional[str] = "/data-nas/data/dataset/qunhe/Manycore-Future/generate",
+    gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro"
 ):
     """
     主渲染函数
@@ -70,7 +73,13 @@ def render_ssl(
         image: 可选的输入图片路径
         retrieve_hole: 是否检索门窗的 mesh_id
         asset_mode: 资产处理模式 ("none", "retrieve", "generate")
+        outpaint_image_dir: 扩图结果保存目录 (默认为 output_root)
+        gen_asset_dir: 生成资产保存目录 (默认为 output_root)
     """
+    if outpaint_image_dir is None:
+        outpaint_image_dir = output_root
+ 
+
     print(f"\n🚀 开始渲染 [后端: {backend}, 资产模式: {asset_mode}]")
     
     # 1. 解析为 JSON
@@ -83,7 +92,10 @@ def render_ssl(
         scene_json, 
         image_path=image, 
         retrieve_hole=retrieve_hole, 
-        asset_mode=asset_mode
+        asset_mode=asset_mode,
+        outpaint_image_dir=outpaint_image_dir,
+        gen_asset_dir=gen_asset_dir,
+        gen_3d_model=gen_3d_model
     )
     
     # 将更新后的 mesh_id 填回 SSL
@@ -96,13 +108,13 @@ def render_ssl(
             from .fast_scene_bpy import BpySceneCtx
         except (ImportError, ValueError):
             from fast_scene_bpy import BpySceneCtx # type: ignore
-        ctx = BpySceneCtx(room_type)
+        ctx = BpySceneCtx(room_type, gen_asset_dir)
     else:
         try:
             from .fast_scene import SceneCtx
         except (ImportError, ValueError):
             from fast_scene import SceneCtx
-        ctx = SceneCtx(room_type)
+        ctx = SceneCtx(room_type, gen_asset_dir)
 
     # 4. 填充数据
     ctx.add_walls(scene_json["wall"])
@@ -116,7 +128,7 @@ def render_ssl(
 
     # 5. 准备输出目录
     timestamp = int(time.time())
-    output_dir = os.path.join(os.path.dirname(__file__), output_root, f"{timestamp}")
+    output_dir = os.path.join(output_root, f"{timestamp}")
     os.makedirs(output_dir, exist_ok=True)
 
     # 6. 执行渲染 (俯视图 + 前视图)

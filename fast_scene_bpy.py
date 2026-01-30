@@ -41,7 +41,7 @@ class BpySceneCtx:
     """场景上下文管理器 - 纯 Blender 版本"""
     
     
-    def __init__(self, scene_type: str):
+    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None):
         # 与 fast_scene.py 完全一致的数据结构
         self.context = {
             "meta": {"scene_type": scene_type},
@@ -50,6 +50,7 @@ class BpySceneCtx:
         }
         self.scene = None
         self.if_set_lights = False
+        self.model_extra_path = model_extra_path
         
         # 保存所有对象引用（与 fast_scene.py 的 mesh_nodes 对应）
         self.mesh_nodes = {
@@ -501,7 +502,11 @@ class BpySceneCtx:
         if show_door or show_window:
             print(f"🚪 开始处理门窗 (按 mesh_id 加载)...")
             wall_thickness = self.config.get("wall_thickness", 0.1)
-            model_hole_path = self.config.get("model_hole_path")
+            
+            hole_paths = []
+            path_hole = self.config.get("model_hole_path")
+            if path_hole: hole_paths.append(path_hole)
+            if self.model_extra_path: hole_paths.append(self.model_extra_path)
 
             for wall_id, wall in self.context["walls"].items():
                 wall_s = np.array(wall["s"])
@@ -545,7 +550,7 @@ class BpySceneCtx:
                         }
 
                         # 仿照 bbox 添加逻辑
-                        mesh_root = util_bpy.load_mesh_to_origin(mesh_id, model_hole_path)
+                        mesh_root = util_bpy.load_mesh_to_origin(mesh_id, hole_paths)
                         if mesh_root:
                             try:
                                 success_transform = util_bpy.apply_box_transform(mesh_root, item_box_data)
@@ -621,6 +626,7 @@ class BpySceneCtx:
         path2 = self.config.get("model_generate_path")
         if path1: model_paths.append(path1)
         if path2: model_paths.append(path2)
+        if self.model_extra_path: model_paths.append(self.model_extra_path)
 
         for box_id, box in self.context["boxes"].items():
             mesh_id = box.get("mesh_id")

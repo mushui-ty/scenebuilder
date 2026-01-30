@@ -1504,21 +1504,30 @@ def load_mesh(mesh_id: int, config: Dict):
 
     参数:
         mesh_id: 模型ID
-        config: 配置字典，包含model_path
+        config: 配置字典，包含model_path和可选的model_extra_path
 
     返回:
         trimesh.Scene或trimesh.Trimesh对象，失败返回None
     """
-    glb_path = os.path.join(config["model_path"], f"{mesh_id}.glb")
-    gltf_path = os.path.join(config["model_path"], f"{mesh_id}.gltf")
+    search_paths = []
+    if "model_path" in config:
+        search_paths.append(config["model_path"])
+    if "model_generate_path" in config:
+        search_paths.append(config["model_generate_path"])
+    if "model_extra_path" in config:
+        search_paths.append(config["model_extra_path"])
 
-    # 按优先级尝试加载
-    for path in [glb_path, gltf_path]:
-        if os.path.exists(path):
-            try:
-                return trimesh.load(path)
-            except Exception:
-                continue
+    for base_path in search_paths:
+        glb_path = os.path.join(base_path, f"{mesh_id}.glb")
+        gltf_path = os.path.join(base_path, f"{mesh_id}.gltf")
+
+        # 按优先级尝试加载
+        for path in [glb_path, gltf_path]:
+            if os.path.exists(path):
+                try:
+                    return trimesh.load(path)
+                except Exception:
+                    continue
 
     return None
 
@@ -1636,7 +1645,7 @@ def create_door_or_window_mesh(center: List[float], width: float, height: float,
 
 
 def create_windows_and_doors(walls_data: Dict, door_texture_path: str, 
-                             window_texture_path: str) -> List[Dict]:
+                             window_texture_path: str, config: Dict = None) -> List[Dict]:
     """
     为所有墙体上的门窗创建mesh
     
@@ -1644,6 +1653,7 @@ def create_windows_and_doors(walls_data: Dict, door_texture_path: str,
         walls_data: 墙体数据字典 {wall_id: {s, e, height, orientation, doors: {}, windows: {}}}
         door_texture_path: 门的贴图路径
         window_texture_path: 窗的贴图路径
+        config: 配置字典（可选）
         
     返回:
         门窗mesh列表 [{type: 'door'/'window', id: xxx, mesh: trimesh}]
