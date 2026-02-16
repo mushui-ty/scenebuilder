@@ -35,7 +35,7 @@ def read_jsonl_line(file_path, line_number):
 
 def check_and_retrieve_mesh(box_data, config):
     """
-    检查mesh文件是否存在，如果不存在则使用retrieve获取新的mesh_id
+    检查mesh文件是否存在，如果不存在则使用retrieve获取新的asset_id
     
     Args:
         box_data: bbox数据字典
@@ -44,24 +44,24 @@ def check_and_retrieve_mesh(box_data, config):
     Returns:
         bool: 是否成功（文件存在或retrieve成功）
     """
-    mesh_id = box_data.get('mesh_id')
+    asset_id = box_data.get('asset_id')
     
-    if not mesh_id:
-        print(f"   ⚠️  {box_data.get('label', 'unknown')}: 缺少mesh_id")
+    if not asset_id:
+        print(f"   ⚠️  {box_data.get('label', 'unknown')}: 缺少asset_id")
         return False
     
     # 检查mesh文件是否存在
     model_path = config.get('model_path', '')
-    glb_path = os.path.join(model_path, f"{mesh_id}.glb")
-    gltf_path = os.path.join(model_path, f"{mesh_id}.gltf")
+    glb_path = os.path.join(model_path, f"{asset_id}.glb")
+    gltf_path = os.path.join(model_path, f"{asset_id}.gltf")
     
     if os.path.exists(glb_path) or os.path.exists(gltf_path):
         format_type = 'GLB' if os.path.exists(glb_path) else 'GLTF'
-        print(f"   ✅ {box_data.get('label', 'unknown')} (mesh_id={mesh_id}): {format_type}文件存在")
+        print(f"   ✅ {box_data.get('label', 'unknown')} (asset_id={asset_id}): {format_type}文件存在")
         return True
     
     # 文件不存在，使用retrieve
-    print(f"   ⚠️  {box_data.get('label', 'unknown')} (mesh_id={mesh_id}): 文件不存在，开始retrieve...")
+    print(f"   ⚠️  {box_data.get('label', 'unknown')} (asset_id={asset_id}): 文件不存在，开始retrieve...")
     
     try:
         # 使用label和caption进行retrieve
@@ -74,16 +74,16 @@ def check_and_retrieve_mesh(box_data, config):
             return False
         
         # 使用label作为class_name，caption作为描述，size用于精确匹配
-        new_mesh_id = retrieve(
+        new_asset_id = retrieve(
             class_name=label,
             caption=caption if caption else "",
             size=scale,
             k=5  # 在前5个相似结果中选择size最接近的
         )
         
-        # 更新mesh_id
-        box_data['mesh_id'] = new_mesh_id
-        print(f"      ✅ Retrieve成功: 新mesh_id={new_mesh_id}")
+        # 更新asset_id
+        box_data['asset_id'] = new_asset_id
+        print(f"      ✅ Retrieve成功: 新asset_id={new_asset_id}")
         return True
         
     except Exception as e:
@@ -404,9 +404,9 @@ def generate_ssl_format(data, ctx):
         angle_z = box['angle_z']
         scale = box['scale']
         label = box.get('label', 'unknown')
-        mesh_id = box.get('mesh_id')
-        if mesh_id:
-            lines.append(f'Bbox(id="{box_id}", room_id="{room_id}", mesh_id="{mesh_id}", label="{label}", center=[{center[0]}, {center[1]}, {center[2]}], angle_z={angle_z}, scale=[{scale[0]}, {scale[1]}, {scale[2]}])')
+        asset_id = box.get('asset_id')
+        if asset_id:
+            lines.append(f'Bbox(id="{box_id}", room_id="{room_id}", asset_id="{asset_id}", label="{label}", center=[{center[0]}, {center[1]}, {center[2]}], angle_z={angle_z}, scale=[{scale[0]}, {scale[1]}, {scale[2]}])')
         else:
             lines.append(f'Bbox(id="{box_id}", room_id="{room_id}", label="{label}", center=[{center[0]}, {center[1]}, {center[2]}], angle_z={angle_z}, scale=[{scale[0]}, {scale[1]}, {scale[2]}])')
     

@@ -166,7 +166,7 @@ python build_lancedb.py
 检索逻辑支持两种模式，均采用 **余弦相似度 (Cosine Similarity)** 进行匹配：
 
 1. **有图像输入 (retrieve 模式下提供 image_path)**:
-   - **资产分组**：根据 `asset_id` 属性进行分组，确保同一资产在场景中多次出现时只计算一次并共享结果。
+   - **资产分组**：根据 `mesh_id` 属性进行分组，确保同一资产在场景中多次出现时只计算一次并共享结果。
    - **多模态 Embedding**：对图像进行 `bbox_2d` 裁剪，结合 `label` 和 `caption` 构造多模态输入，调用 Qwen3-VL-Embedding 模型进行 Batch 计算。
 2. **无图像输入**:
    - **文本检索**：仅根据 `label`（必须提供）和 `caption`（可选）构造文本 Prompt 进行检索。
@@ -179,8 +179,8 @@ python build_lancedb.py
 当 `asset_mode="generate"` 时，系统将进入 3D 资产生成流程（目前为占位实现）：
 - **前置条件**：必须提供 `image_path`。
 - **处理流程**：
-  1. 按 `asset_id` 对物体分组。
+  1. 按 `mesh_id` 对物体分组。
   2. 对每组首个物体进行图像裁剪。
   3. 执行图像补全与超分辨率处理。
   4. 调用 3D 生成工具生成 `.glb` 模型。
-- **存储路径**：生成的模型将以 8 位 UUID 命名，存储在 `/data-nas/data/dataset/qunhe/Manycore-Future/generate/` 目录下。
+- **存储路径**：生成的模型将以 `asset_id`（如 001_timestamp）命名，存储在 `/data-nas/data/dataset/qunhe/Manycore-Future/generate/` 目录下。

@@ -150,7 +150,7 @@ class MeshRetriever:
         only_valid: bool = True
     ) -> int:
         """
-        检索mesh_id
+        检索asset_id
         
         Args:
             class_name: 家具类别（支持中英文）
@@ -158,10 +158,10 @@ class MeshRetriever:
             size: 期望的尺寸 [x, y, z]（可选）
             k: 返回前k个相似结果中size最接近的（仅normal模式有caption时）
             random: 是否使用随机模式
-            only_valid: 是否只在有效mesh中筛选（mesh文件存在）
+            only_valid: 是否只在有效mesh中筛选（模型文件存在）
             
         Returns:
-            mesh_id (brandgood_id)
+            asset_id (brandgood_id)
         """
         # ========== 阶段选择：新三阶段逻辑 ==========
         candidate_indices = None
@@ -206,7 +206,7 @@ class MeshRetriever:
             
             random_idx = random_module.choice(candidate_indices)
             mesh_id = self.mesh_ids[random_idx]
-            print(f"Random模式: 返回 mesh_id={mesh_id}")
+            print(f"Random模式: 返回 asset_id={mesh_id}")
             return int(mesh_id)
         
         # 2.2 Normal模式 - 情况1：没有caption也没有size -> 随机返回（保持原行为）
@@ -219,7 +219,7 @@ class MeshRetriever:
             
             random_idx = random_module.choice(candidate_indices)
             mesh_id = self.mesh_ids[random_idx]
-            print(f"无caption无size: 随机返回 mesh_id={mesh_id}")
+            print(f"无caption无size: 随机返回 asset_id={mesh_id}")
             return int(mesh_id)
         
         # 2.3 Normal模式 - 情况2：只有size没有caption -> 直接size匹配
@@ -245,7 +245,7 @@ class MeshRetriever:
                     best_idx = idx
             
             mesh_id = self.mesh_ids[best_idx]
-            print(f"只有size: 返回size最接近的 mesh_id={mesh_id} (距离={min_dist:.4f})")
+            print(f"只有size: 返回size最接近的 asset_id={mesh_id} (距离={min_dist:.4f})")
             return int(mesh_id)
         
         # 2.4 Normal模式 - 情况3：有caption -> 在候选集中用CLIP相似度匹配（无阈值），然后按size择优
@@ -283,7 +283,7 @@ class MeshRetriever:
         if size is None or k == 1:
             best_idx = top_k_indices[0]
             mesh_id = self.mesh_ids[best_idx]
-            print(f"返回相似度最高的 mesh_id={mesh_id}")
+            print(f"返回相似度最高的 asset_id={mesh_id}")
             return int(mesh_id)
         
         # 2.6 从top_k中选择size最接近的
@@ -299,26 +299,26 @@ class MeshRetriever:
                 best_idx = idx
         
         mesh_id = self.mesh_ids[best_idx]
-        print(f"返回CLIP+size最佳匹配 mesh_id={mesh_id} (距离={min_dist:.4f})")
+        print(f"返回CLIP+size最佳匹配 asset_id={mesh_id} (距离={min_dist:.4f})")
         return int(mesh_id)
     
-    def get_mesh_info(self, mesh_id: int) -> Dict:
+    def get_mesh_info(self, asset_id: int) -> Dict:
         """
-        获取mesh的详细信息
+        获取资产的详细信息
         
         Args:
-            mesh_id: mesh_id
+            asset_id: asset_id
             
         Returns:
             mesh信息字典
         """
-        idx = np.where(self.mesh_ids == mesh_id)[0]
+        idx = np.where(self.mesh_ids == asset_id)[0]
         if len(idx) == 0:
             return None
         
         idx = idx[0]
         return {
-            "mesh_id": int(self.mesh_ids[idx]),
+            "asset_id": int(self.mesh_ids[idx]),
             "class": self.classes_list[idx],
             "size": self.sizes[idx].tolist(),
             "valid": bool(self.valid_mask[idx]),

@@ -90,7 +90,7 @@ class BpySceneCtx:
         for device in prefs.get_devices_for_type('CUDA'):
             device.use = True
         
-        self.scene.cycles.samples = 32
+        self.scene.cycles.samples = self.config.get("blender_samples", 32)
         self.scene.cycles.use_denoising = True
         self.scene.cycles.denoiser = 'OPENIMAGEDENOISE'
         
@@ -125,10 +125,19 @@ class BpySceneCtx:
     # ==================== 数据管理函数（与 fast_scene.py 完全一致）====================
     def add_walls(self, walls: List[Dict[str, Any]]):
         """添加墙体并计算场景元数据"""
+        # walls_converted: [{"s": [x1, y1], "e": [x2, y2], "height": h}, ...] 统一后的墙体列表格式
         walls_converted = [{"s": w["p"][:2], "e": w["q"][:2], "height": w["height"]} for w in walls]
+        
+        # 端点吸附功能，默认开启，阈值为0.3m
+        do_snap = True
+        if do_snap:
+            walls_converted = util.snap_wall_endpoints(walls_converted, threshold=0.3)
+
         all_points = [p for w in walls_converted for p in [w["s"], w["e"]]]
         x_coords, y_coords = zip(*all_points)
-        vertices = util.calculate_minimum_area_polygon(walls_converted)
+        # vertices: [(x1, y1), (x2, y2), ...] 多边形外边界顶点序列
+        # partitions: [(xs, ys, xe, ye, height), ...] 内部隔断墙线段序列（含高度）
+        vertices, partitions = util.calculate_minimum_area_polygon_and_partitions(walls_converted)
         
         self.context["meta"].update({
             "bounds": [min(x_coords), min(y_coords), max(x_coords), max(y_coords)],
@@ -138,24 +147,71 @@ class BpySceneCtx:
             "vertices": vertices
         })
         
-        print(f"📐 输入墙体数量: {len(walls_converted)}")
-        print(f"📐 计算得到的顶点数量: {len(vertices)}")
-        
-        for wall in walls_converted:
+        print(f"📐 输入原始墙体数量: {len(walls_converted)}")
+        print(f"📐 边界墙段数量: {len(vertices)}")
+        print(f"📐 内部隔断墙数量: {len(partitions)}")
+
+        # 1. 添加边界墙 (Boundary Walls)
+        # 边界墙由 vertices 闭合环路构成，确保地板和墙基完美重合
+        for i in range(len(vertices)):
+            v_s = vertices[i]
+            v_e = vertices[(i + 1) % len(vertices)]
+            
+            # 查找该段边界墙对应的原始高度
+            # 优先匹配覆盖该线段的原始墙体，若无匹配（如桥接线）则取邻近墙体高度
+            height = None
+            for w in walls_converted:
+                if util.is_wall_on_edge(w, v_s, v_e):
+                    height = w["height"]
+                    break
+            if height is None:
+                # 容错：取所有原始墙体中的最大高度作为默认值
+                height = max(w["height"] for w in walls_converted)
+
             wall_id = util.generate_unique_id()
             self.context["walls"][wall_id] = {
-                **wall,
-                "orientation": util.calculate_wall_orientation(wall["s"], wall["e"], self.context["meta"]["vertices"]),
+                "s": list(v_s),
+                "e": list(v_e),
+                "height": height,
+                # 边界墙需要计算朝向（指向房间内部），用于后续单向厚度偏移
+                "orientation": util.calculate_wall_orientation(v_s, v_e, vertices),
+                "is_partition": False,
                 "doors": {},
                 "windows": {}
             }
 
+        # 2. 添加内部隔断墙 (Partition Walls)
+        # 隔断墙不属于外部轮廓，通常两侧都在房间内
+        for p in partitions:
+            wall_id = util.generate_unique_id()
+            self.context["walls"][wall_id] = {
+                "s": [p[0], p[1]],
+                "e": [p[2], p[3]],
+                "height": p[4],
+                # 隔断墙不需要朝向，后续渲染时应以中心线为基准向两侧平分厚度
+                "orientation": (0.0, 0.0),
+                "is_partition": True,
+                "doors": {},
+                "windows": {}
+            }
+
+    def add_wall(self, s: List[float], e: List[float], height: float):
+        """添加单面墙体"""
+        # 转换现有墙体为输入格式，并加入新墙体
+        current_walls = [{"p": w["s"] + [0], "q": w["e"] + [0], "height": w["height"]}
+                        for w in self.context["walls"].values()]
+        current_walls.append({"p": s[:2] + [0], "q": e[:2] + [0], "height": height})
+        
+        # 清空当前状态并重新批量添加（以触发重新分类和吸附逻辑）
+        self.context["walls"] = {}
+        self.add_walls(current_walls)
+
     def add_doors(self, doors: List[Dict[str, Any]]):
         """批量添加门"""
         for door in doors:
-            self.add_door(door["center"], door["width"], door["height"], door.get("mesh_id"))
+            self.add_door(door["center"], door["width"], door["height"], door.get("asset_id"))
 
-    def add_door(self, center: List[float], width: float, height: float, mesh_id: Optional[int] = None):
+    def add_door(self, center: List[float], width: float, height: float, asset_id: Optional[int] = None):
         """添加单个门"""
         wall_id = util.find_closest_wall(center, self.context["walls"])
         if wall_id:
@@ -166,16 +222,16 @@ class BpySceneCtx:
                 "width": width,
                 "height": height
             }
-            if mesh_id:
-                door_data["mesh_id"] = mesh_id
+            if asset_id:
+                door_data["asset_id"] = asset_id
             self.context["walls"][wall_id]["doors"][door_id] = door_data
 
     def add_windows(self, windows: List[Dict[str, Any]]):
         """批量添加窗"""
         for window in windows:
-            self.add_window(window["center"], window["width"], window["height"], window.get("mesh_id"))
+            self.add_window(window["center"], window["width"], window["height"], window.get("asset_id"))
 
-    def add_window(self, center: List[float], width: float, height: float, mesh_id: Optional[int] = None):
+    def add_window(self, center: List[float], width: float, height: float, asset_id: Optional[int] = None):
         """添加单个窗"""
         wall_id = util.find_closest_wall(center, self.context["walls"])
         if wall_id:
@@ -186,26 +242,26 @@ class BpySceneCtx:
                 "width": width,
                 "height": height
             }
-            if mesh_id:
-                window_data["mesh_id"] = mesh_id
+            if asset_id:
+                window_data["asset_id"] = asset_id
             self.context["walls"][wall_id]["windows"][window_id] = window_data
 
     def add_boxes(self, boxes: List[Dict[str, Any]]):
         """批量添加家具"""
         for box in boxes:
             self.add_box(box["center"], box["angle_z"], box["scale"],
-                        box.get("label"), box.get("caption"), box.get("mesh_id"))
+                        box.get("label"), box.get("caption"), box.get("asset_id"))
 
     def add_box(self, center: List[float], angle_z: float, scale: List[float],
                 label: Optional[str] = None, caption: Optional[str] = None, 
-                mesh_id: Optional[int] = None) -> str:
+                asset_id: Optional[int] = None) -> str:
         """添加单个家具，返回ID"""
         box_id = util.generate_unique_id()
         box_data = {"center": center, "angle_z": angle_z, "scale": scale}
 
         if label: box_data["label"] = label
         if caption: box_data["caption"] = caption
-        if mesh_id: box_data["mesh_id"] = mesh_id
+        if asset_id: box_data["asset_id"] = asset_id
 
         self.context["boxes"][box_id] = box_data
 
@@ -215,6 +271,39 @@ class BpySceneCtx:
 
         return box_id
 
+    def delete_box(self, box_id: str):
+        """删除家具，并从 Blender 场景中移除对应物体"""
+        if box_id not in self.context["boxes"]:
+            print(f"⚠️  未找到 Box ID: {box_id}，无法删除")
+            return
+
+        # 1. 如果该物体已经渲染，则在 Blender 中物理删除
+        if box_id in self.mesh_nodes["boxes"]:
+            box_info = self.mesh_nodes["boxes"][box_id]
+            node = box_info.get("node")
+            if node:
+                # 递归删除对象及其所有子对象（对于 import 的 gltf 根节点）
+                objs_to_remove = [node] + list(node.children_recursive)
+                for obj in objs_to_remove:
+                    try:
+                        bpy.data.objects.remove(obj, do_unlink=True)
+                    except (ReferenceError, AttributeError):
+                        pass
+            del self.mesh_nodes["boxes"][box_id]
+
+        # 2. 从 context 中移除
+        del self.context["boxes"][box_id]
+
+        # 3. 重新计算 z_max
+        wall_max = max((w["height"] for w in self.context["walls"].values()), default=0)
+        box_max = 0
+        for box in self.context["boxes"].values():
+            box_top = box["center"][2] + box["scale"][2] / 2
+            box_max = max(box_max, box_top)
+        self.context["meta"]["z_max"] = max(wall_max, box_max)
+        
+        print(f"🗑️  家具 {box_id[:4]} 已删除")
+
     def get_context(self) -> Dict:
         """获取场景上下文"""
         return self.context
@@ -223,13 +312,37 @@ class BpySceneCtx:
         """获取所有家具boxes"""
         return self.context["boxes"]
 
+    def set_wall_blender_texture_path(self, path: str):
+        """设置墙体纹理路径"""
+        self.config["wall_blender_texture_path"] = path
+        print(f"📝 墙体纹理路径已更新: {path}")
+
+    def set_floor_blender_texture_path(self, path: str):
+        """设置地板纹理路径"""
+        self.config["floor_blender_texture_path"] = path
+        print(f"📝 地板纹理路径已更新: {path}")
+
+    def set_ceiling_blender_texture_path(self, path: str):
+        """设置天花板纹理路径"""
+        self.config["ceiling_blender_texture_path"] = path
+        print(f"📝 天花板纹理路径已更新: {path}")
+
+    def set_hdri_path(self, path: str):
+        """设置 HDRI 环境贴图路径"""
+        self.config["hdri_path"] = path
+        print(f"📝 HDRI 路径已更新: {path}")
+
+    def set_blender_samples(self, samples: int):
+        """设置 Blender 渲染采样数"""
+        self.config["blender_samples"] = samples
+        if self.scene and hasattr(self.scene, "cycles"):
+            self.scene.cycles.samples = samples
+        print(f"📝 Blender 渲染采样数已更新: {samples}")
+
     def export_wall_ssl(self, output_dir: str):
         """
-        导出墙体SSL格式文件 (只包含 Room 和 Wall)
-        基于计算出的最小面积多边形的vertices
-        
-        Args:
-            output_dir: 输出目录路径
+        导出墙体SSL格式文件 (包含 Room 和所有 Wall)
+        包含边界墙和内部隔断墙
         """
         output_path = os.path.join(output_dir, 'wall_ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
@@ -241,32 +354,25 @@ class BpySceneCtx:
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 从计算出的vertices生成墙体
-        vertices = self.context["meta"]["vertices"]
-        height = self.context["meta"]["z_max"]  # 使用场景的最大高度
-        
-        # 将连续的顶点对转换为墙体
-        for i in range(len(vertices)):
-            wall_id = util.generate_unique_id()
-            # 当前顶点和下一个顶点（循环）
-            p = list(vertices[i]) + [0.0]  # 转换为3D坐标
-            q = list(vertices[(i + 1) % len(vertices)]) + [0.0]
+        # 直接从 context["walls"] 导出所有墙体（包括边界和隔断）
+        all_walls = self.context["walls"]
+        for wall_id, wall in all_walls.items():
+            p = list(wall["s"]) + [0.0]
+            q = list(wall["e"]) + [0.0]
+            height = wall["height"]
             lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
         
         # 写入文件
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 墙体SSL已导出: {output_path} ({len(vertices)} 面墙)")
+        print(f"✅ 墙体SSL已导出: {output_path} ({len(all_walls)} 面墙)")
         return output_path
 
     def export_wall_hole_ssl(self, output_dir: str):
         """
         导出墙体和门窗SSL格式文件 (包含 Room, Wall, Door, Window)
-        基于计算出的最小面积多边形的vertices
-        
-        Args:
-            output_dir: 输出目录路径
+        包含边界墙和内部隔断墙
         """
         output_path = os.path.join(output_dir, 'wall_hole_ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
@@ -278,63 +384,31 @@ class BpySceneCtx:
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 从计算出的vertices生成墙体，并记录wall_id和墙体几何信息的映射
-        vertices = self.context["meta"]["vertices"]
-        height = self.context["meta"]["z_max"]
-        
-        # 存储新墙体的ID和几何信息 [(wall_id, p, q), ...]
-        new_walls = []
-        for i in range(len(vertices)):
-            wall_id = util.generate_unique_id()
-            p = list(vertices[i]) + [0.0]
-            q = list(vertices[(i + 1) % len(vertices)]) + [0.0]
-            new_walls.append((wall_id, p, q))
-            lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
-        
-        # 收集所有门窗，并找到它们最接近的新墙体
-        doors = []
-        windows = []
-        
+        # 遍历所有墙体及其携带的门窗
         for wall_id, wall in self.context["walls"].items():
+            p = list(wall["s"]) + [0.0]
+            q = list(wall["e"]) + [0.0]
+            height = wall["height"]
+            lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
+            
+            # 导出该墙体上的门
             for door_id, door in wall.get("doors", {}).items():
-                doors.append((door_id, door))
+                lines.append(f'Door(id="{door_id}", wall_id="{wall_id}", center={door["center"]}, width={door["width"]}, height={door["height"]})')
+            
+            # 导出该墙体上的窗
             for window_id, window in wall.get("windows", {}).items():
-                windows.append((window_id, window))
-        
-        # 为每个门找到最接近的新墙体并导出
-        for door_id, door in doors:
-            center = door["center"]
-            width = door["width"]
-            door_height = door["height"]
-            
-            # 找到最接近的新墙体
-            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
-            lines.append(f'Door(id="{door_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={door_height})')
-        
-        # 为每个窗找到最接近的新墙体并导出
-        for window_id, window in windows:
-            center = window["center"]
-            width = window["width"]
-            window_height = window["height"]
-            
-            # 找到最接近的新墙体
-            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
-            lines.append(f'Window(id="{window_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={window_height})')
+                lines.append(f'Window(id="{window_id}", wall_id="{wall_id}", center={window["center"]}, width={window["width"]}, height={window["height"]})')
         
         # 写入文件
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 墙体和门窗SSL已导出: {output_path} ({len(vertices)} 面墙, {len(doors)} 个门, {len(windows)} 个窗)")
+        print(f"✅ 墙体和门窗SSL已导出: {output_path}")
         return output_path
 
     def export_ssl(self, output_dir: str):
         """
         导出完整SSL格式文件 (包含 Room, Wall, Door, Window, Bbox)
-        基于计算出的最小面积多边形的vertices
-        
-        Args:
-            output_dir: 输出目录路径
         """
         output_path = os.path.join(output_dir, 'ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
@@ -346,57 +420,29 @@ class BpySceneCtx:
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 从计算出的vertices生成墙体
-        vertices = self.context["meta"]["vertices"]
-        height = self.context["meta"]["z_max"]
-        
-        new_walls = []
-        for i in range(len(vertices)):
-            wall_id = util.generate_unique_id()
-            p = list(vertices[i]) + [0.0]
-            q = list(vertices[(i + 1) % len(vertices)]) + [0.0]
-            new_walls.append((wall_id, p, q))
-            lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
-        
-        # 收集所有门窗
-        doors = []
-        windows = []
-        
+        # 导出所有墙体及门窗
         for wall_id, wall in self.context["walls"].items():
+            p = list(wall["s"]) + [0.0]
+            q = list(wall["e"]) + [0.0]
+            height = wall["height"]
+            lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
+            
             for door_id, door in wall.get("doors", {}).items():
-                doors.append((door_id, door))
+                lines.append(f'Door(id="{door_id}", wall_id="{wall_id}", center={door["center"]}, width={door["width"]}, height={door["height"]})')
+            
             for window_id, window in wall.get("windows", {}).items():
-                windows.append((window_id, window))
+                lines.append(f'Window(id="{window_id}", wall_id="{wall_id}", center={window["center"]}, width={window["width"]}, height={window["height"]})')
         
-        # 导出门
-        for door_id, door in doors:
-            center = door["center"]
-            width = door["width"]
-            door_height = door["height"]
-            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
-            lines.append(f'Door(id="{door_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={door_height})')
-        
-        # 导出窗
-        for window_id, window in windows:
-            center = window["center"]
-            width = window["width"]
-            window_height = window["height"]
-            closest_wall_id = util.find_closest_wall_from_list(center, new_walls)
-            lines.append(f'Window(id="{window_id}", wall_id="{closest_wall_id}", center={center}, width={width}, height={window_height})')
-        
-        # 导出所有家具
+        # 导出所有家具 (Bbox)
         for box_id, box in self.context["boxes"].items():
             label = box.get("label", box.get("class", "unknown"))
             center = box["center"]
             angle_z = box["angle_z"]
             scale = box["scale"]
             
-            # 构建 Bbox 行，包含 mesh_id（如果有的话）
             bbox_str = f'Bbox(id="{box_id}", room_id="{room_id}", label="{label}", center={center}, angle_z={angle_z}, scale={scale}'
-            
-            if box.get("mesh_id") is not None:
-                bbox_str += f', mesh_id={box["mesh_id"]}'
-            
+            if box.get("asset_id") is not None:
+                bbox_str += f', asset_id={box["asset_id"]}'
             bbox_str += ')'
             lines.append(bbox_str)
         
@@ -404,7 +450,7 @@ class BpySceneCtx:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 完整SSL已导出: {output_path} ({len(vertices)} 面墙, {len(doors)} 个门, {len(windows)} 个窗, {len(self.context['boxes'])} 个家具)")
+        print(f"✅ 完整SSL已导出: {output_path}")
         return output_path
 
     # ==================== 纯 bpy 几何体创建（替代 util 中的 trimesh 函数）====================
@@ -453,8 +499,13 @@ class BpySceneCtx:
             # --- 预计算 Miter Joint (斜接) 偏移 ---
             wall_outer_points = util_bpy.calculate_miter_joints(self.context["walls"], wall_thickness)
 
+            # --- 收集所有生成的墙体对象，用于后续布尔合并 ---
+            all_wall_objs = []
+
             for wall_id, wall in self.context["walls"].items():
-                # 收集门窗信息 (携带类型)
+                is_partition = wall.get("is_partition", False)
+                
+                # 收集门窗信息
                 openings = []
                 for door in wall.get("doors", {}).values():
                     openings.append((door, "door"))
@@ -464,10 +515,22 @@ class BpySceneCtx:
                 # 获取预计算的偏移点
                 outer_s, outer_e = wall_outer_points.get(wall_id, (None, None))
 
-                # 墙体高度：对齐或使用原始高度
+                # 墙体高度
                 wall_h = z_max if align_height else wall["height"]
 
-                # 创建墙体mesh（带门窗挖洞）
+                # 对于隔断墙，检查端点是否连接在其他墙上，决定是否延长
+                extend_s, extend_e = False, False
+                if is_partition:
+                    s_pt = tuple(wall["s"])
+                    e_pt = tuple(wall["e"])
+                    for other_id, other_wall in self.context["walls"].items():
+                        if other_id == wall_id: continue
+                        if util.point_on_segment(s_pt, tuple(other_wall["s"]), tuple(other_wall["e"])):
+                            extend_s = True
+                        if util.point_on_segment(e_pt, tuple(other_wall["s"]), tuple(other_wall["e"])):
+                            extend_e = True
+
+                # 创建墙体mesh
                 wall_obj = util_bpy.create_single_wall_mesh_bpy(
                     self.scene_collection,
                     wall["s"], wall["e"], wall_h, wall["orientation"],
@@ -477,30 +540,33 @@ class BpySceneCtx:
                     name=f"Wall_{wall_id[:4]}",
                     outer_s=outer_s,
                     outer_e=outer_e,
-                    texture_scale=w_scale
+                    texture_scale=w_scale,
+                    is_partition=is_partition,
+                    extend_s=extend_s,
+                    extend_e=extend_e
                 )
 
-                # 应用纹理或颜色
-                if wall_texture_path and os.path.exists(wall_texture_path):
-                    mat = util_bpy.create_material_with_texture(f"Wall_{wall_id}_Material", wall_texture_path)
-                else:
-                    mat = util_bpy.create_material_with_color(f"Wall_{wall_id}_Material", wall_color)
-                
                 if wall_obj:
+                    # 应用纹理或颜色
+                    if wall_texture_path and os.path.exists(wall_texture_path):
+                        mat = util_bpy.create_material_with_texture(f"Wall_{wall_id}_Material", wall_texture_path)
+                    else:
+                        mat = util_bpy.create_material_with_color(f"Wall_{wall_id}_Material", wall_color)
+                    
                     wall_obj.data.materials.append(mat)
                     self.mesh_nodes["walls"][wall_id] = {
                         "node": wall_obj,
                         "mesh": wall_obj,
                         "wall_data": wall
                     }
-                
-                # 注意：bpy 版本暂不实现边缘线条（可选功能）
+
+            # 注意：bpy 版本暂不实现边缘线条（可选功能）
         else:
             print("🚫 跳过墙体创建 (show_wall=False)")
         
         # 添加门窗
         if show_door or show_window:
-            print(f"🚪 开始处理门窗 (按 mesh_id 加载)...")
+            print(f"🚪 开始处理门窗 (按 asset_id 加载)...")
             wall_thickness = self.config.get("wall_thickness", 0.1)
             
             hole_paths = []
@@ -517,9 +583,19 @@ class BpySceneCtx:
                     continue
 
                 wall_dir = wall_vec / wall_len
-                # orientation 是指向内部的法线，向外扩的方向是 -orientation
-                outward_normal = -np.array(wall["orientation"])
-                # 计算墙的旋转角度 (角度制，供 apply_box_transform 使用)
+                # orientation 是指向内部的法线
+                is_partition = wall.get("is_partition", False)
+                orientation = np.array(wall["orientation"])
+                
+                # 策略 B：为隔断墙构造一个稳定的虚拟法线，用于保证模型正反面一致性
+                if is_partition and np.linalg.norm(orientation) < 1e-4:
+                    # 取墙体走向的垂直向量 [-dy, dx]
+                    outward_normal = np.array([-wall_dir[1], wall_dir[0]])
+                else:
+                    # 外墙：指向内部的法线取反即为向外偏移的方向
+                    outward_normal = -orientation
+
+                # 计算墙的旋转角度 (角度制)
                 wall_angle_deg = np.degrees(np.arctan2(wall_dir[1], wall_dir[0]))
 
                 # 定义要处理的类型列表
@@ -531,26 +607,30 @@ class BpySceneCtx:
 
                 for item_type, key in types_to_process:
                     for item_id, item in wall.get(key, {}).items():
-                        mesh_id = item.get("mesh_id")
-                        if not mesh_id:
+                        asset_id = item.get("asset_id")
+                        if not asset_id:
                             continue
 
-                        # 计算真实中心：在原中心基础上向外偏移厚度的一半
+                        # 计算真实中心
                         inner_center = np.array(item["center"])
                         real_center = inner_center.copy()
-                        real_center[0] += outward_normal[0] * (wall_thickness / 2)
-                        real_center[1] += outward_normal[1] * (wall_thickness / 2)
+                        
+                        # 只有外墙需要向外侧偏移一半厚度，隔断墙模型直接放在中心线上
+                        if not is_partition:
+                            real_center[0] += outward_normal[0] * (wall_thickness / 2)
+                            real_center[1] += outward_normal[1] * (wall_thickness / 2)
 
                         # 构造 box 格式的数据
                         item_box_data = {
                             "center": real_center.tolist(),
+                            # 门窗模型的厚度通常由模型自身决定，但这里传入 wall_thickness 作为参考
                             "scale": [item["width"], wall_thickness, item["height"]],
                             "angle_z": wall_angle_deg,
-                            "mesh_id": mesh_id
+                            "asset_id": asset_id
                         }
 
                         # 仿照 bbox 添加逻辑
-                        mesh_root = util_bpy.load_mesh_to_origin(mesh_id, hole_paths)
+                        mesh_root = util_bpy.load_mesh_to_origin(asset_id, hole_paths)
                         if mesh_root:
                             try:
                                 success_transform = util_bpy.apply_box_transform(mesh_root, item_box_data)
@@ -564,11 +644,11 @@ class BpySceneCtx:
                                     "mesh": mesh_root,
                                     f"{item_type}_data": {"wall_id": wall_id}
                                 }
-                                print(f"  ✅ {item_type} {item_id[:4]} (mesh_id={mesh_id}) 添加成功")
+                                print(f"  ✅ {item_type} {item_id[:4]} (asset_id={asset_id}) 添加成功")
                             else:
                                 print(f"  ❌ {item_type} {item_id[:4]} 变换失败")
                         else:
-                            print(f"  ❌ {item_type} {item_id[:4]} (mesh_id={mesh_id}) 导入失败")
+                            print(f"  ❌ {item_type} {item_id[:4]} (asset_id={asset_id}) 导入失败")
         else:
             print("🚫 跳过门窗创建 (show_door=False, show_window=False)")
         
@@ -602,7 +682,7 @@ class BpySceneCtx:
         Args:
             show_wall, show_window, show_door, show_ceiling: 是否渲染对应的结构
             geometry_mode: 几何体模式，可选:
-                - "gltf": 仅加载 GLTF 模型，若无 mesh_id 或文件不存在则跳过该物体
+                - "gltf": 仅加载 GLTF 模型，若无 asset_id 或文件不存在则跳过该物体
                 - "mixed": 优先加载 GLTF 模型，若失败则回退到 bbox 几何体
                 - "bbox": 所有物体均强制使用 bbox 几何体表示
             align_height: 是否对齐墙体高度到 z_max
@@ -629,7 +709,7 @@ class BpySceneCtx:
         if self.model_extra_path: model_paths.append(self.model_extra_path)
 
         for box_id, box in self.context["boxes"].items():
-            mesh_id = box.get("mesh_id")
+            asset_id = box.get("asset_id")
             
             # --- 模式判断逻辑 ---
             should_load_gltf = False
@@ -638,11 +718,11 @@ class BpySceneCtx:
             if geometry_mode == "bbox":
                 should_fallback_bbox = True
             elif geometry_mode == "gltf":
-                if mesh_id:
+                if asset_id:
                     should_load_gltf = True
                 # else: skip
             elif geometry_mode == "mixed":
-                if mesh_id:
+                if asset_id:
                     should_load_gltf = True
                 else:
                     should_fallback_bbox = True
@@ -652,7 +732,7 @@ class BpySceneCtx:
             if should_load_gltf:
                 load_start = time.perf_counter()
                 # 尝试从多个路径加载模型
-                mesh_root = util_bpy.load_mesh_to_origin(mesh_id, model_paths)
+                mesh_root = util_bpy.load_mesh_to_origin(asset_id, model_paths)
                 load_time += time.perf_counter() - load_start
                 
                 if mesh_root:
@@ -660,7 +740,7 @@ class BpySceneCtx:
                     try:
                         success_transform = util_bpy.apply_box_transform(mesh_root, box)
                     except Exception as e:
-                        print(f"  ❌ {box.get('class', 'unknown')} (mesh_id={mesh_id}) 变换异常: {e}")
+                        print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) 变换异常: {e}")
                         success_transform = False
                     transform_time += time.perf_counter() - transform_start
                     
@@ -670,14 +750,14 @@ class BpySceneCtx:
                         }
                         success_count += 1
                         name = box.get('label', box.get('class', 'unknown'))
-                        print(f"  ✅ {name} (mesh_id={mesh_id}) 添加成功")
+                        print(f"  ✅ {name} (asset_id={asset_id}) 添加成功")
                         continue
                 
                 # 如果 gltf 加载失败，判断是否需要回退
                 if geometry_mode == "mixed":
                     should_fallback_bbox = True
                 else:
-                    print(f"  ❌ {box.get('class', 'unknown')} (mesh_id={mesh_id}) 导入失败且未开启混合模式，跳过")
+                    print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) 导入失败且未开启混合模式，跳过")
                     continue
 
             if should_fallback_bbox:
@@ -835,6 +915,7 @@ class BpySceneCtx:
             wall_obj = wall_info.get("node")
             if wall_obj:
                 wall_obj.visible_shadow = visible_shadow
+
         ceiling_info = self.mesh_nodes.get("ceiling")
         if ceiling_info:
             ceiling_obj = ceiling_info.get("node")

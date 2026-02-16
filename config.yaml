@@ -33,15 +33,16 @@ model_generate_path: /data-nas/data/dataset/qunhe/Manycore-Future/generate # 生
 model_hole_path: /data-nas/data/dataset/qunhe/Manycore-Future/holes # 门窗模型路径
 
 # 渲染配置
-array_light_intensity: 30.0 # array 模式下每盏灯的强度
+array_light_intensity: 20.0 # array 模式下每盏灯的强度
+blender_samples: 32 # Blender 渲染采样数
 
 
 
 # 3. 通用配置
 wall_thickness: 0.2 # 墙体厚度
-wall_texture_scale: 3.0     # 墙体纹理缩放系数 (1m内重复次数)
-floor_texture_scale: 1.0    # 地板纹理缩放系数
-ceiling_texture_scale: 1.0  # 天花板纹理缩放系数
+wall_texture_scale: 0.5     # 墙体纹理缩放系数 (1m内重复次数)
+floor_texture_scale: 0.5    # 地板纹理缩放系数
+ceiling_texture_scale: 0.5  # 天花板纹理缩放系数
 indoor_fov: 90  # 相机在房间内时的固定FOV（度）
 outdoor_fov_scale: 1.1  # 相机在房间外时FOV的缩放系数
 

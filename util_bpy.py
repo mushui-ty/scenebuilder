@@ -117,61 +117,75 @@ def apply_hdri_to_world(scene, hdri_path: str, strength: float = 1.0):
 
 def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
                                 chip=False, openings=None, wall_thickness=0.1, name="Wall",
-                                outer_s=None, outer_e=None, texture_scale=1.0):
+                                outer_s=None, outer_e=None, texture_scale=1.0,
+                                is_partition=False, extend_s=False, extend_e=False):
     if bpy is None:
         return None
 
-    s_arr = np.array(s, dtype=float)
-    e_arr = np.array(e, dtype=float)
+    s_arr = np.array(s, dtype=float)[:2]
+    e_arr = np.array(e, dtype=float)[:2]
     wall_vec = e_arr - s_arr
     wall_length = np.linalg.norm(wall_vec)
     if wall_length < 1e-6:
         return None
 
     wall_dir = wall_vec / wall_length
-    # normal 指向房间内部，outward_normal 指向房间外部
-    normal = np.array(orientation, dtype=float)
-    outward_normal = -normal
+    # normal 指向房间内部
+    normal = np.array(orientation, dtype=float)[:2]
+    
+    # 如果是隔断且没有有效法向量，构造一个
+    if is_partition and np.linalg.norm(normal) < 1e-4:
+        normal = np.array([-wall_dir[1], wall_dir[0]])
+
+    # 处理端点延长逻辑：如果端点有连接，向外延伸半个厚度以嵌入相邻墙体
+    s_base = s_arr - wall_dir * (wall_thickness / 2.0) if extend_s else s_arr
+    e_base = e_arr + wall_dir * (wall_thickness / 2.0) if extend_e else e_arr
+
+    if is_partition:
+        # 隔断墙：居中模式，向法线正负方向各偏移一半厚度
+        inner_s_p = s_base + normal * (wall_thickness / 2.0)
+        inner_e_p = e_base + normal * (wall_thickness / 2.0)
+        outer_s_p = s_base - normal * (wall_thickness / 2.0)
+        outer_e_p = e_base - normal * (wall_thickness / 2.0)
+    else:
+        # 外墙：单向偏移模式（内侧在中心线上，外侧向外偏移）
+        inner_s_p = s_base
+        inner_e_p = e_base
+        outward_normal = -normal
+        if outer_s is None:
+            outer_s_p = s_base + outward_normal * wall_thickness
+        else:
+            outer_s_p = np.array(outer_s, dtype=float)[:2]
+
+        if outer_e is None:
+            outer_e_p = e_base + outward_normal * wall_thickness
+        else:
+            outer_e_p = np.array(outer_e, dtype=float)[:2]
 
     mesh = bpy.data.meshes.new(name=name)
     obj = bpy.data.objects.new(name, mesh)
     scene_collection.objects.link(obj)
 
-    # 顶点定义：0-3 为内侧（在 vertices 线上），4-7 为外侧（向外偏移）
+    # 顶点定义：0-3 为一侧，4-7 为另一侧
     verts = [
-        # 内侧面 (s_arr, e_arr)
-        (s_arr[0], s_arr[1], 0.0),        # 0
-        (e_arr[0], e_arr[1], 0.0),        # 1
-        (e_arr[0], e_arr[1], height),     # 2
-        (s_arr[0], s_arr[1], height),     # 3
+        (inner_s_p[0], inner_s_p[1], 0.0),        # 0
+        (inner_e_p[0], inner_e_p[1], 0.0),        # 1
+        (inner_e_p[0], inner_e_p[1], height),     # 2
+        (inner_s_p[0], inner_s_p[1], height),     # 3
+        (outer_s_p[0], outer_s_p[1], 0.0),        # 4
+        (outer_e_p[0], outer_e_p[1], 0.0),        # 5
+        (outer_e_p[0], outer_e_p[1], height),     # 6
+        (outer_s_p[0], outer_s_p[1], height),     # 7
     ]
 
-    if outer_s is None:
-        outer_s_val = s_arr + outward_normal * wall_thickness
-    else:
-        outer_s_val = np.array(outer_s, dtype=float)
-
-    if outer_e is None:
-        outer_e_val = e_arr + outward_normal * wall_thickness
-    else:
-        outer_e_val = np.array(outer_e, dtype=float)
-
-    verts.extend([
-        # 外侧面
-        (outer_s_val[0], outer_s_val[1], 0.0),    # 4
-        (outer_e_val[0], outer_e_val[1], 0.0),    # 5
-        (outer_e_val[0], outer_e_val[1], height), # 6
-        (outer_s_val[0], outer_s_val[1], height), # 7
-    ])
-
-    # 定义 6 个面，确保法线全部指向墙体外部
+    # 定义 6 个面
     faces = [
-        (0, 3, 2, 1), # 内侧面 (指向房间内)
-        (4, 5, 6, 7), # 外侧面 (指向房间外)
+        (0, 3, 2, 1), # 侧面 A
+        (4, 5, 6, 7), # 侧面 B
         (3, 7, 6, 2), # 顶面
         (0, 1, 5, 4), # 底面
-        (0, 4, 7, 3), # 起点端面
-        (1, 2, 6, 5), # 终点端面
+        (0, 4, 7, 3), # 端面 S
+        (1, 2, 6, 5), # 端面 E
     ]
 
     mesh.from_pydata(verts, [], faces)
@@ -179,26 +193,25 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
 
     # 添加墙体 UV 坐标
     uv_layer = mesh.uv_layers.new(name="UVMap")
-
     for f_idx, poly in enumerate(mesh.polygons):
         for loop_index in poly.loop_indices:
             v_idx = mesh.loops[loop_index].vertex_index
             vx, vy, vz = verts[v_idx]
-            
-            if f_idx == 0: # 内侧面
-                u = np.dot(np.array([vx, vy]) - s_arr, wall_dir)
+            if f_idx == 0: # 侧面 A
+                u = np.dot(np.array([vx, vy]) - inner_s_p, wall_dir)
                 uv_layer.data[loop_index].uv = (u * texture_scale, vz * texture_scale)
-            elif f_idx == 1: # 外侧面
-                u = np.dot(np.array([vx, vy]) - outer_s_val[:2], wall_dir)
+            elif f_idx == 1: # 侧面 B
+                u = np.dot(np.array([vx, vy]) - outer_s_p, wall_dir)
                 uv_layer.data[loop_index].uv = (u * texture_scale, vz * texture_scale)
-            elif f_idx == 2: # 顶面
-                uv_layer.data[loop_index].uv = (vx * texture_scale, vy * texture_scale)
             else:
                 uv_layer.data[loop_index].uv = ((vx + vy) * texture_scale, vz * texture_scale)
 
     if openings:
         for opening_data, opening_type in openings:
-            opening_box = create_opening_box_bpy(opening_data, s_arr, e_arr, wall_dir, normal, height, wall_thickness, opening_type)
+            opening_box = create_opening_box_bpy(
+                opening_data, s_arr, e_arr, wall_dir, normal, height, 
+                wall_thickness, opening_type, is_partition=is_partition
+            )
             if opening_box:
                 mod = obj.modifiers.new(name="Boolean", type='BOOLEAN')
                 mod.operation = 'DIFFERENCE'
@@ -212,18 +225,14 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
 
 def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict[str, Any]:
     """
-    预计算所有墙体的斜接（Miter Joint）偏移点。
-    
-    Args:
-        walls: 墙体数据字典 (context["walls"])
-        wall_thickness: 墙体厚度
-        
-    Returns:
-        Dict: wall_id -> (outer_s, outer_e)
+    预计算所有外墙的斜接（Miter Joint）偏移点。
     """
-    # 1. 建立顶点到墙体的映射，识别相交情况
+    # 过滤：斜接只适用于外墙
+    boundary_walls = {wid: w for wid, w in walls.items() if not w.get("is_partition", False)}
+    
+    # 1. 建立顶点到墙体的映射
     pt_to_walls = {}
-    for wall_id, wall in walls.items():
+    for wall_id, wall in boundary_walls.items():
         s = tuple(wall["s"])
         e = tuple(wall["e"])
         for pt in [s, e]:
@@ -231,62 +240,42 @@ def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict
                 pt_to_walls[pt] = []
             pt_to_walls[pt].append(wall_id)
 
-    # 2. 预计算每面墙的外侧法线 (outward_normal)
+    # 2. 预计算每面墙的外侧法线
     wall_out_normals = {}
-    for wall_id, wall in walls.items():
-        # orientation 指向房间内部，取反即指向外部
+    for wall_id, wall in boundary_walls.items():
         wall_out_normals[wall_id] = -np.array(wall["orientation"])
 
-    # 3. 内部辅助函数：根据两堵相交墙的法线计算交点偏移
     def _get_miter_point(pt, wid1, wid2):
         n1 = wall_out_normals[wid1]
         n2 = wall_out_normals[wid2]
-        
-        # 计算平均法线（角平分线方向）
         n_avg = n1 + n2
         n_avg_norm = np.linalg.norm(n_avg)
-        
         if n_avg_norm < 1e-4:
             return np.array(pt) + n1 * wall_thickness
-        
         n_avg /= n_avg_norm
-        
-        # 偏移长度 L = t / cos(theta/2)
         cos_half_theta = np.dot(n_avg, n1)
         if abs(cos_half_theta) < 1e-4:
             return np.array(pt) + n1 * wall_thickness
-            
         length = wall_thickness / cos_half_theta
-        # 限制最大偏移（防止极小夹角产生超长尖刺）
         length = min(length, wall_thickness * 10)
-        
         return np.array(pt) + n_avg * length
 
-    # 4. 为每面墙计算修正后的 outer_s 和 outer_e
     wall_outer_points = {}
-    for wall_id, wall in walls.items():
+    for wall_id, wall in boundary_walls.items():
         s = tuple(wall["s"])
         e = tuple(wall["e"])
-        
-        outer_s = None
-        outer_e = None
-        
-        # 查找起点处的相邻墙
-        neighbors_s = [wid for wid in pt_to_walls[s] if wid != wall_id]
+        outer_s, outer_e = None, None
+        neighbors_s = [wid for wid in pt_to_walls.get(s, []) if wid != wall_id]
         if neighbors_s:
             outer_s = _get_miter_point(s, wall_id, neighbors_s[0])
-        
-        # 查找终点处的相邻墙
-        neighbors_e = [wid for wid in pt_to_walls[e] if wid != wall_id]
+        neighbors_e = [wid for wid in pt_to_walls.get(e, []) if wid != wall_id]
         if neighbors_e:
             outer_e = _get_miter_point(e, wall_id, neighbors_e[0])
-        
         wall_outer_points[wall_id] = (outer_s, outer_e)
-        
     return wall_outer_points
 
 
-def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_height, wall_thickness=0.1, opening_type="window"):
+def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_height, wall_thickness=0.1, opening_type="window", is_partition=False):
     if bpy is None:
         return None
 
@@ -294,15 +283,23 @@ def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_heigh
     width = opening["width"]
     height = opening["height"]
 
-    # 1. 基础投影点 (在内圈线上)
+    # 基础投影点
     proj = wall_s + wall_dir * np.dot(center[:2] - wall_s, wall_dir)
     
-    # 2. 修正中心点：墙体是从内圈向外扩的，所以切刀中心也要向外偏移
-    # normal 是指向室内的法线，向外偏移应该是 -normal
-    outward_normal = -np.array(normal)
-    # 将切刀中心移到墙体厚度的中心, 这里我特意小了一丢丢, 希望别切完
-    center_offset = outward_normal * (wall_thickness / 2.0) * 0.90
-    final_center_2d = proj + center_offset
+    if is_partition:
+        # 隔断墙洞口：完全居中，厚度加大以确保两边切透
+        final_center_2d = proj
+        cutter_thickness = wall_thickness * 2.0
+    else:
+        # 外墙洞口：原有的逻辑
+        outward_normal = -np.array(normal)
+        # 洞口中心稍微向外偏移
+        center_offset = outward_normal * (wall_thickness / 2.0) * 0.90
+        final_center_2d = proj + center_offset
+        if opening_type == "door":
+            cutter_thickness = wall_thickness
+        else:
+            cutter_thickness = wall_thickness * 2
 
     z_bottom = center[2] - height / 2
     z_top = center[2] + height / 2
@@ -310,20 +307,11 @@ def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_heigh
     bpy.ops.mesh.primitive_cube_add(size=1.0)
     box_obj = bpy.context.object
     box_obj.name = f"OpeningBox_{opening_type}"
-    
-    # 分类：窗户使用 2 倍厚度保证切透，门使用 1 倍厚度配合 0.9 偏移保证外侧不切透
-    if opening_type == "door":
-        cutter_thickness = wall_thickness
-    else:
-        # 使用 2 倍墙厚作为切刀厚度，确保两端都有足够的“过冲”
-        cutter_thickness = wall_thickness * 2
-
     box_obj.scale = (width, cutter_thickness, height)
     
     final_z = (z_bottom + z_top) / 2
-    # 对于门，中心上移 0.01m，给底部留出一点距离
     if opening_type == "door":
-        final_z += 0.01
+        final_z += 0.01 # 门底部稍微抬高
         
     box_obj.location = (final_center_2d[0], final_center_2d[1], final_z)
     angle = np.arctan2(wall_dir[1], wall_dir[0])
@@ -569,9 +557,9 @@ def _calculate_center(objects: List[Any]):
     return (bounds[0] + bounds[1]) / 2
 
 
-def load_mesh_to_origin(mesh_id: int, model_root: Union[str, List[str]]):
+def load_mesh_to_origin(asset_id: int, model_root: Union[str, List[str]]):
     """
-    导入指定 mesh_id 的 GLTF/GLB 模型，并将几何体中心移至原点。
+    导入指定 asset_id 的 GLTF/GLB 模型，并将几何体中心移至原点。
     支持从多个根目录中查找。
     """
     if bpy is None or Vector is None or not model_root:
@@ -585,8 +573,8 @@ def load_mesh_to_origin(mesh_id: int, model_root: Union[str, List[str]]):
 
     candidates = []
     for root in roots:
-        candidates.append(os.path.join(root, f"{mesh_id}.glb"))
-        candidates.append(os.path.join(root, f"{mesh_id}.gltf"))
+        candidates.append(os.path.join(root, f"{asset_id}.glb"))
+        candidates.append(os.path.join(root, f"{asset_id}.gltf"))
 
     for candidate in candidates:
         if not os.path.exists(candidate):
@@ -618,7 +606,7 @@ def load_mesh_to_origin(mesh_id: int, model_root: Union[str, List[str]]):
             center = Vector((0.0, 0.0, 0.0))
         
         # 创建一个空的容器对象作为本次导入网格的根节点
-        container = bpy.data.objects.new(f"mesh_{mesh_id}_root", None)
+        container = bpy.data.objects.new(f"mesh_{asset_id}_root", None)
         bpy.context.scene.collection.objects.link(container)
 
         

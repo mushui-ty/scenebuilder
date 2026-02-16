@@ -6,11 +6,21 @@ import sys
 import json
 import torch
 import lancedb
-import uuid
 import shutil
+import numpy as np
 from typing import Dict, Any, Optional, Literal, List
 from pathlib import Path
 from PIL import Image
+import asyncio
+import pyrender
+import trimesh
+import base64
+from jinja2 import Template
+from agentscope.message._message_base import Msg
+from agentscope.agent import ReActAgent
+from agentscope.formatter import OpenAIChatFormatter
+from agentscope.model import OpenAIChatModel
+from agentscope.message import Msg, ImageBlock, Base64Source, TextBlock
 
 # 确保能找到 Qwen3-VL-Embedding
 sys.path.insert(0, str(Path(__file__).parent.parent / "Qwen3-VL-Embedding"))
@@ -30,6 +40,430 @@ try:
     from qunhe_api.gen_hunyuan import hunyuan_gen
 except ImportError:
     hunyuan_gen = None
+
+
+gemini_model = OpenAIChatModel(
+    api_key=os.getenv("QUNHE_ONEAPI_KEY",
+                      "sk-L6LK80fS3mlvNmXh0532E17f7a624eAcAeD271764d110bC3"),
+    # gemini-3-flash-preview, gemini-3-pro-preview,
+    model_name="gemini-3-pro-preview",
+    stream=True,
+    client_args={"base_url": "https://oneapi.qunhequnhe.com/v1"},
+    # reasoning_effort = "low",
+    generate_kwargs={
+        "temperature": 1,
+        "max_tokens": 65000,
+    }
+)
+def get_base64_data(image_path):
+    with open(image_path, "rb") as image_file:
+        image_data = image_file.read()
+    base64_data = base64.b64encode(image_data).decode("utf-8")
+    return base64_data
+async def run_conversation(agent, prompt, *image_paths) -> None:
+    """运行与模型的对话，支持传入多张图片。"""
+    contents = [
+        ImageBlock(
+            type="image",
+            source=Base64Source(type="base64", media_type="image/png", data=get_base64_data(path)),
+        )
+        for path in image_paths
+    ]
+    contents.append(TextBlock(type="text", text=prompt))
+    msg = Msg(name="user", role="user", content=contents)
+    resp = await agent(msg)
+    return resp.content
+
+
+
+
+
+def correct_single_asset(
+    asset_path: str, 
+    label: str = None, 
+    caption: str = None,
+    correct_tilt: bool = False):
+    _ = (label, caption)  # keep signature compatibility
+    asset_file = Path(asset_path)
+    suffix = asset_file.suffix.lower()
+    if suffix not in {".glb", ".gltf"}:
+        raise ValueError(f"Only .glb/.gltf are supported, got: {asset_path}")
+
+    loaded = trimesh.load(asset_path, force="scene")
+    if isinstance(loaded, trimesh.Scene):
+        scene = loaded
+    else:
+        scene = trimesh.Scene(loaded)
+
+    if scene.is_empty:
+        raise ValueError(f"Empty scene/mesh: {asset_path}")
+
+    # Normalize asset pose: move bbox center to world origin.
+    initial_bounds = scene.bounds
+    initial_center = initial_bounds.mean(axis=0)
+    move_to_origin = trimesh.transformations.translation_matrix(-initial_center)
+    scene.apply_transform(move_to_origin)
+
+    bounds = scene.bounds
+    center = bounds.mean(axis=0)  # [x, y, z]
+    extent = bounds[1] - bounds[0]  # [a, b, c]
+    m = float(np.max(extent))
+    x, y, z = center.tolist()
+
+    camera_positions = {
+        "front": np.array([x, y, z + 2*m], dtype=np.float64),
+        # "right": np.array([x + 2*m, y, z], dtype=np.float64),
+        "up": np.array([x, y + 2*m, z], dtype=np.float64),
+    }
+
+    def camera_pose_look_at(eye: np.ndarray, target: np.ndarray) -> np.ndarray:
+        # Trimesh camera convention: camera looks toward -Z in its local frame.
+        z_axis = eye - target
+        z_axis = z_axis / np.linalg.norm(z_axis)
+        up_hint = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        if abs(np.dot(z_axis, up_hint)) > 0.999:
+            up_hint = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        x_axis = np.cross(up_hint, z_axis)
+        x_axis = x_axis / np.linalg.norm(x_axis)
+        y_axis = np.cross(z_axis, x_axis)
+        y_axis = y_axis / np.linalg.norm(y_axis)
+
+        pose = np.eye(4, dtype=np.float64)
+        pose[:3, 0] = x_axis
+        pose[:3, 1] = y_axis
+        pose[:3, 2] = z_axis
+        pose[:3, 3] = eye
+        return pose
+
+    x_fov_deg, y_fov_deg = 60.0, 45.0
+    aspect_ratio = float(
+        np.tan(np.deg2rad(x_fov_deg / 2.0)) / np.tan(np.deg2rad(y_fov_deg / 2.0))
+    )
+    width = 800
+    height = int(round(width / aspect_ratio))
+    renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)
+
+    out_dir = asset_file.parent
+    stem = asset_file.stem
+    rendered = []
+    try:
+        for name, eye in camera_positions.items():
+            py_scene = pyrender.Scene.from_trimesh_scene(
+                scene,
+                bg_color=np.array([255, 255, 255, 255], dtype=np.uint8),
+                ambient_light=np.array([0.15, 0.15, 0.15], dtype=np.float32),
+            )
+
+            camera = pyrender.PerspectiveCamera(
+                yfov=np.deg2rad(y_fov_deg),
+                aspectRatio=aspect_ratio,
+            )
+            camera_pose = camera_pose_look_at(eye=eye, target=center)
+            py_scene.add(camera, pose=camera_pose)
+
+            light = pyrender.DirectionalLight(color=np.ones(3), intensity=1.0)
+            py_scene.add(light, pose=camera_pose)
+
+            color, _ = renderer.render(py_scene)
+            out_path = out_dir / f"{stem}_{name}.png"
+            Image.fromarray(color).save(out_path)
+            rendered.append(str(out_path))
+    finally:
+        renderer.delete()
+
+    print("Rendered images:")
+    for p in rendered:
+        print(p)
+
+    agent = ReActAgent(
+        name="Cooler",
+        sys_prompt="You are a helpful canonical orientation estimator.",
+        model=gemini_model,
+        formatter=OpenAIChatFormatter(),  
+    )
+
+    direction_prompt = Template('''
+    现在给你看两张图片, 依次是一个三维物体从两个方向看去的渲染图片, 请你从中找出一个最可能是从该物体的上方看过去的, 在你判断的过程中, 需要参考以下规则: 
+    - 所谓物体上方是指物体在自然摆放的时候的上方的位置, 例如一个桌子, 床, 椅子, 柜子, 衣架, 灯等家具
+    - 对于枕头等可以通过靠着床头立起来的物体, 也要将它在床上放平自然摆放后, 判定此时的上方, 也就是最大的那一面为上方
+    - 对于墙上的物体, 例如挂画, 门窗等比较薄的物体, 判断其上方的方式是其正常镶嵌在墙里或者挂在墙上时上方的位置, 也就是从上方看可能是一个细条或者一道线, 只有从正面看才能看到全貌
+    如果物体的 label 和 caption 不为 none, 你也可以作为参考, 否则请忽略, 该物体的 label 是 {{label}},  caption 是 {{caption}}.
+    你的输出结果是 1, 或者 2, 分别表示第一张图片和第二张图片中哪个是最可能是从该物体的上方看过去的, 请输出你的分析过程并最终严格按照三星号包裹的格式给出最终答案***1*** 或 ***2***.
+    ''').render(label=label, caption=caption)
+
+
+    max_retry = 5
+    result = None
+    try:
+        for attempt in range(1, max_retry + 1):
+            try:
+                content = asyncio.run(run_conversation(agent, direction_prompt, rendered[0], rendered[1]))
+                matches = re.findall(r"(\*\*\*1\*\*\*|\*\*\*2\*\*\*)", content)
+                result = int(matches[-1].strip("*"))
+                assert result in {1, 2}, f"Invalid direction result: {result}"
+                break
+            except Exception as e:
+                print(f"Error in attempt {attempt}: {e}")
+                if attempt == max_retry:
+                    raise RuntimeError(
+                        f"Failed after {max_retry} attempts for asset: {asset_path}"
+                    ) from e
+                continue
+        if result == 1:
+            # Clockwise 90 deg around +X axis => right-hand angle -90 deg.
+            rot_x_cw_90 = trimesh.transformations.rotation_matrix(
+                angle=-np.pi / 2.0,
+                direction=[1.0, 0.0, 0.0],
+                point=center,
+            )
+            scene.apply_transform(rot_x_cw_90)
+            print("Applied clockwise 90deg rotation around X.")
+        else:
+            print("No rotation applied.")
+    finally:
+        for p in rendered:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception as e:
+                print(f"Failed to delete temp image {p}: {e}")
+    
+    # Recompute geometry stats after potential transform for further processing.
+    bounds = scene.bounds
+    center = bounds.mean(axis=0)
+    extent = bounds[1] - bounds[0]
+    m = float(np.max(extent))
+    x, y, z = center.tolist()
+
+
+    camera_positions = {
+        "front": np.array([x, y, z + 2*m], dtype=np.float64),
+        "right": np.array([x + 2*m, y, z], dtype=np.float64),
+    }
+    
+    # Judge which of {front, right} is most likely the canonical front.
+    front_candidates = []
+    renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)
+    try:
+        for name, eye in camera_positions.items():
+            py_scene = pyrender.Scene.from_trimesh_scene(
+                scene,
+                bg_color=np.array([255, 255, 255, 255], dtype=np.uint8),
+                ambient_light=np.array([0.15, 0.15, 0.15], dtype=np.float32),
+            )
+            camera = pyrender.PerspectiveCamera(
+                yfov=np.deg2rad(y_fov_deg),
+                aspectRatio=aspect_ratio,
+            )
+            camera_pose = camera_pose_look_at(eye=eye, target=center)
+            py_scene.add(camera, pose=camera_pose)
+            light = pyrender.DirectionalLight(color=np.ones(3), intensity=1.0)
+            py_scene.add(light, pose=camera_pose)
+
+            color, _ = renderer.render(py_scene)
+            out_path = out_dir / f"{stem}_{name}_front_judge.png"
+            Image.fromarray(color).save(out_path)
+            front_candidates.append((name, str(out_path)))
+    finally:
+        renderer.delete()
+
+    print("Front judge images:")
+    for idx, (name, path) in enumerate(front_candidates, start=1):
+        print(f"{idx}. {name}: {path}")
+
+    front_prompt = Template('''
+    现在给你看两张图片, 依次是一个三维物体从两个方向看去的渲染图片。
+    请判断哪一张最可能是该物体的正面视角:
+    - 1 表示第一张
+    - 2 表示第二张
+    参考规则:
+    - 家具常见“正面”往往是功能面(门板/抽屉/屏幕/把手/开口)更明显的一侧
+    - 若两者都不明显, 则选择更宽的那一面作为正面, 如果两者宽度相同, 则选择更符合人类直觉“朝前”的一张, 并可说明不确定性
+    - L 形家具的正面应该正对着较长的那条边
+    如果物体的 label 和 caption 不为 none, 可作为参考, 否则忽略。该物体 label={{label}}, caption={{caption}}。
+    最终答案必须严格是: ***1*** 或 ***2***.
+    ''').render(label=label, caption=caption)
+
+    max_retry = 5
+    front_result = None
+    try:
+        for attempt in range(1, max_retry + 1):
+            try:
+                content = asyncio.run(
+                    run_conversation(
+                        agent,
+                        front_prompt,
+                        front_candidates[0][1],
+                        front_candidates[1][1],
+                    )
+                )
+                matches = re.findall(r"(\*\*\*1\*\*\*|\*\*\*2\*\*\*)", content)
+                front_result = int(matches[-1].strip("*"))
+                assert front_result in {1, 2}, f"Invalid front result: {front_result}"
+                break
+            except Exception as e:
+                print(f"Front-judge error in attempt {attempt}: {e}")
+                if attempt == max_retry:
+                    raise RuntimeError(
+                        f"Front-direction judgment failed after {max_retry} attempts "
+                        f"for asset: {asset_path}"
+                    ) from e
+                continue
+    finally:
+        for _, p in front_candidates:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except Exception as e:
+                print(f"Failed to delete temp image {p}: {e}")
+
+    if front_result == 2:
+        # Clockwise 90 deg around +Y axis => right-hand angle -90 deg.
+        rot_y_cw_90 = trimesh.transformations.rotation_matrix(
+            angle=-np.pi / 2.0,
+            direction=[0.0, 1.0, 0.0],
+            point=center,
+        )
+        scene.apply_transform(rot_y_cw_90)
+        print("Applied clockwise 90deg rotation around Y.")
+    else:
+        print("No rotation applied.")
+
+    if correct_tilt:
+        # 第三轮处理
+        bounds = scene.bounds
+        center = bounds.mean(axis=0)
+        extent = bounds[1] - bounds[0]
+        m = float(np.max(extent))
+        x, y, z = center.tolist()
+
+        camera_positions = {
+            "front": np.array([x, y, z + 2 * m], dtype=np.float64),
+            "right": np.array([x + 2 * m, y, z], dtype=np.float64),
+            "up": np.array([x, y + 2 * m, z], dtype=np.float64),
+        }
+        # Render 3 views for tilt estimation and correction.
+        tilt_candidates = []
+        renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)
+        try:
+            for name, eye in camera_positions.items():
+                py_scene = pyrender.Scene.from_trimesh_scene(
+                    scene,
+                    bg_color=np.array([255, 255, 255, 255], dtype=np.uint8),
+                    ambient_light=np.array([0.15, 0.15, 0.15], dtype=np.float32),
+                )
+                camera = pyrender.PerspectiveCamera(
+                    yfov=np.deg2rad(y_fov_deg),
+                    aspectRatio=aspect_ratio,
+                )
+                camera_pose = camera_pose_look_at(eye=eye, target=center)
+                py_scene.add(camera, pose=camera_pose)
+                light = pyrender.DirectionalLight(color=np.ones(3), intensity=1.0)
+                py_scene.add(light, pose=camera_pose)
+
+                color, _ = renderer.render(py_scene)
+                out_path = out_dir / f"{stem}_{name}_tilt_judge.png"
+                Image.fromarray(color).save(out_path)
+                tilt_candidates.append((name, str(out_path)))
+        finally:
+            renderer.delete()
+
+        print("Tilt judge images:")
+        for idx, (name, path) in enumerate(tilt_candidates, start=1):
+            print(f"{idx}. {name}: {path}")
+
+        tilt_prompt = Template('''
+        现在给你看同一个三维物体的 3 张渲染图，顺序固定为:
+        1) front: 从 z 轴正方向看向负方向
+        2) right: 从 x 轴正方向看向负方向
+        3) up: 从 y 轴正方向看向负方向
+
+        任务: 判断物体是否有“明显倾斜”。只有在倾斜非常明显时才给非零修正角，否则三个轴都输出 0。
+        角度定义:
+        - 正角度表示逆时针旋转可以摆正
+        - 负角度表示顺时针旋转可以摆正
+        - 单位是度
+
+        请给出绕 x/y/z 三个轴的修正角(用于把物体摆正)。
+        如果你不确定，请保守输出 0，避免过度修正。
+        如果物体 label/caption 可用，可以参考: label={{label}}, caption={{caption}}。
+
+        最后必须严格输出如下格式(只允许一行):
+        ***X=<float>,Y=<float>,Z=<float>***
+        例如: ***X=0,Y=-12.5,Z=3***
+        ''').render(label=label, caption=caption)
+
+        max_retry = 5
+        tilt_x = tilt_y = tilt_z = 0.0
+        try:
+            for attempt in range(1, max_retry + 1):
+                try:
+                    content = asyncio.run(
+                        run_conversation(
+                            agent,
+                            tilt_prompt,
+                            tilt_candidates[0][1],
+                            tilt_candidates[1][1],
+                            tilt_candidates[2][1],
+                        )
+                    )
+                    angle_match = re.findall(
+                        r"\*\*\*X\s*=\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Y\s*=\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Z\s*=\s*([+-]?\d+(?:\.\d+)?)\*\*\*",
+                        content,
+                        flags=re.IGNORECASE,
+                    )
+                    if not angle_match:
+                        raise ValueError(f"Cannot parse tilt angles from response: {content}")
+
+                    tilt_x, tilt_y, tilt_z = map(float, angle_match[-1])
+                    break
+                except Exception as e:
+                    print(f"Tilt-judge error in attempt {attempt}: {e}")
+                    if attempt == max_retry:
+                        raise RuntimeError(
+                            f"Tilt estimation failed after {max_retry} attempts "
+                            f"for asset: {asset_path}"
+                        ) from e
+                    continue
+        finally:
+            for _, p in tilt_candidates:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"Failed to delete temp image {p}: {e}")
+
+        print(f"Estimated tilt correction(deg): X={tilt_x}, Y={tilt_y}, Z={tilt_z}")
+
+        # Apply non-zero axis corrections only, in X->Y->Z order.
+        applied_axes = []
+        if abs(tilt_x) > 1e-8:
+            rot_x = trimesh.transformations.rotation_matrix(
+                angle=np.deg2rad(tilt_x), direction=[1.0, 0.0, 0.0], point=center
+            )
+            scene.apply_transform(rot_x)
+            applied_axes.append("X")
+        if abs(tilt_y) > 1e-8:
+            rot_y = trimesh.transformations.rotation_matrix(
+                angle=np.deg2rad(tilt_y), direction=[0.0, 1.0, 0.0], point=center
+            )
+            scene.apply_transform(rot_y)
+            applied_axes.append("Y")
+        if abs(tilt_z) > 1e-8:
+            rot_z = trimesh.transformations.rotation_matrix(
+                angle=np.deg2rad(tilt_z), direction=[0.0, 0.0, 1.0], point=center
+            )
+            scene.apply_transform(rot_z)
+            applied_axes.append("Z")
+
+        if applied_axes:
+            print(f"Applied tilt correction on axes: {', '.join(applied_axes)} (not saved yet).")
+        else:
+            print("All tilt angles are zero, skipped tilt correction.")
+    else:
+        print("Skip third-round tilt correction (correct_tilt=False).")
+
+    # save and cover the asset
+    scene.export(asset_path)
+    print(f"Saved and covered asset: {asset_path}")
+
 
 
 def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
@@ -90,7 +524,7 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
             add_if_present(wall_item, "room_id", get_attr(r'room_id="([^"]+)"', line))
             data["wall"].append(wall_item)
 
-        # Door(id="...", wall_id="...", center=[...], width=..., height=..., mesh_id="...", category="...", label="...", caption="...", bbox_2d=[...])
+        # Door(id="...", wall_id="...", center=[...], width=..., height=..., asset_id="...", category="...", label="...", caption="...", bbox_2d=[...], mesh_id="...")
         elif line.startswith('Door(') or line.startswith('Window('):
             is_door = line.startswith('Door(')
             item = {
@@ -105,13 +539,14 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
             add_if_present(item, "label", get_attr(r'label="([^"]+)"', line))
             add_if_present(item, "caption", get_attr(r'caption="([^"]+)"', line))
             add_if_present(item, "bbox_2d", get_list_attr(r'bbox_2d=\[([^\]]+)\]', line))
+            add_if_present(item, "asset_id", get_attr(r'asset_id="([^"]+)"', line))
 
             if is_door:
                 data["door"].append(item)
             else:
                 data["window"].append(item)
 
-        # Bbox(id="...", room_id="...", mesh_id="...", center=[...], angle_z=..., scale=[...], caption="...", label="...", bbox_2d=[...])
+        # Bbox(id="...", room_id="...", asset_id="...", center=[...], angle_z=..., scale=[...], caption="...", label="...", bbox_2d=[...], mesh_id="...")
         elif line.startswith('Bbox('):
             bbox_item = {
                 "center": get_list_attr(r'center=\[([^\]]+)\]', line, []),
@@ -137,26 +572,52 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
 
     return data
 
-def process_image_for_generation(image: Image.Image, label: str, caption: str, output_dir: str) -> str:
+def _format_asset_prefix(mesh_id: Any, timestamp: str) -> str:
+    """基于分组 mesh_id 生成模型 asset_id 前缀: 三位mesh_id_时间戳"""
+    try:
+        mesh_num = int(mesh_id)
+    except (TypeError, ValueError):
+        try:
+            mesh_num = int(float(mesh_id))
+        except (TypeError, ValueError):
+            mesh_num = 0
+    return f"{mesh_num:03d}_{timestamp}"
+
+
+def process_image_for_generation(
+    generated_asset_id: str,
+    label: str,
+    caption: str,
+    output_dir: str,
+) -> str:
     """
     使用 nanobanana (edit_image_with_qunhe) 将裁剪后的俯视图转换为物体正视图。
     """
-    u_id = uuid.uuid4().hex[:8]
+    input_tmp_path = os.path.join(output_dir, f"{generated_asset_id}_mask_cropped.png")
+    bbox_tmp_path = os.path.join(output_dir, f"{generated_asset_id}_bbox_cropped.png")
+    if not os.path.exists(input_tmp_path) and os.path.exists(bbox_tmp_path):
+        input_tmp_path = bbox_tmp_path
     if edit_image_with_qunhe is None:
         print("Warning: edit_image_with_qunhe not found, saving original.")
-        tmp_path = os.path.join(output_dir, f"{u_id}.png")
-        image.save(tmp_path)
-        return tmp_path
+        return input_tmp_path if os.path.exists(input_tmp_path) else ""
 
     # 构建 prompt
-    nano_prompt = f"现在是一幅从俯视图 crop 出来的物体图片, 上面用箭头标有物体的方向, 请你生成从箭头指向的方向也就是物体的正面看向这个物体的清晰的, 真实的, 带有细节的图像, 为了突出实体, 背景为黑色, 这个物体的描述为 一个{label}, {caption}"
+    nano_prompt = f"现在是一幅从俯视图裁剪出来的物体图片, 请你根据描述中的物体形状补全残缺的部分并生成物体清晰的, 真实的, 带有丰富纹理细节的图像, 为了突出实体, 背景为黑色, 注意不能改变已有部分的形状, 只能补充缺失的部分并让纹理变得更加清晰 , 注意如果裁剪出的图片只能看到顶面, 对于一些立体物体, 请你将你视角往物体正前方偏移, 让生成的图片有立体感, (例如给定桌子/柜子/家具如果只能顶面看不到侧前方的话, 这时候对于桌子你需要让视角向物体正面偏移能够同时看到桌面和桌腿, 对于柜子/家具也是类似视角偏移与补全让图片更有立体感),对于一些薄片物体则不需要偏移(例如地毯, 画作等), 同时你必须保持原始裁剪图中的物体形状和细节不变,具有高度的一致性和整体性, 同时生成的图像只关注文本描述中的部分,注意不要在物体中心留下黑洞, 你生成的必须是完整的物体加上黑色背景, 物体不能超出图片边缘被截断,  后面我会给出该物体的文本描述, 但是你要注意文本描述只是对给定图片的补充和参考, 物体描述: \n 该物体是一个{label}, 具体描述为{caption}"
     
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
     
-    # 保存输入图作为临时文件
-    input_tmp_path = os.path.join(output_dir, f"{u_id}_input_to_nano.png")
-    image.save(input_tmp_path)
+    # 保存 caption 到 {asset_id}_{label}_caption.txt
+    caption_path = os.path.join(output_dir, f"{generated_asset_id}_{label}_caption.txt")
+    with open(caption_path, "w", encoding="utf-8") as f:
+        f.write(caption)
+    print(f"📄 Caption 已保存至: {caption_path}")
+    
+    # 使用外层已保存好的 mask 裁剪图，若不存在则回退到 bbox 裁剪图
+    if not os.path.exists(input_tmp_path):
+        print(f"Warning: cropped input not found: {input_tmp_path}")
+        return ""
+    return_image_path = input_tmp_path
     
     # 调用 nanobanana
     print(f"🚀 调用 nanobanana 处理 {label}...")
@@ -168,37 +629,61 @@ def process_image_for_generation(image: Image.Image, label: str, caption: str, o
         )
         
         if raw_res_path and os.path.exists(raw_res_path):
-            # 复制并重命名到目标路径 (output_dir/uuid.png)
-            final_output_path = os.path.join(output_dir, f"{u_id}_{label}.png")
+            # 复制并重命名到目标路径 (output_dir/{asset_id}_{label}.png)
+            final_output_path = os.path.join(output_dir, f"{generated_asset_id}_{label}.png")
             shutil.copy2(raw_res_path, final_output_path)
             print(f"✅ 结果已保存至: {final_output_path}")
             
             # 安全删除 nano_gemini 产生的临时时间戳目录
-            temp_dir = os.path.dirname(raw_res_path)
-            if temp_dir != output_dir and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+            try:
+                temp_dir = os.path.dirname(raw_res_path)
+                if temp_dir != output_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except Exception as e:
+                print(f"Warning cleaning temp dir: {e}")
             
-            return return_image_path
+            return_image_path = final_output_path
         else:
-            return return_image_path
+            return_image_path = input_tmp_path
             
     except Exception as e:
         print(f"Error calling nanobanana: {e}")
-        # 如果失败，尝试将输入图改名为 uuid.png 作为备份
-        final_output_path = os.path.join(output_dir, f"{u_id}_{label}.png")
+        # 如果失败，尝试将输入图改名为标准前缀文件作为备份
+        final_output_path = os.path.join(output_dir, f"{generated_asset_id}_{label}.png")
         if os.path.exists(input_tmp_path):
-            shutil.copy2(input_tmp_path, final_output_path)
+            if not os.path.exists(final_output_path):
+                shutil.copy2(input_tmp_path, final_output_path)
             return_image_path = final_output_path
         else:
             return_image_path = input_tmp_path
     
-    # 清理临时输入文件
-    if os.path.exists(input_tmp_path):
-        os.remove(input_tmp_path)
+    # 最终分辨率检查：混元 API 要求最小 128
+    if os.path.exists(return_image_path):
+        try:
+            with Image.open(return_image_path) as img:
+                w, h = img.size
+                if w < 128 or h < 128:
+                    scale = 128 / min(w, h)
+                    new_w = int(w * scale) + 1
+                    new_h = int(h * scale) + 1
+                    img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                    img_resized.save(return_image_path)
+                    print(f"📏 调整低分辨率图片: {w}x{h} -> {new_w}x{new_h}")
+        except Exception as e:
+            print(f"Error adjusting resolution: {e}")
+
     
     return return_image_path
 
-def generate_3d_mesh(image_path_for_gen: str, mesh_id: str, gen_asset_dir: str, scale: List[float], gen_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro") -> str:
+def generate_3d_mesh(
+    image_path_for_gen: str,
+    asset_id: str,
+    gen_asset_dir: str,
+    scale: List[float],
+    label: Optional[str] = None,
+    caption: Optional[str] = None,
+    gen_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
+) -> str:
     """
     使用 nano_gen 生成 3D 资产，并将结果复制到目标路径并清理临时文件夹。
     """
@@ -208,7 +693,7 @@ def generate_3d_mesh(image_path_for_gen: str, mesh_id: str, gen_asset_dir: str, 
     os.makedirs(gen_asset_dir, exist_ok=True)
     
     # 最终路径
-    final_glb_path = os.path.join(gen_asset_dir, f"{mesh_id}.glb")
+    final_glb_path = os.path.join(gen_asset_dir, f"{asset_id}.glb")
     
     try:
         # 调用资产生成工具
@@ -221,11 +706,18 @@ def generate_3d_mesh(image_path_for_gen: str, mesh_id: str, gen_asset_dir: str, 
         glb_raw_path = hunyuan_gen(image_path=image_path_for_gen, output_dir=gen_asset_dir, model=gen_model)
         
         if glb_raw_path and os.path.exists(glb_raw_path):
-
-            # 根据scale对glb_raw_path的位姿进行矫正
-
+            # 先复制到最终路径，再调用新的位姿矫正流程
             shutil.copy2(glb_raw_path, final_glb_path)
-            print(f"✅ 3D 资产已保存至: {final_glb_path}")
+            try:
+                correct_single_asset(
+                    final_glb_path,
+                    label=label,
+                    caption=caption,
+                    correct_tilt=False,
+                )
+                print(f"✅ 已使用新流程完成位姿矫正: {final_glb_path}")
+            except Exception as e:
+                print(f"⚠️ 新位姿矫正失败，保留原始资产: {e}")
             
             # 删除 nano_gen 产生的时间戳中间文件夹
             temp_dir = os.path.dirname(glb_raw_path)
@@ -260,6 +752,7 @@ def get_mesh(
     """
     if asset_mode == "none":
         return scene_json
+    timestamp = Path(image_path).parent.name if image_path else "0000000000"
 
     # 预加载图片
     base_image = None
@@ -269,32 +762,35 @@ def get_mesh(
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
 
-    # --- 通用预处理：建立 asset_id 到 最佳代表物索引 的映射，并加载 Mask ---
-    asset_to_orig_idx = {}
+    # --- 通用预处理：建立 mesh_id 到 最佳代表物索引 的映射，并加载 Mask ---
+    mesh_to_orig_idx = {}
     masks_data = []
+    ref_data = []
     if base_image:
         dir_name = os.path.dirname(image_path)
         
-        # 1. 建立映射 (基于体积最大原则), 检索和生成都是基于 asset_id 拿属于这个asset_id的最大 bbox 的 mask
+        # 1. 建立映射mesh_to_orig_idx (基于体积最大原则) mesh_id -> 属于这个mesh_id的最大体积物体索引
         ref_json_path = os.path.join(dir_name, "g_asset_resp.json")
         if os.path.exists(ref_json_path):
             try:
                 with open(ref_json_path, "r", encoding="utf-8") as f:
                     ref_data = json.load(f)
-                asset_max_volumes = {} 
+                mesh_max_volumes = {}
                 for i, item in enumerate(ref_data):
-                    aid = item.get("asset_id")
-                    if aid is None: continue
+                    mid = item.get("mesh_id")
+                    if mid is None: continue
                     bbox = item.get("bbox", [0,0,0,0])
                     hr = item.get("h_range", [0,0])
                     vol = (bbox[3]-bbox[1]) * (bbox[2]-bbox[0]) * (hr[1]-hr[0])
-                    try: aid_key = int(aid)
-                    except: aid_key = aid
-                    if aid_key not in asset_max_volumes or vol > asset_max_volumes[aid_key]:
-                        asset_max_volumes[aid_key] = vol
-                        asset_to_orig_idx[aid_key] = i
+                    try: mid_key = int(mid)
+                    except: mid_key = mid
+                    if mid_key not in mesh_max_volumes or vol > mesh_max_volumes[mid_key]:
+                        mesh_max_volumes[mid_key] = vol
+                        mesh_to_orig_idx[mid_key] = i
+                
+                print(f"📊 建立 Mesh ID 到索引的映射: {mesh_to_orig_idx}")
             except Exception as e:
-                print(f"Error building asset mapping: {e}")
+                print(f"Error building mesh mapping: {e}")
 
         # 2. 加载 Mask 数据
         mask_path = os.path.join(dir_name, "h_masks_amodal.pkl")
@@ -312,54 +808,225 @@ def get_mesh(
 
     if asset_mode == "generate":
         assert base_image is not None, "Image must be provided for generate mode"
+        print(f"DEBUG: scene_json keys: {list(scene_json.keys())}")
+        if "window" in scene_json:
+            print(f"DEBUG: Found {len(scene_json['window'])} windows in scene_json")
+
         
-        # 按 asset_id 分组
-        asset_groups = {}
-        for bbox in scene_json.get("bbox", []):
-            if bbox.get("mesh_id"): continue
-            aid = bbox.get("asset_id")
-            if aid is not None:
-                try: aid_key = int(aid)
-                except: aid_key = aid
-                if aid_key not in asset_groups: asset_groups[aid_key] = []
-                asset_groups[aid_key].append(bbox)
         
-        for aid, bboxes in asset_groups.items():
+        # 按 mesh_id 分组 (包含 bbox, door, window)
+        mesh_groups = {}
+        # 遍历所有可能的物体类型, 拿到所有存在的 mesh_id
+        for key in ["bbox", "door", "window"]:
+            for item in scene_json.get(key, []):
+                if item.get("asset_id"): continue
+                mid = item.get("mesh_id")
+                if mid is not None:
+                    try: mid_key = int(mid)
+                    except: mid_key = mid
+                    if mid_key not in mesh_groups: mesh_groups[mid_key] = []
+                    mesh_groups[mid_key].append(item)
+        # 遍历所有 mesh_id, 从之前建立的 mesh_to_orig_idx 中拿到最大体积物体的信息
+        for mid, bboxes in mesh_groups.items():
             if not bboxes: continue
-            first_bbox = bboxes[0]
-            label = first_bbox.get("label", "object")
-            caption = first_bbox.get("caption", "")
-            bbox_2d = first_bbox.get("bbox_2d")
-            scale = first_bbox.get("scale", [1.0, 1.0, 1.0])
+            
+            orig_idx = mesh_to_orig_idx.get(mid)
+            if orig_idx is not None and orig_idx < len(ref_data):
+                # 统一使用“体积最大”实例作为生成代表，确保 Mask 和 Crop 坐标来自同一个物体
+                rep_item = ref_data[orig_idx]
+                label = rep_item.get("label", "object")
+                caption = rep_item.get("caption", "")
+                bbox_2d = rep_item.get("bbox")
+            else:
+                # 回退方案
+                first_bbox = bboxes[0]
+                label = first_bbox.get("label", "object")
+                caption = first_bbox.get("caption", "")
+                bbox_2d = first_bbox.get("bbox_2d")
+                if bbox_2d is None:
+                    bbox_2d = first_bbox.get("bbox")
+            
+            scale = bboxes[0].get("scale", [1.0, 1.0, 1.0])
+            gen_dir = outpaint_image_dir if outpaint_image_dir else "."
+            os.makedirs(gen_dir, exist_ok=True)
+            generated_asset_id = _format_asset_prefix(mid, timestamp)
+            target_glb_path = os.path.join(gen_asset_dir, f"{generated_asset_id}.glb") if gen_asset_dir else ""
+            if target_glb_path and os.path.exists(target_glb_path):
+                print(f"⏭️ 跳过资产生成，已存在: {target_glb_path}")
+                for b in bboxes:
+                    b["asset_id"] = generated_asset_id
+                continue
             
             if bbox_2d and len(bbox_2d) == 4:
-                orig_idx = asset_to_orig_idx.get(aid)
-                # 使用 Mask 抠图
+                # 使用 Mask 抠图并处理旋转
+                orientation = rep_item.get("orientation", 0) if (orig_idx is not None and orig_idx < len(ref_data)) else bboxes[0].get("orientation", 0)
+
+                def _build_bbox_cropped_image(src_img, bbox, orient_deg):
+                    # 在原图先裁一个可容纳旋转后的大框(越界补黑)，再顺时针旋转并中心裁到横平竖直框
+                    y1, x1, y2, x2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
+                    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                    theta = float(orient_deg or 0.0)
+                    rad = np.deg2rad(theta)
+                    cos_t, sin_t = np.cos(rad), np.sin(rad)
+
+                    corners = np.array(
+                        [[x1, y1], [x2, y1], [x2, y2], [x1, y2]],
+                        dtype=np.float64,
+                    )
+                    rel = corners - np.array([cx, cy], dtype=np.float64)
+                    rot_cw = np.array([[cos_t, sin_t], [-sin_t, cos_t]], dtype=np.float64)
+                    rel_rot = rel @ rot_cw.T
+                    rx_min, ry_min = rel_rot.min(axis=0)
+                    rx_max, ry_max = rel_rot.max(axis=0)
+
+                    target_w = max(1, int(np.ceil(rx_max - rx_min)))
+                    target_h = max(1, int(np.ceil(ry_max - ry_min)))
+                    abs_cos, abs_sin = abs(cos_t), abs(sin_t)
+                    pre_w = max(1, int(np.ceil(target_w * abs_cos + target_h * abs_sin)))
+                    pre_h = max(1, int(np.ceil(target_w * abs_sin + target_h * abs_cos)))
+
+                    pre_box = (
+                        int(np.floor(cx - pre_w / 2.0)),
+                        int(np.floor(cy - pre_h / 2.0)),
+                        int(np.floor(cx + pre_w / 2.0)),
+                        int(np.floor(cy + pre_h / 2.0)),
+                    )
+                    local_img = src_img.crop(pre_box)
+                    if abs(theta) > 1e-8:
+                        local_img = local_img.rotate(-theta, expand=True, resample=Image.BICUBIC)
+
+                    rw, rh = local_img.size
+                    final_box = (
+                        int(np.floor((rw - target_w) / 2.0)),
+                        int(np.floor((rh - target_h) / 2.0)),
+                        int(np.floor((rw - target_w) / 2.0)) + target_w,
+                        int(np.floor((rh - target_h) / 2.0)) + target_h,
+                    )
+                    return local_img.crop(final_box)
+                
                 if masks_data and orig_idx is not None and orig_idx < len(masks_data):
                     import numpy as np
                     mask_np = masks_data[orig_idx]
-                    mask_np = (mask_np > 127) if mask_np.max() > 1 else mask_np.astype(bool)
-                    base_np = np.array(base_image)
-                    mask_3d = np.repeat(mask_np[:, :, np.newaxis], 3, axis=2) if mask_np.ndim == 2 else mask_np.astype(bool)
-                    masked_np = np.where(mask_3d, base_np, np.zeros_like(base_np))
-                    masked_image = Image.fromarray(masked_np.astype(np.uint8))
+                    mask_np_bool = (mask_np > 127) if mask_np.max() > 1 else mask_np.astype(bool)
+                    
+                    # 凹包络 + 膨胀 10px（每个物体单独处理）
+                    try:
+                        import alphashape
+                        from shapely.geometry import Polygon, MultiPolygon
+                        from PIL import ImageDraw
+                    except Exception:
+                        alphashape = None
+                    
+                    if alphashape is not None:
+                        coords = np.argwhere(mask_np_bool)
+                        if coords.size > 0:
+                            points = [(int(x), int(y)) for y, x in coords]
+                            area = float(coords.shape[0])
+                            alpha = 0.05 * np.sqrt(area)
+                            if alpha > 0 and len(points) >= 4:
+                                try:
+                                    hull = alphashape.alphashape(points, alpha)
+                                    if hull is not None and not hull.is_empty:
+                                        hull = hull.buffer(10)
+                                        if hull is not None and not hull.is_empty:
+                                            mask_h, mask_w = mask_np_bool.shape
+                                            mask_img = Image.new("L", (mask_w, mask_h), 0)
+                                            draw = ImageDraw.Draw(mask_img)
+                                            
+                                            def draw_polygon(poly):
+                                                if poly.is_empty:
+                                                    return
+                                                exterior = [(int(round(x)), int(round(y))) for x, y in poly.exterior.coords]
+                                                draw.polygon(exterior, fill=1)
+                                                for interior in poly.interiors:
+                                                    interior_pts = [(int(round(x)), int(round(y))) for x, y in interior.coords]
+                                                    draw.polygon(interior_pts, fill=0)
+                                            
+                                            if hull.geom_type == "Polygon":
+                                                draw_polygon(hull)
+                                            elif hull.geom_type == "MultiPolygon":
+                                                for poly in hull.geoms:
+                                                    draw_polygon(poly)
+                                            
+                                            new_mask = np.array(mask_img, dtype=bool)
+                                            if new_mask.any():
+                                                mask_np_bool = new_mask
+                                except Exception:
+                                    pass
+                    
+                    # 1. 寻找原始 mask 的包围盒
+                    coords_orig = np.argwhere(mask_np_bool)
+                    if coords_orig.size > 0:
+                        y1_o, x1_o = coords_orig.min(axis=0)
+                        y2_o, x2_o = coords_orig.max(axis=0)
+                        
+                        # 2. 裁剪出一个较大的局部区域，为旋转留出空间 (取长宽最大值的 1.5 倍)
+                        w_o, h_o = x2_o - x1_o, y2_o - y1_o
+                        cx_o, cy_o = (x1_o + x2_o) / 2, (y1_o + y2_o) / 2
+                        pad = int(max(w_o, h_o) * 1.0) # 这里的 pad 是半径方向的冗余
+                        
+                        # 构图：应用 mask 并准备裁剪
+                        base_np = np.array(base_image)
+                        mask_3d = np.repeat(mask_np_bool[:, :, np.newaxis], 3, axis=2)
+                        masked_np = np.where(mask_3d, base_np, 0)
+                        
+                        full_masked_img = Image.fromarray(masked_np.astype(np.uint8))
+                        full_mask_img = Image.fromarray((mask_np_bool * 255).astype(np.uint8))
+                        
+                        # 初次裁剪：获取包含物体的局部图
+                        crop_box = (cx_o - pad, cy_o - pad, cx_o + pad, cy_o + pad)
+                        obj_img_local = full_masked_img.crop(crop_box)
+                        obj_mask_local = full_mask_img.crop(crop_box)
+                        
+                        # 3. 在局部图中旋转，expand=True 确保所有像素被保留
+                        if orientation != 0:
+                            obj_img_local = obj_img_local.rotate(-orientation, expand=True, resample=Image.BICUBIC)
+                            obj_mask_local = obj_mask_local.rotate(-orientation, expand=True, resample=Image.NEAREST)
+                        
+                        # 4. 在旋转后的图中寻找新的最小包围盒
+                        rotated_mask_np = np.array(obj_mask_local)
+                        coords_rot = np.argwhere(rotated_mask_np > 0)
+                        
+                        if coords_rot.size > 0:
+                            ry_min, rx_min = coords_rot.min(axis=0)
+                            ry_max, rx_max = coords_rot.max(axis=0)
+                            
+                            rw, rh = rx_max - rx_min, ry_max - ry_min
+                            rcx, rcy = (rx_min + rx_max) / 2, (ry_min + ry_max) / 2
+                            
+                            # 5. 最终 1.2 倍比例裁剪
+                            final_box = (int(rcx - rw*0.6), int(rcy - rh*0.6), int(rcx + rw*0.6), int(rcy + rh*0.6))
+                            cropped_img = obj_img_local.crop(final_box)
+                        else:
+                            cropped_img = obj_img_local
+                    else:
+                        # Fallback
+                        cropped_img = base_image.crop((bbox_2d[1], bbox_2d[0], bbox_2d[3], bbox_2d[2]))
                 else:
-                    masked_image = base_image
+                    # 无 Mask 情况下的回退逻辑
+                    cropped_img = _build_bbox_cropped_image(base_image, bbox_2d, orientation)
 
-                # 1.5 倍扩张裁剪
-                cx, cy = (bbox_2d[1] + bbox_2d[3]) / 2, (bbox_2d[0] + bbox_2d[2]) / 2
-                w, h = (bbox_2d[3] - bbox_2d[1]), (bbox_2d[2] - bbox_2d[0])
-                nx1, ny1, nx2, ny2 = int(cx - w*0.75), int(cy - h*0.75), int(cx + w*0.75), int(cy + h*0.75)
-                cropped_img = masked_image.crop((nx1, ny1, nx2, ny2))
+                mask_cropped_path = os.path.join(gen_dir, f"{generated_asset_id}_mask_cropped.png")
+                cropped_img.save(mask_cropped_path)
+                bbox_cropped_path = os.path.join(gen_dir, f"{generated_asset_id}_bbox_cropped.png")
+                _build_bbox_cropped_image(base_image, bbox_2d, orientation).save(bbox_cropped_path)
+
+                image_path_for_gen = process_image_for_generation(
+                    generated_asset_id, label, caption, gen_dir
+                )
+                if not image_path_for_gen:
+                    image_path_for_gen = mask_cropped_path
+                glb_path = generate_3d_mesh(
+                    image_path_for_gen=image_path_for_gen,
+                    asset_id=generated_asset_id,
+                    gen_asset_dir=gen_asset_dir,
+                    scale=scale,
+                    label=label,
+                    caption=caption,
+                    gen_model=gen_3d_model,
+                )
                 
-                gen_dir = outpaint_image_dir if outpaint_image_dir else "."
-                image_path_for_gen = process_image_for_generation(cropped_img, label, caption, gen_dir)
-                
-                mesh_id = os.path.basename(image_path_for_gen).split("_")[0]
-                glb_path = generate_3d_mesh(image_path_for_gen, mesh_id, gen_asset_dir, scale, gen_3d_model)
-                cropped_img.save(os.path.join(gen_dir, f"{mesh_id}_{label}_asset_{aid}_cropped.png"))
-                
-                for b in bboxes: b["mesh_id"] = mesh_id if glb_path else None
+                for b in bboxes: b["asset_id"] = generated_asset_id if glb_path else None
                     
         return scene_json
 
@@ -374,14 +1041,14 @@ def get_mesh(
                 try:
                     table = db.open_table(hole_type)
                     for item in scene_json[hole_type]:
-                        if not item.get("mesh_id"):
+                        if not item.get("asset_id"):
                             query_vector = [float(item.get("width", 0)), float(item.get("height", 0))]
                             result = table.search(query_vector).where("exist = true").metric("l2").limit(1).to_list()
-                            if result: item["mesh_id"] = result[0]["mesh_id"]
+                            if result: item["asset_id"] = result[0]["asset_id"]
                 except Exception as e: print(f"Error retrieving {hole_type}: {e}")
 
     if "bbox" in scene_json and scene_json["bbox"]:
-        bboxes_to_process = [b for b in scene_json["bbox"] if not b.get("mesh_id")]
+        bboxes_to_process = [b for b in scene_json["bbox"] if not b.get("asset_id")]
         if not bboxes_to_process: return scene_json
 
         if not Qwen3VLEmbedder: return scene_json
@@ -391,19 +1058,19 @@ def get_mesh(
 
         batch_inputs, groups_info = [], []
         if base_image:
-            asset_groups = {}
+            mesh_groups = {}
             for bbox in bboxes_to_process:
-                aid = bbox.get("asset_id", f"no_id_{id(bbox)}")
-                if aid not in asset_groups: asset_groups[aid] = []
-                asset_groups[aid].append(bbox)
+                mid = bbox.get("mesh_id", f"no_id_{id(bbox)}")
+                if mid not in mesh_groups: mesh_groups[mid] = []
+                mesh_groups[mid].append(bbox)
             
-            for aid, group_bboxes in asset_groups.items():
+            for mid, group_bboxes in mesh_groups.items():
                 first_bbox = group_bboxes[0]
                 label, caption = first_bbox.get("label"), first_bbox.get("caption")
                 if not label: continue
                 
                 # --- Retrieve 同样使用精准代表物索引和 Mask 抠图 ---
-                orig_idx = asset_to_orig_idx.get(aid)
+                orig_idx = mesh_to_orig_idx.get(mid)
                 if masks_data and orig_idx is not None and orig_idx < len(masks_data):
                     import numpy as np
                     mask_np = masks_data[orig_idx]
@@ -437,18 +1104,18 @@ def get_mesh(
                 for i, query_vector in enumerate(all_embeddings):
                     result = furniture_table.search(query_vector).where("exist = true").distance_type("cosine").limit(1).to_list()
                     if result:
-                        mesh_id = result[0]["mesh_id"]
-                        for b in groups_info[i]: b["mesh_id"] = mesh_id
+                        asset_id = result[0]["asset_id"]
+                        for b in groups_info[i]: b["asset_id"] = asset_id
             except Exception as e: print(f"Error in batch search: {e}")
 
     return scene_json
 
-def update_ssl_with_mesh_id(ssl_text: str, scene_json: Dict[str, Any]) -> str:
-    mesh_map = {}
+def update_ssl_with_asset_id(ssl_text: str, scene_json: Dict[str, Any]) -> str:
+    asset_map = {}
     for cat in ["door", "window", "bbox"]:
         for item in scene_json.get(cat, []):
-            if item.get("id") and item.get("mesh_id"):
-                mesh_map[(cat.capitalize() if cat != "bbox" else "Bbox", item["id"])] = item["mesh_id"]
+            if item.get("id") and item.get("asset_id"):
+                asset_map[(cat.capitalize() if cat != "bbox" else "Bbox", item["id"])] = item["asset_id"]
     new_lines = []
     for line in ssl_text.splitlines():
         trimmed = line.strip()
@@ -457,13 +1124,68 @@ def update_ssl_with_mesh_id(ssl_text: str, scene_json: Dict[str, Any]) -> str:
         if obj_type:
             id_match = re.search(r'id="([^"]+)"', trimmed)
             if id_match:
-                mesh_id = mesh_map.get((obj_type, id_match.group(1)))
-                if mesh_id:
-                    if 'mesh_id=' in trimmed: line = re.sub(r'mesh_id="[^"]*"', f'mesh_id="{mesh_id}"', line)
+                asset_id = asset_map.get((obj_type, id_match.group(1)))
+                if asset_id:
+                    if 'asset_id=' in trimmed: line = re.sub(r'asset_id="[^"]*"', f'asset_id="{asset_id}"', line)
                     else:
                         r_idx = line.rfind(')')
                         if r_idx != -1:
                             prefix = line[:r_idx].strip()
-                            line = line[:r_idx] + ('' if prefix.endswith('(') else ', ') + f'mesh_id="{mesh_id}"' + line[r_idx:]
+                            line = line[:r_idx] + ('' if prefix.endswith('(') else ', ') + f'asset_id="{asset_id}"' + line[r_idx:]
         new_lines.append(line)
     return "\n".join(new_lines)
+
+def generate_texture(ctx: Any, image_path: str):
+    print(f"📦 正在为图片 {image_path} 生成纹理...")
+    image_dir = os.path.dirname(image_path)
+    texture_dir = os.path.join(image_dir, "texture")
+    os.makedirs(texture_dir, exist_ok=True)
+    floor_texture_path = os.path.join(texture_dir, "floor_texture.png")
+    wall_texture_path = os.path.join(texture_dir, "wall_texture.png")
+    ceiling_texture_path = os.path.join(texture_dir, "ceiling_texture.png")
+    
+    floor_prompt = "这是一张场景透视图, 帮我生成这个房间可能的地板纹理图片, 你反思自己在生成时候是否已经排除了墙体, 以及房间中其他物体的影响, 只生成地板本身纹理, 同时这个纹理必须是符合这个房间风格的可重复的简单纹理(seamless tileable texture)"
+    wall_prompt = "这是一张场景透视图, 帮我生成这个房间可能的墙体纹理图片, 你需要反思自己在生成时候是否已经排除了地板, 墙上的挂画和挂饰, 以及房间中其他物体的影响, 只关注墙面本身纹理, 同时这个纹理必须是符合这个房间风格的可重复的简单纹理(seamless tileable texture)"
+    ceiling_prompt = "这是一张场景透视图, 帮我生成这个房间可能的天花板纹理图片, 你需要反思自己在生成时候是否已经排除了墙体, 地板以及房间中其他物体的影响, 只生成天花板本身纹理, 同时这个纹理必须是符合这个房间风格的可重复的简单纹理(seamless tileable texture)"
+
+    floor_texture_path_tmp = None
+    wall_texture_path_tmp = None
+    ceiling_texture_path_tmp = None
+
+    if os.path.exists(floor_texture_path):
+        print(f"⏭️ 跳过地板纹理生成，已存在: {floor_texture_path}")
+    else:
+        floor_texture_path_tmp = edit_image_with_qunhe(floor_prompt, image_path, output_dir=texture_dir)
+
+    if os.path.exists(wall_texture_path):
+        print(f"⏭️ 跳过墙体纹理生成，已存在: {wall_texture_path}")
+    else:
+        wall_texture_path_tmp = edit_image_with_qunhe(wall_prompt, image_path, output_dir=texture_dir)
+
+    if os.path.exists(ceiling_texture_path):
+        print(f"⏭️ 跳过天花板纹理生成，已存在: {ceiling_texture_path}")
+    else:
+        ceiling_texture_path_tmp = edit_image_with_qunhe(ceiling_prompt, image_path, output_dir=texture_dir)
+    
+    if floor_texture_path_tmp:
+        shutil.copy2(floor_texture_path_tmp, floor_texture_path)
+        floor_texture_path_tmp_dir = os.path.dirname(floor_texture_path_tmp)
+        if floor_texture_path_tmp_dir != texture_dir and os.path.exists(floor_texture_path_tmp_dir):
+            shutil.rmtree(floor_texture_path_tmp_dir)
+    if wall_texture_path_tmp:
+        shutil.copy2(wall_texture_path_tmp, wall_texture_path)
+        wall_texture_path_tmp_dir = os.path.dirname(wall_texture_path_tmp)
+        if wall_texture_path_tmp_dir != texture_dir and os.path.exists(wall_texture_path_tmp_dir):
+            shutil.rmtree(wall_texture_path_tmp_dir)
+    if ceiling_texture_path_tmp:
+        shutil.copy2(ceiling_texture_path_tmp, ceiling_texture_path)
+        ceiling_texture_path_tmp_dir = os.path.dirname(ceiling_texture_path_tmp)
+        if ceiling_texture_path_tmp_dir != texture_dir and os.path.exists(ceiling_texture_path_tmp_dir):
+            shutil.rmtree(ceiling_texture_path_tmp_dir)
+
+
+    ctx.set_wall_blender_texture_path(wall_texture_path)
+    ctx.set_floor_blender_texture_path(floor_texture_path)
+    ctx.set_ceiling_blender_texture_path(ceiling_texture_path)
+
+    return True

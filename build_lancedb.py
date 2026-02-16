@@ -305,7 +305,7 @@ def build_asset_db(
                 ]
         
         data.append({
-            "mesh_id": mesh_id,
+            "asset_id": mesh_id,
             "exist": info.get('exist', False),
             "category_id": info.get('category_id', 0),
             "category_zh": info.get('category_zh', ''),
@@ -332,7 +332,7 @@ def build_asset_db(
 def build_hole_table(
     window_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/window_info.json",
     door_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/door_info.json",
-    db_uri: str = "manycore"
+    db_uri: str = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore"
 ):
     """
     构建 window 和 door 向量数据库表
@@ -366,7 +366,7 @@ def build_hole_table(
             # 提取信息并构建数据项
             # vector 为 [width, height]
             table_data.append({
-                "mesh_id": str(mesh_id),
+                "asset_id": str(mesh_id),
                 "exist": info.get("exist", False),
                 "category": info.get("category", ""),
                 "vector": [float(info.get("width", 0.0)), float(info.get("height", 0.0))]
@@ -380,29 +380,28 @@ def build_hole_table(
 
 
 if __name__ == "__main__":
-    # 直接运行此文件时，执行构建
+    # # 直接运行此文件时，执行构建
     # table = build_asset_db(batch_size=128, download_workers=12)
-    # db_uri = "manycore"
+    db_uri = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore"
     # table_name = "furniture"
     # db = lancedb.connect(db_uri)
     # table = db.open_table(table_name)
     # # 测试查询
     # print("\n测试查询...")
     # query_vector = table.to_pandas()['vector'].iloc[0]
-    # result = table.search(query_vector).select(["mesh_id", "category_zh", "label"]).limit(3).to_polars()
+    # result = table.search(query_vector).select(["asset_id", "category_zh", "label"]).limit(3).to_polars()
     # print(result)
 
 
 
-    # build_hole_table()
-    db_uri = "manycore"
+    build_hole_table(db_uri=db_uri)
     db = lancedb.connect(db_uri)
 
     table_name = "window"
     table = db.open_table(table_name)
     query_vector = table.to_pandas()['vector'].iloc[0]
-    result = table.search(query_vector).where("exist = true").metric("l2").select(["mesh_id", "category", "exist", "vector"]).limit(3).to_polars()
+    result = table.search(query_vector).where("exist = true").metric("l2").select(["asset_id", "category", "exist", "vector"]).limit(3).to_polars()
     print(result)
-    best_mesh_id = result["mesh_id"].to_list()[0]
-    print("Best mesh_id:", best_mesh_id)
+    best_asset_id = result["asset_id"].to_list()[0]
+    print("Best asset_id:", best_asset_id)
     

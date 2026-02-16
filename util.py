@@ -224,49 +224,55 @@ def try_find_closed_loop(walls: List[Dict]) -> Optional[List[Tuple[float, float]
     return None
 
 
-def calculate_minimum_area_polygon(walls: List[Dict]) -> List[Tuple[float, float]]:
+def calculate_minimum_area_polygon_and_partitions(walls: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float, float, float, float]]]:
     """
-    计算包围所有墙体的最小面积多边形（支持凹多边形）
-
-    用途: 在add_walls时计算房间的地板顶点，用于生成地板mesh
-    实现:
-        1. 首先检查输入的 walls 是否已经组成了一个闭合的简单环路
-        2. 如果是闭合环路，直接返回按顺序排列的顶点
-        3. 如果不是闭合环路，则采用基于凸包的算法：
-           a. 找到能包围所有墙体的最小凸多边形
-           b. 检查凸多边形的每条边，如果该边不与任何墙体共线
-           c. 尝试用墙体路径替代该边，形成凹多边形
-
-    参数:
-        walls: 墙体列表，每个墙包含 s(起点) 和 e(终点)
-
+    计算包围所有墙体的最小面积多边形（支持凹多边形）并提取内部隔断墙
+    
     返回:
-        多边形顶点列表，按逆时针顺序排列（可能是凹多边形）
+        (vertices, partitions)
+        vertices: [(x1, y1), (x2, y2), ...] 多边形顶点
+        partitions: [(xs, ys, xe, ye, height), ...] 内部隔断墙，包含高度信息
     """
     # 尝试直接寻找闭合环路
     closed_loop = try_find_closed_loop(walls)
     if closed_loop:
+        # 如果是闭合环路，partitions 为空
         print(f"✅ 检测到输入墙体已组成闭合环路，直接使用该顺序 ({len(closed_loop)} 个顶点)")
-        return closed_loop
+        return closed_loop, []
 
-    # 如果没有闭合环路，采用原有逻辑
-    # 收集所有唯一端点
+    # 收集端点并去重
     points = []
     for wall in walls:
         points.extend([tuple(wall["s"]), tuple(wall["e"])])
-
-    unique_points = []
-    seen = set()
-    for point in points:
-        if point not in seen:
-            unique_points.append(point)
-            seen.add(point)
+    unique_points = list(dict.fromkeys(points))
 
     if len(unique_points) < 3:
-        return unique_points
+        return unique_points, []
 
-    # 使用新算法：凸包 -> 凹多边形优化
-    return calculate_concave_polygon_from_walls(unique_points, walls)
+    # 计算凹多边形
+    vertices = calculate_concave_polygon_from_walls(unique_points, walls)
+    
+    # 提取内部隔断 (partitions)
+    partitions = []
+    for wall in walls:
+        # 检查这面墙是否在生成的 vertices 边界线上
+        is_on_boundary = False
+        for i in range(len(vertices)):
+            v1 = vertices[i]
+            v2 = vertices[(i + 1) % len(vertices)]
+            if is_wall_on_edge(wall, v1, v2):
+                is_on_boundary = True
+                break
+        
+        if not is_on_boundary:
+            # 隔断墙包含 [xs, ys, xe, ye, height]
+            partitions.append((
+                float(wall["s"][0]), float(wall["s"][1]), 
+                float(wall["e"][0]), float(wall["e"][1]),
+                float(wall["height"])
+            ))
+            
+    return vertices, partitions
 
 
 def calculate_concave_polygon_from_walls(points: List[Tuple[float, float]], walls: List[Dict]) -> List[Tuple[float, float]]:
@@ -310,32 +316,53 @@ def calculate_concave_polygon_from_walls(points: List[Tuple[float, float]], wall
     
     # 步骤4: 尝试用墙体路径替代凸包的边
     final_polygon = []
+    all_original_points = points # unique_points
     
     for i in range(len(convex_polygon)):
         start_vertex = convex_polygon[i]
         end_vertex = convex_polygon[(i + 1) % len(convex_polygon)]
         
-        # 检查这条边是否与任何墙体共线
-        edge_has_wall = False
-        for wall in walls:
-            if is_wall_on_edge(wall, start_vertex, end_vertex):
-                edge_has_wall = True
-                break
+        # 检查这条边是否被墙体完全覆盖
+        is_fully_covered = is_edge_fully_covered(start_vertex, end_vertex, walls)
         
         # 添加起点
         final_polygon.append(start_vertex)
         
-        # 如果这条边没有墙体共线，尝试用墙体路径替代
-        if not edge_has_wall:
-            # 只使用尚未在凸包上的墙体进行搜索
+        # 如果这条边没有被完全覆盖，尝试用墙体路径替代
+        if not is_fully_covered:
+            # 找到连接 start_vertex 和 end_vertex 的墙体路径
+            # 只使用尚未在凸包上的墙体进行搜索（为了避免直接走凸包边本身）
             available_walls = [w for idx, w in enumerate(walls) if idx not in walls_on_convex]
             wall_path = find_wall_path(start_vertex, end_vertex, available_walls, wall_graph)
             
             if wall_path and len(wall_path) > 2:
-                # 找到了墙体路径，将中间顶点加入多边形（不包括起点和终点）
-                # 起点已经添加，终点会在下一轮迭代添加
-                for j in range(1, len(wall_path) - 1):
-                    final_polygon.append(wall_path[j])
+                # 找到了墙体路径
+                # 校验点包围性：如果使用这条路径，是否仍能包围所有点
+                # 构造临时多边形用于校验
+                temp_polygon = []
+                # 1. 加入已经确定的顶点
+                temp_polygon.extend(final_polygon)
+                # 2. 加入当前候选路径的中间点
+                temp_polygon.extend(wall_path[1:-1])
+                # 3. 加入凸包剩余的边（虽然终点会变，但为了校验包围性，我们需要一个闭合回路）
+                for k in range(i + 1, len(convex_polygon)):
+                    temp_polygon.append(convex_polygon[k])
+                
+                # 检查是否包围所有原始点
+                all_enclosed = True
+                for p in all_original_points:
+                    if not is_point_in_or_on_polygon(p, temp_polygon):
+                        all_enclosed = False
+                        break
+                
+                if all_enclosed:
+                    # 只有在包围所有点的情况下才使用该路径
+                    for j in range(1, len(wall_path) - 1):
+                        final_polygon.append(wall_path[j])
+                    # print(f"  - 边 {start_vertex}->{end_vertex} 已被墙体路径替代，且保持包围性")
+                else:
+                    pass
+                    # print(f"  - 边 {start_vertex}->{end_vertex} 的候选路径无法包围所有点，回退到直线")
     
     # 去除可能的重复顶点
     final_polygon = remove_consecutive_duplicates(final_polygon)
@@ -404,17 +431,98 @@ def build_wall_graph(walls: List[Dict]) -> Dict[Tuple[float, float], List[Tuple[
     return graph
 
 
+def snap_wall_endpoints(walls: List[Dict], threshold: float = 0.3) -> List[Dict]:
+    """
+    对墙体端点进行吸附处理。
+    对于每个墙体的每个端点，计算它与该墙体所在直线相交的其他墙体线段的交点。
+    如果距离小于阈值，则将端点移动到交点。
+    """
+    if not walls:
+        return walls
+        
+    new_walls = []
+    # 转换为数值以便计算
+    for w in walls:
+        new_walls.append({
+            "s": np.array(w["s"][:2], dtype=np.float64),
+            "e": np.array(w["e"][:2], dtype=np.float64),
+            "height": w["height"]
+        })
+        
+    for i in range(len(new_walls)):
+        for key in ["s", "e"]:
+            curr_p = new_walls[i][key]
+            # 该墙体的方向向量
+            other_key = "e" if key == "s" else "s"
+            v = new_walls[i][other_key] - curr_p
+            norm_v = np.linalg.norm(v)
+            if norm_v < 1e-6:
+                continue
+            dir_v = v / norm_v
+            
+            best_snap_p = None
+            min_dist = threshold
+            
+            # 检查与其他所有墙体的交点
+            for j in range(len(new_walls)):
+                if i == j:
+                    continue
+                
+                # 墙体 j 的线段 A-B
+                A = new_walls[j]["s"]
+                B = new_walls[j]["e"]
+                
+                # 计算直线 (curr_p, dir_v) 与线段 AB 的交点
+                # 直线方程: P = curr_p + t * dir_v
+                # 线段方程: P = A + u * (B - A), 0 <= u <= 1
+                # 联立: curr_p + t * dir_v = A + u * (B - A)
+                # t * dir_v - u * (B - A) = A - curr_p
+                
+                W = B - A
+                det = dir_v[0] * (-W[1]) - dir_v[1] * (-W[0])
+                
+                if abs(det) < 1e-6: # 平行或共线
+                    # 若共线，则尝试将端点吸附到该线段上最近点
+                    if are_collinear(tuple(curr_p), tuple(A), tuple(B)):
+                        tA = np.dot(A - curr_p, dir_v)
+                        tB = np.dot(B - curr_p, dir_v)
+                        t_min = min(tA, tB)
+                        t_max = max(tA, tB)
+                        # 将t=0(当前端点)投影到线段范围内
+                        t_clamp = min(max(0.0, t_min), t_max)
+                        dist = abs(t_clamp)
+                        if dist < min_dist:
+                            min_dist = dist
+                            best_snap_p = curr_p + t_clamp * dir_v
+                    continue
+                
+                rhs = A - curr_p
+                t = (rhs[0] * (-W[1]) - rhs[1] * (-W[0])) / det
+                u = (dir_v[0] * rhs[1] - dir_v[1] * rhs[0]) / det
+                
+                if 0 <= u <= 1:
+                    dist = abs(t)
+                    if dist < min_dist:
+                        min_dist = dist
+                        best_snap_p = curr_p + t * dir_v
+            
+            if best_snap_p is not None:
+                new_walls[i][key] = best_snap_p
+                
+    # 转换回原始格式
+    result = []
+    for w in new_walls:
+        result.append({
+            "s": [float(w["s"][0]), float(w["s"][1])],
+            "e": [float(w["e"][0]), float(w["e"][1])],
+            "height": float(w["height"])
+        })
+    return result
+
+
 def is_wall_on_edge(wall: Dict, edge_start: Tuple[float, float], edge_end: Tuple[float, float]) -> bool:
     """
     检查墙体是否在凸包的边上（共线且在边的范围内）
-
-    参数:
-        wall: 墙体数据
-        edge_start: 边的起点
-        edge_end: 边的终点
-
-    返回:
-        True如果墙体在这条边上
     """
     wall_s = tuple(wall["s"])
     wall_e = tuple(wall["e"])
@@ -426,6 +534,59 @@ def is_wall_on_edge(wall: Dict, edge_start: Tuple[float, float], edge_end: Tuple
     
     # 检查三点是否共线
     return are_collinear(edge_start, edge_end, wall_s) and are_collinear(edge_start, edge_end, wall_e)
+
+
+def is_edge_fully_covered(edge_start: Tuple[float, float], edge_end: Tuple[float, float], walls: List[Dict]) -> bool:
+    """
+    检查凸包的一条边是否被墙体完全覆盖。
+    实现：收集该边上的所有墙体线段，合并重叠部分，检查是否覆盖了从start到end的全程。
+    """
+    on_edge_walls = []
+    for wall in walls:
+        if is_wall_on_edge(wall, edge_start, edge_end):
+            # 将端点投影到一维（相对于edge_start的距离）
+            d1 = np.sqrt((wall["s"][0] - edge_start[0])**2 + (wall["s"][1] - edge_start[1])**2)
+            d2 = np.sqrt((wall["e"][0] - edge_start[0])**2 + (wall["e"][1] - edge_start[1])**2)
+            on_edge_walls.append((min(d1, d2), max(d1, d2)))
+    
+    if not on_edge_walls:
+        return False
+    
+    # 合并区间
+    on_edge_walls.sort()
+    merged = []
+    if on_edge_walls:
+        curr_start, curr_end = on_edge_walls[0]
+        for next_start, next_end in on_edge_walls[1:]:
+            if next_start <= curr_end + 1e-6: # 容差
+                curr_end = max(curr_end, next_end)
+            else:
+                merged.append((curr_start, curr_end))
+                curr_start, curr_end = next_start, next_end
+        merged.append((curr_start, curr_end))
+    
+    # 检查是否覆盖全程
+    total_dist = np.sqrt((edge_end[0] - edge_start[0])**2 + (edge_end[1] - edge_start[1])**2)
+    
+    # 第一个区间的起点应该是0，最后一个区间的终点应该是total_dist
+    if not merged:
+        return False
+    
+    return merged[0][0] < 1e-6 and merged[-1][1] > total_dist - 1e-6
+
+
+def is_point_in_or_on_polygon(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
+    """
+    检查点是否在多边形内部或边上
+    """
+    if point_in_polygon(point, polygon):
+        return True
+    
+    # 检查是否在任何一条边上
+    for i in range(len(polygon)):
+        if point_on_segment(point, polygon[i], polygon[(i + 1) % len(polygon)]):
+            return True
+    return False
 
 
 def are_collinear(p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[float, float]) -> bool:
@@ -1492,7 +1653,7 @@ def cut_opening_from_wall(wall_mesh: trimesh.Trimesh, wall: Dict, opening: Dict,
     return wall_mesh
 
 
-def load_mesh(mesh_id: int, config: Dict):
+def load_mesh(asset_id: int, config: Dict):
     """
     加载家具mesh
 
@@ -1503,7 +1664,7 @@ def load_mesh(mesh_id: int, config: Dict):
         3. 使用trimesh.load直接加载
 
     参数:
-        mesh_id: 模型ID
+        asset_id: 模型ID
         config: 配置字典，包含model_path和可选的model_extra_path
 
     返回:
@@ -1518,8 +1679,8 @@ def load_mesh(mesh_id: int, config: Dict):
         search_paths.append(config["model_extra_path"])
 
     for base_path in search_paths:
-        glb_path = os.path.join(base_path, f"{mesh_id}.glb")
-        gltf_path = os.path.join(base_path, f"{mesh_id}.gltf")
+        glb_path = os.path.join(base_path, f"{asset_id}.glb")
+        gltf_path = os.path.join(base_path, f"{asset_id}.gltf")
 
         # 按优先级尝试加载
         for path in [glb_path, gltf_path]:
