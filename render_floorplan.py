@@ -38,15 +38,23 @@ def _build_walls_from_data(floor_plan: Dict[str, Any]) -> List[Dict[str, Any]]:
             "height": height
         })
         
-    # 2. 处理内部隔断
-    for p in partitions:
-        # p 格式通常是 [xs, ys, xe, ye]
-        if len(p) >= 4:
+    # 2. 处理内部隔断 (递归兼容多层嵌套格式)
+    def _collect_partitions(data: Any):
+        if not isinstance(data, list):
+            return
+        # 检查是否是 [xs, ys, xe, ye] 格式 (至少4个数字)
+        if len(data) >= 4 and all(isinstance(x, (int, float)) for x in data[:4]):
             walls.append({
-                "p": [float(p[0]), float(p[1]), 0.0],
-                "q": [float(p[2]), float(p[3]), 0.0],
+                "p": [float(data[0]), float(data[1]), 0.0],
+                "q": [float(data[2]), float(data[3]), 0.0],
                 "height": height
             })
+        else:
+            # 否则继续递归处理子项
+            for item in data:
+                _collect_partitions(item)
+
+    _collect_partitions(partitions)
             
     return walls
 

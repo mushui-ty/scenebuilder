@@ -70,6 +70,11 @@ class BpySceneCtx:
         # 初始化 Blender 场景
         self._init_blender_scene()
 
+    def set_model_path(self, path: str):
+        """更改模型查找路径"""
+        print(f"🔄 更改模型路径为: {path}")
+        self.config["model_path"] = path
+
     def _init_blender_scene(self):
         """初始化 Blender 场景"""
         bpy.ops.object.select_all(action='SELECT')
@@ -107,8 +112,18 @@ class BpySceneCtx:
         bpy.ops.object.select_all(action='SELECT')
         bpy.ops.object.delete(use_global=False)
         
-        # 清空所有孤立的数据块（材质、网格等）以节省内存
+        # --- 深度清理内存 ---
+        # 1. 物理删除所有图像块（这是最占内存的残留之一）
+        for img in bpy.data.images:
+            if img.users == 0 or not img.filepath: # 只删除未使用的或占位图
+                try:
+                    bpy.data.images.remove(img, do_unlink=True)
+                except:
+                    pass
+        
+        # 2. 清空所有孤立的数据块（材质、网格等）
         bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
+        # -------------------
         
         # 重置引用状态
         self.mesh_nodes = {
@@ -592,7 +607,7 @@ class BpySceneCtx:
                     # 取墙体走向的垂直向量 [-dy, dx]
                     outward_normal = np.array([-wall_dir[1], wall_dir[0]])
                 else:
-                    # 外墙：指向内部的法线取反即为向外偏移的方向
+                    # 外墙：指向内部的法线取取反即为向外偏移的方向
                     outward_normal = -orientation
 
                 # 计算墙的旋转角度 (角度制)

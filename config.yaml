@@ -29,6 +29,7 @@ hdri_path: /data-nas/data/experiments/mushui/projects/utils/fast-scene/assets/HD
 
 
 model_path: /data-nas/data/dataset/qunhe/Manycore-Future/models # 原家具模型路径
+model_simplified_path: /data-nas/data/dataset/qunhe/Manycore-Future/simplified # 简化家具模型路径
 model_generate_path: /data-nas/data/dataset/qunhe/Manycore-Future/generate # 生成家具模型路径
 model_hole_path: /data-nas/data/dataset/qunhe/Manycore-Future/holes # 门窗模型路径
 
@@ -40,8 +41,8 @@ blender_samples: 32 # Blender 渲染采样数
 
 # 3. 通用配置
 wall_thickness: 0.2 # 墙体厚度
-wall_texture_scale: 0.5     # 墙体纹理缩放系数 (1m内重复次数)
-floor_texture_scale: 0.5    # 地板纹理缩放系数
+wall_texture_scale: 0.25     # 墙体纹理缩放系数 (1m内重复次数)
+floor_texture_scale: 0.25    # 地板纹理缩放系数
 ceiling_texture_scale: 0.5  # 天花板纹理缩放系数
 indoor_fov: 90  # 相机在房间内时的固定FOV（度）
 outdoor_fov_scale: 1.1  # 相机在房间外时FOV的缩放系数

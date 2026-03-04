@@ -63,7 +63,9 @@ def render_ssl(
     outpaint_image_dir: Optional[str] = None,
     gen_asset_dir: Optional[str] = "/data-nas/data/dataset/qunhe/Manycore-Future/generate",
     gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
-    gen_texture: bool = False
+    gen_texture: bool = False,
+    correct_tilt: bool = True,
+    correct_yaw: bool = True
 ):
     """
     主渲染函数
@@ -76,6 +78,8 @@ def render_ssl(
         asset_mode: 资产处理模式 ("none", "retrieve", "generate")
         outpaint_image_dir: 扩图结果保存目录 (默认为 output_root)
         gen_asset_dir: 生成资产保存目录 (默认为 output_root)
+        correct_tilt: 是否纠正模型倾斜
+        correct_yaw: 是否纠正模型偏航角和输入图片对齐
     """
     if outpaint_image_dir is None:
         outpaint_image_dir = output_root
@@ -96,7 +100,9 @@ def render_ssl(
         asset_mode=asset_mode,
         outpaint_image_dir=outpaint_image_dir,
         gen_asset_dir=gen_asset_dir,
-        gen_3d_model=gen_3d_model
+        gen_3d_model=gen_3d_model,
+        correct_tilt=correct_tilt,
+        correct_yaw=correct_yaw
     )
     
     # 将更新后的 asset_id 填回 SSL
@@ -142,20 +148,56 @@ def render_ssl(
 
     # 7. 执行渲染 (俯视图 + 前视图)
     print("🎨 正在生成视图...")
-    ctx.topdown_view(os.path.join(output_dir, "topdown.png"), show_ceiling=False)
     
-    # center = ctx.context["meta"]["center"]
-    # span = ctx.context["meta"]["span"]
-    # z_max = ctx.context["meta"]["z_max"]
-    # look_at = [center[0], center[1], z_max / 2]
-    # camera_pos = [center[0], center[1] - max(span)/2 - 2, z_max * 2/3]
+    # --- 风险评估逻辑：提前预防 OOM ---
+    # 统计物体总数
+    total_objects = len(scene_json.get("bbox", [])) + \
+                    len(scene_json.get("door", [])) + \
+                    len(scene_json.get("window", []))
     
-    # ctx.render_view(
-    #     output_path=os.path.join(output_dir, "front.png"),
-    #     camera_position=camera_pos,
-    #     look_at_target=look_at
-    # )
+    # 阈值设定：如果物体超过 20 个，认为高风险
+    OBJ_RISK_THRESHOLD = 25
+    
+    if total_objects > OBJ_RISK_THRESHOLD:
+        print(f"⚠️ 场景物体较多 ({total_objects} 个)，检测到 OOM 风险。")
+        simplified_path = ctx.config.get("model_simplified_path", "/data-nas/data/dataset/qunhe/Manycore-Future/simplified")
+        print(f"🚀 直接切换到简化模型路径进行渲染: {simplified_path}")
+        ctx.set_model_path(simplified_path)
+        
+        # # 同时降低采样数以加快渲染并减小压力
+        # if ctx.config.get("blender_samples", 32) > 16:
+        #     print("📉 降低渲染采样数至 16 以减轻负载。")
+        #     ctx.set_blender_samples(16)
+    # -------------------------------
 
+    ctx.topdown_view(os.path.join(output_dir, "topdown.png"), show_ceiling=False, rebuild=True, use_HDRI=False)
+    
+
+    # 从场景右后方看向场景中心
+    center = ctx.context["meta"]["center"]
+    span = ctx.context["meta"]["span"]
+    z_max = ctx.context["meta"]["z_max"]
+    look_at = [center[0], center[1], z_max / 2]
+    camera_pos = [center[0]+span[0]/5, center[1]+9*span[1]/20, z_max * 5/6]
+    
+    ctx.render_view(
+        output_path=os.path.join(output_dir, "right.png"),
+        camera_position=camera_pos,
+        look_at_target=look_at,
+        rebuild=True,
+        use_HDRI=False
+    )
+
+    # 从场景左前方看向场景中心
+    camera_pos = [center[0]-span[0]/3, center[1]-span[1]/3, z_max * 5/6]
+    
+    ctx.render_view(
+        output_path=os.path.join(output_dir, "left.png"),
+        camera_position=camera_pos,
+        look_at_target=look_at,
+        rebuild=True,
+        use_HDRI=False
+    )
     # 8. 保存 JSON 和 SSL
     with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(scene_json, f, indent=2, ensure_ascii=False)

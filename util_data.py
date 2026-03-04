@@ -7,6 +7,7 @@ import json
 import torch
 import lancedb
 import shutil
+import time
 import numpy as np
 from typing import Dict, Any, Optional, Literal, List
 from pathlib import Path
@@ -42,19 +43,33 @@ except ImportError:
     hunyuan_gen = None
 
 
+def _get_vlm_api_key() -> str:
+    return os.environ.get("PIPE_VLM_API_KEY", "")
+
+
+def _get_vlm_base_url() -> str:
+    return os.environ.get("PIPE_VLM_BASE_URL", "https://oneapi.qunhequnhe.com/v1")
+
+
 gemini_model = OpenAIChatModel(
-    api_key=os.getenv("QUNHE_ONEAPI_KEY",
-                      "sk-L6LK80fS3mlvNmXh0532E17f7a624eAcAeD271764d110bC3"),
-    # gemini-3-flash-preview, gemini-3-pro-preview,
+    api_key=_get_vlm_api_key(),
     model_name="gemini-3-pro-preview",
     stream=True,
-    client_args={"base_url": "https://oneapi.qunhequnhe.com/v1"},
-    # reasoning_effort = "low",
+    client_kwargs={"base_url": _get_vlm_base_url()},
     generate_kwargs={
         "temperature": 1,
         "max_tokens": 65000,
     }
 )
+def clean_str(content) -> str:
+    """将模型返回的原始 content 转换为带 Python 结构但换行符被还原的干净字符串。"""
+    if not content:
+        return ""
+    s = str(content)
+    # 还原转义字符，使其变为真实的换行和引号
+    return s.replace("\\n", "\n").replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\").strip()
+
+
 def get_base64_data(image_path):
     with open(image_path, "rb") as image_file:
         image_data = image_file.read()
@@ -82,7 +97,8 @@ def correct_single_asset(
     asset_path: str, 
     label: str = None, 
     caption: str = None,
-    correct_tilt: bool = False):
+    correct_tilt: bool = False,
+    bbox_cropped_path: Optional[str] = None):
     _ = (label, caption)  # keep signature compatibility
     asset_file = Path(asset_path)
     suffix = asset_file.suffix.lower()
@@ -122,7 +138,7 @@ def correct_single_asset(
         z_axis = z_axis / np.linalg.norm(z_axis)
         up_hint = np.array([0.0, 1.0, 0.0], dtype=np.float64)
         if abs(np.dot(z_axis, up_hint)) > 0.999:
-            up_hint = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            up_hint = np.array([0.0, 0.0, -1.0], dtype=np.float64)
         x_axis = np.cross(up_hint, z_axis)
         x_axis = x_axis / np.linalg.norm(x_axis)
         y_axis = np.cross(z_axis, x_axis)
@@ -175,6 +191,7 @@ def correct_single_asset(
     for p in rendered:
         print(p)
 
+    #! 第一轮,  给定前视图和俯视图, 通过判断哪个是物体的俯视图, 确定物体的 y 轴也就是 world_up(防止类似于地毯的物体立起来)
     agent = ReActAgent(
         name="Cooler",
         sys_prompt="You are a helpful canonical orientation estimator.",
@@ -192,12 +209,13 @@ def correct_single_asset(
     ''').render(label=label, caption=caption)
 
 
-    max_retry = 5
+    max_retry = 20
     result = None
     try:
         for attempt in range(1, max_retry + 1):
             try:
                 content = asyncio.run(run_conversation(agent, direction_prompt, rendered[0], rendered[1]))
+                content = clean_str(content)
                 matches = re.findall(r"(\*\*\*1\*\*\*|\*\*\*2\*\*\*)", content)
                 result = int(matches[-1].strip("*"))
                 assert result in {1, 2}, f"Invalid direction result: {result}"
@@ -234,7 +252,7 @@ def correct_single_asset(
     m = float(np.max(extent))
     x, y, z = center.tolist()
 
-
+    #! 第二轮: 通过前视图+侧视图, 判断物体的正面
     camera_positions = {
         "front": np.array([x, y, z + 2*m], dtype=np.float64),
         "right": np.array([x + 2*m, y, z], dtype=np.float64),
@@ -278,12 +296,12 @@ def correct_single_asset(
     参考规则:
     - 家具常见“正面”往往是功能面(门板/抽屉/屏幕/把手/开口)更明显的一侧
     - 若两者都不明显, 则选择更宽的那一面作为正面, 如果两者宽度相同, 则选择更符合人类直觉“朝前”的一张, 并可说明不确定性
-    - L 形家具的正面应该正对着较长的那条边
+    - L 形家具的正面应该正对着较宽的那条边
     如果物体的 label 和 caption 不为 none, 可作为参考, 否则忽略。该物体 label={{label}}, caption={{caption}}。
     最终答案必须严格是: ***1*** 或 ***2***.
     ''').render(label=label, caption=caption)
 
-    max_retry = 5
+    max_retry = 20
     front_result = None
     try:
         for attempt in range(1, max_retry + 1):
@@ -296,6 +314,7 @@ def correct_single_asset(
                         front_candidates[1][1],
                     )
                 )
+                content = clean_str(content)
                 matches = re.findall(r"(\*\*\*1\*\*\*|\*\*\*2\*\*\*)", content)
                 front_result = int(matches[-1].strip("*"))
                 assert front_result in {1, 2}, f"Invalid front result: {front_result}"
@@ -326,6 +345,8 @@ def correct_single_asset(
         print("Applied clockwise 90deg rotation around Y.")
     else:
         print("No rotation applied.")
+
+    #! 第三轮: 通过前视图+侧视图+俯视图, 判断物体三个方向是否有倾斜
 
     if correct_tilt:
         # 第三轮处理
@@ -391,7 +412,7 @@ def correct_single_asset(
         例如: ***X=0,Y=-12.5,Z=3***
         ''').render(label=label, caption=caption)
 
-        max_retry = 5
+        max_retry = 20
         tilt_x = tilt_y = tilt_z = 0.0
         try:
             for attempt in range(1, max_retry + 1):
@@ -405,6 +426,7 @@ def correct_single_asset(
                             tilt_candidates[2][1],
                         )
                     )
+                    content = clean_str(content)
                     angle_match = re.findall(
                         r"\*\*\*X\s*=\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Y\s*=\s*([+-]?\d+(?:\.\d+)?)\s*,\s*Z\s*=\s*([+-]?\d+(?:\.\d+)?)\*\*\*",
                         content,
@@ -459,6 +481,113 @@ def correct_single_asset(
             print("All tilt angles are zero, skipped tilt correction.")
     else:
         print("Skip third-round tilt correction (correct_tilt=False).")
+
+    #! 第四轮处理：对比 asset 俯视图与 bbox crop，估计绕 y 轴的朝向修正角(主要是对齐图里面的内容, 防止前面的流程 orientation 判断错)
+    if bbox_cropped_path and os.path.exists(bbox_cropped_path):
+        bounds = scene.bounds
+        center = bounds.mean(axis=0)
+        extent = bounds[1] - bounds[0]
+        m = float(np.max(extent))
+        x, y, z = center.tolist()
+
+        top_eye = np.array([x, y + 2 * m, z], dtype=np.float64)
+        top_render_path = out_dir / f"{stem}_top_compare.png"
+        renderer = pyrender.OffscreenRenderer(viewport_width=width, viewport_height=height)
+        try:
+            py_scene = pyrender.Scene.from_trimesh_scene(
+                scene,
+                bg_color=np.array([255, 255, 255, 255], dtype=np.uint8),
+                ambient_light=np.array([0.15, 0.15, 0.15], dtype=np.float32),
+            )
+            camera = pyrender.PerspectiveCamera(
+                yfov=np.deg2rad(y_fov_deg),
+                aspectRatio=aspect_ratio,
+            )
+            camera_pose = camera_pose_look_at(eye=top_eye, target=center)
+            py_scene.add(camera, pose=camera_pose)
+            light = pyrender.DirectionalLight(color=np.ones(3), intensity=1.0)
+            py_scene.add(light, pose=camera_pose)
+            color, _ = renderer.render(py_scene)
+            Image.fromarray(color).save(top_render_path)
+        finally:
+            renderer.delete()
+
+        compare_prompt = Template('''
+        在给定的俯视图设定中，已知 y 轴垂直于水平地面向上，x 轴在图片中水平向右，z 轴指向图片上方（但不是真正的水平面上方）。
+        现在给你两张图片：一张是目标资产的俯视图，一张是从目标场景俯视图中把目标资产裁剪出来的局部俯视图（尽管我们的视角在场景中心的正上方，但可能不在物体的正上方）。
+        - 第 1 张：从单个 3D asset 的正上方俯视渲染图（从 y 轴正方向看向负方向）。
+        - 第 2 张：原图里直接按 bbox 裁剪得到的目标局部图。原图是场景中心正上方 (x_center, y_camera, z_center) 看向场景地面中心 (x_center, 0, z_center) 的透视相机拍摄，图 2 是其中目标物体的裁剪区域。
+
+        重要：图 2 来自透视投影。当物体靠近画面边缘时，透视会导致物体与地面垂直的面在 2D 图像中看起来倾斜，但这不代表其真实 3D 朝向一定有偏差。此时应优先根据物体与支撑面接触处的底线在俯视平面上的投影与 x 轴的角度来判断物体是否真的有倾斜。例如：门朝向画面下方时，若门靠近边缘，透视会让门面在图中呈斜线，此时门真实朝向应根据门与地面相交的底线在俯视平面上的投影是否平行于 x 轴来判断, 或者根据物体的顶部纹理来判断(不能是侧面)。若物体没有清晰的底线（如柜子、桌子）, 也看不到物体顶部纹理，难以可靠判断时，输出 0。对于门窗等看不到顶部纹理的物体就只能通过底线判断了.
+
+        任务：判断 asset 的真实 3D 朝向与图 2 中物体的真实朝向是否一致；若不一致，需要绕 y 轴旋转多少度。
+        角度定义：
+        - 逆时针旋转为正角度
+        - 顺时针旋转为负角度
+        - 单位是度，可为小数
+        - 如果无法可靠判断，输出 0
+        - 如果两张图主朝向差异不明显（例如接近、模糊、近似对齐、对称导致难判断），一律输出 0
+        - 若图 2 中的倾斜很可能是透视变形造成（物体靠近边缘、仰视/俯视导致的投影变形），一律输出 0
+        - 只有当你能通过底线和顶部纹理明确区分「真实朝向偏差」与「透视造成的视觉倾斜」，且确认存在真实偏差时，才输出非 0 角度
+
+        参考信息（若非 none）：label={{label}}, caption={{caption}}。
+        你可以先分析，但最终必须严格按以下格式输出（仅一行）：
+        ***Y=<float>***
+        例如：***Y=90*** 或 ***Y=-22.5*** 或 ***Y=0***。
+        ''').render(label=label, caption=caption)
+
+        max_retry = 20
+        yaw_correction = 0.0
+        try:
+            for attempt in range(1, max_retry + 1):
+                try:
+                    content = asyncio.run(
+                        run_conversation(
+                            agent,
+                            compare_prompt,
+                            str(top_render_path),
+                            bbox_cropped_path,
+                        )
+                    )
+                    content = clean_str(content)
+                    angle_match = re.findall(
+                        r"\*\*\*Y\s*=\s*([+-]?\d+(?:\.\d+)?)\*\*\*",
+                        content,
+                        flags=re.IGNORECASE,
+                    )
+                    if not angle_match:
+                        raise ValueError(f"Cannot parse Y angle from response: {content}")
+                    yaw_correction = float(angle_match[-1])
+                    break
+                except Exception as e:
+                    print(f"Top-vs-bbox yaw-judge error in attempt {attempt}: {e}")
+                    if attempt == max_retry:
+                        raise RuntimeError(
+                            f"Top-vs-bbox yaw estimation failed after {max_retry} attempts "
+                            f"for asset: {asset_path}"
+                        ) from e
+                    continue
+
+            print(f"Estimated top-vs-bbox yaw correction(deg): Y={yaw_correction}")
+            if yaw_correction == 0.0:
+                print("Top-vs-bbox yaw correction is 0, skipped.")
+            elif abs(yaw_correction) > 1e-8:
+                bounds = scene.bounds
+                center = bounds.mean(axis=0)
+                rot_y = trimesh.transformations.rotation_matrix(
+                    angle=np.deg2rad(yaw_correction), direction=[0.0, 1.0, 0.0], point=center
+                )
+                scene.apply_transform(rot_y)
+                print(f"Applied top-vs-bbox yaw correction around Y: {yaw_correction} deg.")
+            else:
+                print("Top-vs-bbox yaw correction is 0, skipped.")
+        finally:
+            try:
+                Path(top_render_path).unlink(missing_ok=True)
+            except Exception as e:
+                print(f"Failed to delete temp image {top_render_path}: {e}")
+    else:
+        print("Skip top-vs-bbox yaw correction (bbox_cropped_path missing).")
 
     # save and cover the asset
     scene.export(asset_path)
@@ -572,7 +701,7 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
 
     return data
 
-def _format_asset_prefix(mesh_id: Any, timestamp: str) -> str:
+def _format_asset_prefix(mesh_id: Any, timestamp: str, label: str) -> str:
     """基于分组 mesh_id 生成模型 asset_id 前缀: 三位mesh_id_时间戳"""
     try:
         mesh_num = int(mesh_id)
@@ -593,6 +722,12 @@ def process_image_for_generation(
     """
     使用 nanobanana (edit_image_with_qunhe) 将裁剪后的俯视图转换为物体正视图。
     """
+    # 检查目标文件是否已存在，如果存在则直接返回
+    final_output_path = os.path.join(output_dir, f"{generated_asset_id}_{label}.png")
+    if os.path.exists(final_output_path):
+        print(f"⏭️ 跳过图像生成，已存在: {final_output_path}")
+        return final_output_path
+
     input_tmp_path = os.path.join(output_dir, f"{generated_asset_id}_mask_cropped.png")
     bbox_tmp_path = os.path.join(output_dir, f"{generated_asset_id}_bbox_cropped.png")
     if not os.path.exists(input_tmp_path) and os.path.exists(bbox_tmp_path):
@@ -602,7 +737,7 @@ def process_image_for_generation(
         return input_tmp_path if os.path.exists(input_tmp_path) else ""
 
     # 构建 prompt
-    nano_prompt = f"现在是一幅从俯视图裁剪出来的物体图片, 请你根据描述中的物体形状补全残缺的部分并生成物体清晰的, 真实的, 带有丰富纹理细节的图像, 为了突出实体, 背景为黑色, 注意不能改变已有部分的形状, 只能补充缺失的部分并让纹理变得更加清晰 , 注意如果裁剪出的图片只能看到顶面, 对于一些立体物体, 请你将你视角往物体正前方偏移, 让生成的图片有立体感, (例如给定桌子/柜子/家具如果只能顶面看不到侧前方的话, 这时候对于桌子你需要让视角向物体正面偏移能够同时看到桌面和桌腿, 对于柜子/家具也是类似视角偏移与补全让图片更有立体感),对于一些薄片物体则不需要偏移(例如地毯, 画作等), 同时你必须保持原始裁剪图中的物体形状和细节不变,具有高度的一致性和整体性, 同时生成的图像只关注文本描述中的部分,注意不要在物体中心留下黑洞, 你生成的必须是完整的物体加上黑色背景, 物体不能超出图片边缘被截断,  后面我会给出该物体的文本描述, 但是你要注意文本描述只是对给定图片的补充和参考, 物体描述: \n 该物体是一个{label}, 具体描述为{caption}"
+    nano_prompt = f"现在是一幅从俯视图裁剪出来的物体图片, 请你根据描述中的物体形状补全残缺的部分并生成物体清晰的, 真实的, 带有丰富纹理细节的图像, 为了突出实体, 背景为黑色, 注意不能改变已有部分的形状, 只能补充缺失的部分并让纹理变得更加清晰 , 注意如果裁剪出的图片只能看到顶面, 对于一些立体物体, 请你将你视角往物体正前方偏移, 让生成的图片有立体感, (例如给定桌子/柜子/家具如果只能顶面看不到侧前方的话, 这时候对于桌子你需要让视角向物体正面偏移能够同时看到桌面和桌腿, 对于柜子/家具也是类似视角偏移与补全让图片更有立体感),对于一些薄片物体则不需要偏移(例如地毯, 画作等), 同时你必须保持原始裁剪图中的物体形状和细节不变,具有高度的一致性和整体性, 同时生成的图像只关注文本描述中的部分,注意不要在物体上留下黑洞, 例如桌面因为其他物体的分割导致出现的黑洞请补齐, 你生成的必须是完整的物体加上黑色背景, 物体不能超出图片边缘被截断,  后面我会给出该物体的文本描述, 但是你要注意文本描述只是对给定图片的补充和参考, 物体描述: \n 该物体是一个{label}, 具体描述为{caption}"
     
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
@@ -682,6 +817,9 @@ def generate_3d_mesh(
     scale: List[float],
     label: Optional[str] = None,
     caption: Optional[str] = None,
+    bbox_cropped_path: Optional[str] = None,
+    correct_tilt: bool = False,
+    correct_yaw: bool = True,
     gen_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
 ) -> str:
     """
@@ -695,48 +833,52 @@ def generate_3d_mesh(
     # 最终路径
     final_glb_path = os.path.join(gen_asset_dir, f"{asset_id}.glb")
     
-    try:
-        # 调用资产生成工具
-        if hunyuan_gen is None:
-            print("Warning: hunyuan_gen not found.")
-            if os.path.exists(image_path_for_gen):
-                shutil.copy2(image_path_for_gen, final_glb_path)
-            return final_glb_path
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # 调用资产生成工具
+            if hunyuan_gen is None:
+                print("Warning: hunyuan_gen not found.")
+                return ""
 
-        glb_raw_path = hunyuan_gen(image_path=image_path_for_gen, output_dir=gen_asset_dir, model=gen_model)
-        
-        if glb_raw_path and os.path.exists(glb_raw_path):
-            # 先复制到最终路径，再调用新的位姿矫正流程
-            shutil.copy2(glb_raw_path, final_glb_path)
-            try:
-                correct_single_asset(
-                    final_glb_path,
-                    label=label,
-                    caption=caption,
-                    correct_tilt=False,
-                )
-                print(f"✅ 已使用新流程完成位姿矫正: {final_glb_path}")
-            except Exception as e:
-                print(f"⚠️ 新位姿矫正失败，保留原始资产: {e}")
+            glb_raw_path = hunyuan_gen(image_path=image_path_for_gen, output_dir=gen_asset_dir, model=gen_model)
             
-            # 删除 nano_gen 产生的时间戳中间文件夹
-            temp_dir = os.path.dirname(glb_raw_path)
-            if temp_dir != gen_asset_dir and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-            
-            return final_glb_path
-        else:
-            # 如果生成失败，将输入图片复制为 .glb 作为占位
-            if os.path.exists(image_path_for_gen):
-                shutil.copy2(image_path_for_gen, final_glb_path)
-                print(f"⚠️ 生成失败，已将输入图片作为占位符复制到: {final_glb_path}")
-            return final_glb_path
-            
-    except Exception as e:
-        print(f"Error in generate_3d_mesh: {e}")
-        if os.path.exists(image_path_for_gen):
-            shutil.copy2(image_path_for_gen, final_glb_path)
-        return final_glb_path
+            if glb_raw_path and os.path.exists(glb_raw_path):
+                # 先复制到最终路径，再调用新的位姿矫正流程
+                shutil.copy2(glb_raw_path, final_glb_path)
+                try:
+                    correct_single_asset(
+                        final_glb_path,
+                        label=label,
+                        caption=caption,
+                        correct_tilt=correct_tilt,
+                        bbox_cropped_path=bbox_cropped_path if correct_yaw else None,
+                    )
+                    print(f"✅ 已使用新流程完成位姿矫正: {final_glb_path}")
+                except Exception as e:
+                    print(f"⚠️ 新位姿矫正失败，保留原始资产: {e}")
+                
+                # 删除 nano_gen 产生的时间戳中间文件夹
+                temp_dir = os.path.dirname(glb_raw_path)
+                if temp_dir != gen_asset_dir and os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir)
+                    except Exception as e:
+                        print(f"⚠️ 清理临时文件夹失败 (可能不为空): {e}")
+                
+                return final_glb_path
+            else:
+                print(f"⚠️ 第 {attempt + 1}/{max_retries} 次生成失败: {image_path_for_gen}")
+                if attempt < max_retries - 1:
+                    time.sleep(2) # 短暂等待后重试
+                
+        except Exception as e:
+            print(f"Error in generate_3d_mesh attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+
+    print(f"❌ 经过 {max_retries} 次尝试后，资产 {asset_id} 生成最终失败。")
+    return ""
 
 def get_mesh(
     scene_json: Dict[str, Any], 
@@ -745,7 +887,9 @@ def get_mesh(
     asset_mode: Literal["none", "retrieve", "generate"] = "none",
     outpaint_image_dir: Optional[str] = None,
     gen_asset_dir: Optional[str] = "/data-nas/data/dataset/qunhe/Manycore-Future/generate",
-    gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro"
+    gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
+    correct_tilt: bool = False,
+    correct_yaw: bool = True,
 ) -> Dict[str, Any]:
     """
     根据 asset_mode 处理资产并更新 scene_json
@@ -849,7 +993,7 @@ def get_mesh(
             scale = bboxes[0].get("scale", [1.0, 1.0, 1.0])
             gen_dir = outpaint_image_dir if outpaint_image_dir else "."
             os.makedirs(gen_dir, exist_ok=True)
-            generated_asset_id = _format_asset_prefix(mid, timestamp)
+            generated_asset_id = _format_asset_prefix(mid, timestamp, label)
             target_glb_path = os.path.join(gen_asset_dir, f"{generated_asset_id}.glb") if gen_asset_dir else ""
             if target_glb_path and os.path.exists(target_glb_path):
                 print(f"⏭️ 跳过资产生成，已存在: {target_glb_path}")
@@ -1023,6 +1167,9 @@ def get_mesh(
                     scale=scale,
                     label=label,
                     caption=caption,
+                    bbox_cropped_path=bbox_cropped_path,
+                    correct_tilt=correct_tilt,
+                    correct_yaw=correct_yaw,
                     gen_model=gen_3d_model,
                 )
                 
