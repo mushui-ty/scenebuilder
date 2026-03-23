@@ -626,23 +626,37 @@ def load_mesh_to_origin(asset_id: int, model_root: Union[str, List[str]]):
     return None
 
 
-def apply_box_transform(container_obj: Any, box: Dict):
+def apply_box_transform(container_obj: Any, box: Dict, master_bounds: Optional[tuple] = None):
     """
-    对导入的 mesh 根节点依次执行 scale、rotation、translation。
+    对导入的 mesh 根节点（或实例对象）依次执行 scale、rotation、translation。
+    master_bounds: 如果提供，则直接使用该包围盒进行缩放计算，不再扫描子对象。
     """
     if bpy is None or Vector is None or container_obj is None:
         return False
 
-    child_objects = list(container_obj.children)
-    if not child_objects:
-        return False
+    if master_bounds and master_bounds[0] is not None:
+        min_corner, max_corner = master_bounds
+    else:
+        # 如果是 Collection Instance 且未提供 master_bounds，尝试从其 instance_collection 获取
+        if container_obj.instance_type == 'COLLECTION' and container_obj.instance_collection:
+            child_objects = [obj for obj in container_obj.instance_collection.objects if obj.parent is None]
+        else:
+            child_objects = list(container_obj.children)
+            
+        if not child_objects:
+            # 容错：如果还是没有子对象，但本身是 MESH
+            if container_obj.type == 'MESH':
+                child_objects = [container_obj]
+            else:
+                return False
 
-    bounds = _get_combined_bounds(child_objects)
-    if not bounds or bounds[0] is None or bounds[1] is None:
-        return False
+        bounds = _get_combined_bounds(child_objects)
+        if not bounds or bounds[0] is None or bounds[1] is None:
+            return False
+        min_corner, max_corner = bounds
 
-    min_corner, max_corner = bounds
     extent = np.array((max_corner - min_corner), dtype=float)
+    # ... 后续逻辑保持不变 ...
     current_center = (min_corner + max_corner) / 2
     extent = np.where(extent == 0.0, 1.0, extent)
 
@@ -682,19 +696,19 @@ def apply_box_transform(container_obj: Any, box: Dict):
     # 强制更新场景，让变换立即生效
     bpy.context.view_layer.update()
     
-    # 验证最终位置
-    final_bounds = _get_combined_bounds(child_objects)
-    if final_bounds and final_bounds[0] is not None:
-        final_center = (final_bounds[0] + final_bounds[1]) / 2
-        # print(f"    [调试] 变换后几何中心: ({final_center[0]:.3f}, {final_center[1]:.3f}, {final_center[2]:.3f})")
-        # print(f"    [调试] 变换后底部z: {final_bounds[0][2]:.3f}")
-        
-        # 检查是否有浮空问题
-        expected_bottom = target_center[2] - target_scale[2] / 2
-        actual_bottom = final_bounds[0][2]
-        height_diff = actual_bottom - expected_bottom
-        if abs(height_diff) > 0.01:  # 超过1cm的偏差
-            print(f"    ⚠️  高度偏差: 底部应该在 {expected_bottom:.3f}m，实际在 {actual_bottom:.3f}m，偏差 {height_diff:.3f}m")
+    # 验证最终位置（仅针对非实例化对象或已定义 child_objects 的对象）
+    if 'child_objects' in locals() and child_objects:
+        final_bounds = _get_combined_bounds(child_objects)
+        if final_bounds and final_bounds[0] is not None:
+            final_center = (final_bounds[0] + final_bounds[1]) / 2
+            # print(f"    [调试] 变换后几何中心: ({final_center[0]:.3f}, {final_center[1]:.3f}, {final_center[2]:.3f})")
+            
+            # 检查是否有浮空问题
+            expected_bottom = target_center[2] - target_scale[2] / 2
+            actual_bottom = final_bounds[0][2]
+            height_diff = actual_bottom - expected_bottom
+            if abs(height_diff) > 0.01:  # 超过1cm的偏差
+                print(f"    ⚠️  高度偏差: 底部应该在 {expected_bottom:.3f}m，实际在 {actual_bottom:.3f}m，偏差 {height_diff:.3f}m")
     
     return True
 
@@ -747,7 +761,22 @@ def create_material_with_texture(name, texture_path):
     mix_shader = nodes.new('ShaderNodeAddShader')
 
     if texture_path and os.path.exists(texture_path):
-        tex_image.image = bpy.data.images.load(texture_path)
+        # [优化] 检查是否已经加载过该纹理
+        img_name = os.path.basename(texture_path)
+        img = bpy.data.images.get(img_name)
+        
+        # 即使名字相同，也检查路径是否一致
+        if img and (not hasattr(img, 'filepath') or bpy.path.abspath(img.filepath) != bpy.path.abspath(texture_path)):
+            img = None
+            
+        if img is None:
+            try:
+                img = bpy.data.images.load(texture_path)
+            except Exception:
+                img = None
+        
+        if img:
+            tex_image.image = img
 
     links.new(tex_image.outputs['Color'], bsdf.inputs['Base Color'])
     links.new(tex_image.outputs['Color'], emit.inputs['Color'])

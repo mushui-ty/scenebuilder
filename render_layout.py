@@ -101,10 +101,10 @@ def render_empty_room_topdown(data, output_path, width=1024, height=1024):
         width: 渲染宽度
         height: 渲染高度
     """
-    print(f"🏠 构建空房间场景: {data['room']['label']}")
+    print(f"🏠 构建空房间场景: {data['room']['room_type']}")
     
     # 创建场景上下文
-    ctx = SceneCtx(data['room']['label'])
+    ctx = SceneCtx(data['room']['room_type'])
     
     # 添加墙体
     if data.get('wall'):
@@ -139,10 +139,10 @@ def render_empty_room_views(data, output_dir, width=1024, height=1024):
         width: 渲染宽度
         height: 渲染高度
     """
-    print(f"🏠 构建空房间场景用于多视角渲染: {data['room']['label']}")
+    print(f"🏠 构建空房间场景用于多视角渲染: {data['room']['room_type']}")
     
     # 创建场景上下文
-    ctx = SceneCtx(data['room']['label'])
+    ctx = SceneCtx(data['room']['room_type'])
     
     # 添加墙体
     if data.get('wall'):
@@ -201,10 +201,10 @@ def render_full_room_no_doors_windows_topdown(data, output_path, width=1024, hei
         width: 渲染宽度
         height: 渲染高度
     """
-    print(f"🏠 构建不显示门窗的满房间场景: {data['room']['label']}")
+    print(f"🏠 构建不显示门窗的满房间场景: {data['room']['room_type']}")
     
     # 创建场景上下文
-    ctx = SceneCtx(data['room']['label'])
+    ctx = SceneCtx(data['room']['room_type'])
     
     # 添加墙体
     if data.get('wall'):
@@ -243,10 +243,10 @@ def render_empty_room_no_doors_windows_topdown(data, output_path, width=1024, he
         width: 渲染宽度
         height: 渲染高度
     """
-    print(f"🏠 构建不显示门窗的空房间场景: {data['room']['label']}")
+    print(f"🏠 构建不显示门窗的空房间场景: {data['room']['room_type']}")
     
     # 创建场景上下文
-    ctx = SceneCtx(data['room']['label'])
+    ctx = SceneCtx(data['room']['room_type'])
     
     # 添加墙体
     if data.get('wall'):
@@ -281,10 +281,10 @@ def render_empty_room_no_walls_doors_windows_topdown(data, output_path, width=10
         width: 渲染宽度
         height: 渲染高度
     """
-    print(f"🏠 构建不显示门窗墙的空房间场景: {data['room']['label']}")
+    print(f"🏠 构建不显示门窗墙的空房间场景: {data['room']['room_type']}")
     
     # 创建场景上下文
-    ctx = SceneCtx(data['room']['label'])
+    ctx = SceneCtx(data['room']['room_type'])
     
     # 添加墙体（数据添加但不渲染）
     if data.get('wall'):
@@ -319,10 +319,10 @@ def render_full_room_no_walls_doors_windows_topdown(data, output_path, width=102
         width: 渲染宽度
         height: 渲染高度
     """
-    print(f"🏠 构建不显示门窗墙的满房间场景: {data['room']['label']}")
+    print(f"🏠 构建不显示门窗墙的满房间场景: {data['room']['room_type']}")
     
     # 创建场景上下文
-    ctx = SceneCtx(data['room']['label'])
+    ctx = SceneCtx(data['room']['room_type'])
     
     # 添加墙体（数据添加但不渲染）
     if data.get('wall'):
@@ -368,7 +368,7 @@ def generate_ssl_format(data, ctx):
     room_id = util.generate_unique_id()
     
     # 1. Room信息
-    room_type = data['room']['label']
+    room_type = data['room']['room_type']
     lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
     
     # 2. Wall信息
@@ -419,12 +419,13 @@ def render_layout(line_number, output_dir='/root/projects/utils/fast-scene/outpu
     print("=" * 60)
 
     # 读取数据
-    jsonl_path = '/root/projects/utils/fast-scene/data-agent/spatial-layout.jsonl'
+    jsonl_path = '/root/datasets/manycore/spatiallm_raw.jsonl'
     print(f"\n📂 读取数据: {jsonl_path}")
     print(f"   行号: {line_number}")
 
     try:
         data = read_jsonl_line(jsonl_path, line_number)
+        print(data)
     except ValueError as e:
         print(f"❌ 错误: {e}")
         return
@@ -434,7 +435,7 @@ def render_layout(line_number, output_dir='/root/projects/utils/fast-scene/outpu
 
     print(f"✅ 数据读取成功")
     print(f"   - 场景ID: {data.get('id', 'unknown')}")
-    print(f"   - 房间类型: {data['room']['label']}")
+    print(f"   - 房间类型: {data['room']['room_type']}")
     print(f"   - 墙体数量: {len(data.get('wall', []))}")
     print(f"   - 门数量: {len(data.get('door', []))}")
     print(f"   - 窗数量: {len(data.get('window', []))}")
@@ -460,8 +461,8 @@ def render_layout(line_number, output_dir='/root/projects/utils/fast-scene/outpu
     print(f"\n✅ 可用家具: {len(valid_boxes)}/{len(data.get('bbox', []))}")
 
     # 构建场景
-    print(f"\n🏗️  构建场景: {data['room']['label']}")
-    ctx = SceneCtx(data['room']['label'])
+    print(f"\n🏗️  构建场景: {data['room']['room_type']}")
+    ctx = SceneCtx(data['room']['room_type'])
 
     # 添加墙体
     if data.get('wall'):

@@ -53,7 +53,7 @@ def _get_vlm_base_url() -> str:
 
 gemini_model = OpenAIChatModel(
     api_key=_get_vlm_api_key(),
-    model_name="gemini-3-pro-preview",
+    model_name="gemini-3.1-pro-preview",
     stream=True,
     client_kwargs={"base_url": _get_vlm_base_url()},
     generate_kwargs={

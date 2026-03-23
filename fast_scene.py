@@ -190,16 +190,17 @@ class SceneCtx:
     def add_boxes(self, boxes: List[Dict[str, Any]]):
         """批量添加家具"""
         for box in boxes:
-            self.add_box(box["center"], box["angle_z"], box["scale"], box["class"],
+            self.add_box(box["center"], box["angle_z"], box["scale"], box.get("class"),
                         box.get("label"), box.get("caption"), box.get("asset_id"))
 
     def add_box(self, center: List[float], angle_z: float, scale: List[float],
-                class_name: str, label: Optional[str] = None,
+                class_name: Optional[str] = None, label: Optional[str] = None,
                 caption: Optional[str] = None, asset_id: Optional[int] = None) -> str:
         """添加单个家具，返回ID"""
         box_id = util.generate_unique_id()
-        box_data = {"center": center, "angle_z": angle_z, "scale": scale, "class": class_name}
+        box_data = {"center": center, "angle_z": angle_z, "scale": scale}
 
+        if class_name: box_data["class"] = class_name
         if label: box_data["label"] = label
         if caption: box_data["caption"] = caption
         if asset_id: box_data["asset_id"] = asset_id

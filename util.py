@@ -53,20 +53,21 @@ def generate_unique_id() -> str:
 
 
 def point_to_line_distance(point: Tuple[float, float], line_start: Tuple[float, float],
-                          line_end: Tuple[float, float]) -> Tuple[float, Tuple[float, float]]:
+                          line_end: Tuple[float, float], clamp: bool = True) -> Tuple[float, Tuple[float, float]]:
     """
-    计算点到线段的距离和最近点
+    计算点到线段或直线的距离和最近点
 
-    用途: 在add_door/add_window时，将门窗中心吸附到最近的墙上
-    实现: 使用向量投影计算点在线段上的投影点，然后计算距离
+    用途: 在add_door/add_window时，将门窗中心吸附到墙上
+    实现: 使用向量投影计算点在直线上的投影点
 
     参数:
         point: 目标点坐标 (x, y)
-        line_start: 线段起点 (x, y)
-        line_end: 线段终点 (x, y)
+        line_start: 起点 (x, y)
+        line_end: 终点 (x, y)
+        clamp: 是否将投影限制在线段内 (True为线段，False为直线)
 
     返回:
-        (距离, 线段上最近点坐标)
+        (距离, 最近点坐标)
     """
     x0, y0 = point
     x1, y1 = line_start
@@ -84,8 +85,12 @@ def point_to_line_distance(point: Tuple[float, float], line_start: Tuple[float, 
     if dx == 0 and dy == 0:
         return np.sqrt(px*px + py*py), (x1, y1)
 
-    # 计算投影参数 t (0-1之间表示在线段内)
-    t = max(0, min(1, (px * dx + py * dy) / (dx * dx + dy * dy)))
+    # 计算投影参数 t
+    t = (px * dx + py * dy) / (dx * dx + dy * dy)
+    
+    if clamp:
+        t = max(0, min(1, t))
+        
     closest_x = x1 + t * dx
     closest_y = y1 + t * dy
 
@@ -987,10 +992,10 @@ def find_closest_wall_from_list(center: List[float], walls_list: List[Tuple]) ->
 
 def snap_to_wall(center: List[float], wall: Dict) -> List[float]:
     """
-    将点吸附到墙上
+    将点吸附到墙体所在的直线上（不局限于线段端点）
 
-    用途: add_door和add_window时，如果门/窗中心不在墙上，将其投影到墙上
-    实现: 使用point_to_line_distance计算最近点，保持z坐标不变
+    用途: add_door和add_window时，将门/窗中心投影到墙所在直线上，即便中心点稍微超出墙段范围
+    实现: 使用point_to_line_distance，设置clamp=False，保持z坐标不变
 
     参数:
         center: 原始中心点 [x, y, z]
@@ -1000,7 +1005,8 @@ def snap_to_wall(center: List[float], wall: Dict) -> List[float]:
         吸附后的中心点 [x', y', z]
     """
     point = (center[0], center[1])
-    _, closest_point = point_to_line_distance(point, tuple(wall["s"]), tuple(wall["e"]))
+    # 这里的 clamp 设置为 False，以便在投影落在线段外时，取其在直线上的投影点
+    _, closest_point = point_to_line_distance(point, tuple(wall["s"]), tuple(wall["e"]), clamp=False)
     return [closest_point[0], closest_point[1], center[2]]
 
 

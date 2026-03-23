@@ -9,7 +9,8 @@ Fast Scene - 纯 Blender 渲染版本（无 trimesh 依赖）
 
 import os
 import sys
-
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+os.environ['EGL_PLATFORM'] = 'surfaceless'
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
@@ -41,7 +42,8 @@ class BpySceneCtx:
     """场景上下文管理器 - 纯 Blender 版本"""
     
     
-    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None):
+    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None, 
+                 render_engine: Literal["CYCLES", "EEVEE"] = "CYCLES"):
         # 与 fast_scene.py 完全一致的数据结构
         self.context = {
             "meta": {"scene_type": scene_type},
@@ -51,6 +53,11 @@ class BpySceneCtx:
         self.scene = None
         self.if_set_lights = False
         self.model_extra_path = model_extra_path
+        self.render_engine = render_engine
+        
+        # 模型缓存：asset_id -> master_collection
+        self.asset_cache = {}
+        self.asset_bounds = {}
         
         # 保存所有对象引用（与 fast_scene.py 的 mesh_nodes 对应）
         self.mesh_nodes = {
@@ -77,8 +84,8 @@ class BpySceneCtx:
 
     def _init_blender_scene(self):
         """初始化 Blender 场景"""
-        bpy.ops.object.select_all(action='SELECT')
-        bpy.ops.object.delete(use_global=False)
+        # 使用工厂设置重置场景，这比手动删除物体更彻底，有助于在无头模式下初始化 EGL 上下文
+        bpy.ops.wm.read_factory_settings(use_empty=True)
         
         if "Scene" in bpy.data.scenes:
             self.scene = bpy.data.scenes["Scene"]
@@ -87,21 +94,32 @@ class BpySceneCtx:
         bpy.context.window.scene = self.scene
         
         # 设置渲染引擎
-        self.scene.render.engine = 'CYCLES'
-        self.scene.cycles.device = 'GPU'
+        engine_map = {
+            "CYCLES": "CYCLES",
+            "EEVEE": "BLENDER_EEVEE"
+        }
+        self.scene.render.engine = engine_map.get(self.render_engine, "CYCLES")
         
-        prefs = bpy.context.preferences.addons['cycles'].preferences
-        prefs.compute_device_type = 'CUDA'
-        for device in prefs.get_devices_for_type('CUDA'):
-            device.use = True
-        
-        self.scene.cycles.samples = self.config.get("blender_samples", 32)
-        self.scene.cycles.use_denoising = True
-        self.scene.cycles.denoiser = 'OPENIMAGEDENOISE'
+        if self.render_engine == "CYCLES":
+            self.scene.cycles.device = 'GPU'
+            
+            prefs = bpy.context.preferences.addons['cycles'].preferences
+            prefs.compute_device_type = 'CUDA'
+            for device in prefs.get_devices_for_type('CUDA'):
+                device.use = True
+            
+            self.scene.cycles.samples = self.config.get("blender_samples", 32)
+            self.scene.cycles.use_denoising = True
+            self.scene.cycles.denoiser = 'OPENIMAGEDENOISE'
+            print(f"✅ Blender 场景初始化完成 (Cycles + CUDA)")
+        else:
+            # EEVEE Next 相关设置 (Blender 4.2+)
+            if hasattr(self.scene, "eevee"):
+                # EEVEE Next 在 4.2 中有一些新参数，这里可以根据需要配置
+                self.scene.eevee.taa_render_samples = self.config.get("blender_samples", 32)
+            print(f"✅ Blender 场景初始化完成 (EEVEE Next)")
         
         self.scene_collection = self.scene.collection
-        
-        print(f"✅ Blender 场景初始化完成 (Cycles + CUDA)")
 
     def clear_scene(self):
         """彻底清空所有物体、灯光和相机，并重置状态"""
@@ -123,6 +141,17 @@ class BpySceneCtx:
         
         # 2. 清空所有孤立的数据块（材质、网格等）
         bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
+        # -------------------
+        
+        # 3. 清空 Collection 缓存
+        for coll in self.asset_cache.values():
+            if coll:
+                try:
+                    if coll.name in bpy.data.collections:
+                        bpy.data.collections.remove(coll, do_unlink=True)
+                except (ReferenceError, AttributeError):
+                    pass
+        self.asset_cache = {}
         # -------------------
         
         # 重置引用状态
@@ -353,6 +382,68 @@ class BpySceneCtx:
         if self.scene and hasattr(self.scene, "cycles"):
             self.scene.cycles.samples = samples
         print(f"📝 Blender 渲染采样数已更新: {samples}")
+
+    def _get_or_create_asset_collection(self, asset_id: int, model_paths: List[str]):
+        """获取或创建资产的母版 Collection (用于实例化)"""
+        if asset_id in self.asset_cache:
+            return self.asset_cache[asset_id]
+        
+        # 1. 创建一个新的独立 Collection
+        coll_name = f"AssetCollection_{asset_id}"
+        if coll_name in bpy.data.collections:
+            self.asset_cache[asset_id] = bpy.data.collections[coll_name]
+            return self.asset_cache[asset_id]
+            
+        new_coll = bpy.data.collections.new(coll_name)
+        # 暂时链接到场景以允许导入
+        self.scene.collection.children.link(new_coll)
+        
+        # 2. 设置为活动集合并导入
+        # 注意：Blender 的某些导入操作依赖于 active_collection
+        orig_collection = bpy.context.view_layer.active_layer_collection
+        
+        # 递归寻找目标 layer_collection
+        def find_layer_collection(layer_coll, name):
+            if layer_coll.name == name: return layer_coll
+            for child in layer_coll.children:
+                res = find_layer_collection(child, name)
+                if res: return res
+            return None
+            
+        target_layer_coll = find_layer_collection(bpy.context.view_layer.layer_collection, coll_name)
+        if target_layer_coll:
+            bpy.context.view_layer.active_layer_collection = target_layer_coll
+            
+        # 3. 导入模型
+        # 我们稍微修改逻辑，直接在 util_bpy.load_mesh_to_origin 中导入
+        # 注意：load_mesh_to_origin 内部会把对象放到场景主集合中
+        # 我们需要在导入后把它们移到我们的 new_coll 中
+        mesh_root = util_bpy.load_mesh_to_origin(asset_id, model_paths)
+        
+        if mesh_root:
+            # 将 mesh_root 及其所有子对象移入新集合
+            objs_to_move = [mesh_root] + list(mesh_root.children_recursive)
+            
+            # --- [优化] 预先计算母版包围盒并存入缓存 ---
+            master_bounds = util_bpy._get_combined_bounds(objs_to_move)
+            self.asset_bounds[asset_id] = master_bounds
+            
+            for obj in objs_to_move:
+                for coll in obj.users_collection:
+                    coll.objects.unlink(obj)
+                new_coll.objects.link(obj)
+            
+            # 导入成功后，从主场景 Collection 中移除这个资产母版 Collection (保持在数据块中即可)
+            self.scene.collection.children.unlink(new_coll)
+            self.asset_cache[asset_id] = new_coll
+            print(f"📦 [母版加载] {asset_id} 加载成功并存入缓存 (Size: {master_bounds[1]-master_bounds[0] if master_bounds else 'None'})")
+            return new_coll
+        else:
+            # 导入失败，清理
+            self.scene.collection.children.unlink(new_coll)
+            bpy.data.collections.remove(new_coll)
+            self.asset_cache[asset_id] = None
+            return None
 
     def export_wall_ssl(self, output_dir: str):
         """
@@ -645,25 +736,38 @@ class BpySceneCtx:
                         }
 
                         # 仿照 bbox 添加逻辑
-                        mesh_root = util_bpy.load_mesh_to_origin(asset_id, hole_paths)
-                        if mesh_root:
+                        # --- [优化] 门窗实例化 ---
+                        asset_coll = self._get_or_create_asset_collection(asset_id, hole_paths)
+                        if asset_coll:
+                            # 创建实例
+                            instance_name = f"Instance_{item_type}_{item_id[:4]}"
+                            instance_obj = bpy.data.objects.new(instance_name, None)
+                            instance_obj.instance_type = 'COLLECTION'
+                            instance_obj.instance_collection = asset_coll
+                            self.scene_collection.objects.link(instance_obj)
+                            
                             try:
-                                success_transform = util_bpy.apply_box_transform(mesh_root, item_box_data)
+                                # 应用变换 (与家具逻辑一致)
+                                # [优化] 传入预计算的 master_bounds
+                                master_b = self.asset_bounds.get(asset_id)
+                                success_transform = util_bpy.apply_box_transform(instance_obj, item_box_data, master_bounds=master_b)
                             except Exception as e:
+                                print(f"  ❌ {item_type} {item_id[:4]} 实例化变换异常: {e}")
                                 success_transform = False
-                                print(f"  ❌ {item_type} {item_id[:4]} 变换异常: {e}")
 
                             if success_transform:
                                 self.mesh_nodes[f"{item_type}s"][item_id] = {
-                                    "node": mesh_root,
-                                    "mesh": mesh_root,
+                                    "node": instance_obj,
+                                    "mesh": instance_obj,
                                     f"{item_type}_data": {"wall_id": wall_id}
                                 }
-                                print(f"  ✅ {item_type} {item_id[:4]} (asset_id={asset_id}) 添加成功")
+                                # print(f"  ✅ {item_type} {item_id[:4]} (asset_id={asset_id}) 实例化成功")
                             else:
                                 print(f"  ❌ {item_type} {item_id[:4]} 变换失败")
+                                # 如果变换失败，清理
+                                bpy.data.objects.remove(instance_obj, do_unlink=True)
                         else:
-                            print(f"  ❌ {item_type} {item_id[:4]} (asset_id={asset_id}) 导入失败")
+                            print(f"  ❌ {item_type} {item_id[:4]} (asset_id={asset_id}) 母版加载失败")
         else:
             print("🚫 跳过门窗创建 (show_door=False, show_window=False)")
         
@@ -746,26 +850,36 @@ class BpySceneCtx:
             mesh_root = None
             if should_load_gltf:
                 load_start = time.perf_counter()
-                # 尝试从多个路径加载模型
-                mesh_root = util_bpy.load_mesh_to_origin(asset_id, model_paths)
+                
+                # --- [优化] 使用实例化 (Collection Instance) ---
+                asset_coll = self._get_or_create_asset_collection(asset_id, model_paths)
                 load_time += time.perf_counter() - load_start
                 
-                if mesh_root:
+                if asset_coll:
                     transform_start = time.perf_counter()
+                    # 创建实例 (Empty 对象)
+                    instance_name = f"Instance_{asset_id}_{box_id[:4]}"
+                    instance_obj = bpy.data.objects.new(instance_name, None)
+                    instance_obj.instance_type = 'COLLECTION'
+                    instance_obj.instance_collection = asset_coll
+                    self.scene_collection.objects.link(instance_obj)
+                    
                     try:
-                        success_transform = util_bpy.apply_box_transform(mesh_root, box)
+                        # [优化] 传入预计算的 master_bounds
+                        master_b = self.asset_bounds.get(asset_id)
+                        success_transform = util_bpy.apply_box_transform(instance_obj, box, master_bounds=master_b)
                     except Exception as e:
-                        print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) 变换异常: {e}")
+                        print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) 实例化变换异常: {e}")
                         success_transform = False
                     transform_time += time.perf_counter() - transform_start
                     
                     if success_transform:
                         self.mesh_nodes["boxes"][box_id] = {
-                            "node": mesh_root, "mesh": mesh_root, "box_data": box
+                            "node": instance_obj, "mesh": instance_obj, "box_data": box
                         }
                         success_count += 1
                         name = box.get('label', box.get('class', 'unknown'))
-                        print(f"  ✅ {name} (asset_id={asset_id}) 添加成功")
+                        # print(f"  ✅ {name} (asset_id={asset_id}) 实例化成功")
                         continue
                 
                 # 如果 gltf 加载失败，判断是否需要回退
@@ -790,10 +904,6 @@ class BpySceneCtx:
                 except Exception as e:
                     name = box.get('label', box.get('class', 'unknown'))
                     print(f"  ❌ {name} (bbox几何体): {e}")
-
-        total_time = time.perf_counter() - total_start
-        print(f"✅ 场景构建完成! 成功添加 {success_count}/{len(self.context['boxes'])} 个物体")
-        print(f"   构建耗时: {total_time:.2f}s (加载: {load_time:.2f}s, 变换: {transform_time:.2f}s)")
 
         total_time = time.perf_counter() - total_start
         print(f"✅ 场景构建完成! 成功添加 {success_count}/{len(self.context['boxes'])} 个物体")
@@ -942,7 +1052,7 @@ class BpySceneCtx:
         if not self.if_set_lights:
             # 顶视图合并环境光与指定的人造灯
             self.setup_lighting(lighting_type=lighting_type, ambient_light_color=[1.0, 1.0, 1.0], ambient_strength=3.0)
-        
+
         # 显式控制背景透明度
         self.scene.render.film_transparent = hdri_transparent_background
 
@@ -964,14 +1074,10 @@ class BpySceneCtx:
         camera_height = z_max + max(span) * 1.5
         camera_position = np.array([center[0], center[1], camera_height], dtype=float)
         look_at_target = np.array([center[0], center[1], 0.0], dtype=float)
-        if up_vector is None:
-            up_vector = [0.0, 1.0, 0.0]
 
-        up_vector = np.array(up_vector, dtype=float)
-        if np.linalg.norm(up_vector) < 1e-6:
-            up_vector = np.array([0.0, 1.0, 0.0], dtype=float)
-        else:
-            up_vector = up_vector / np.linalg.norm(up_vector)
+        up_vector = np.array(up_vector if up_vector else [0.0, 1.0, 0.0], dtype=float)
+        up_norm = np.linalg.norm(up_vector)
+        up_vector = up_vector / up_norm if up_norm > 1e-6 else np.array([0.0, 1.0, 0.0], dtype=float)
 
         if manual_fov is not None:
             fov_y = np.radians(manual_fov)
@@ -987,29 +1093,23 @@ class BpySceneCtx:
         else:
             fov_y = np.radians(70.0)
 
-        up_vector_np = np.array(up_vector, dtype=float)
-
         forward = look_at_target - camera_position
-        if np.linalg.norm(forward) < 1e-6:
-            forward = np.array([0.0, 0.0, -1.0], dtype=float)
-        else:
-            forward = forward / np.linalg.norm(forward)
+        forward = forward / np.linalg.norm(forward) if np.linalg.norm(forward) > 1e-6 else np.array([0.0, 0.0, -1.0], dtype=float)
 
-        right = np.cross(forward, up_vector_np)
+        right = np.cross(forward, up_vector)
         right_norm = np.linalg.norm(right)
         if right_norm < 1e-6:
             fallback_up = np.array([0.0, 0.0, 1.0], dtype=float)
             right = np.cross(forward, fallback_up)
             right_norm = np.linalg.norm(right)
             if right_norm < 1e-6:
-                fallback_up = np.array([1.0, 0.0, 0.0], dtype=float)
-                right = np.cross(forward, fallback_up)
-                right_norm = np.linalg.norm(right)
-        right = right / max(right_norm, 1e-6)
+                right = np.array([1.0, 0.0, 0.0], dtype=float)
+                right_norm = 1.0
+        right = right / right_norm
         up = np.cross(right, forward)
 
-        camera_data = bpy.data.cameras.new(name="Camera")
-        camera_obj = bpy.data.objects.new("Camera", camera_data)
+        camera_data = bpy.data.cameras.new(name=f"Camera_{id(self)}")
+        camera_obj = bpy.data.objects.new(f"Camera_{id(self)}", camera_data)
         self.scene_collection.objects.link(camera_obj)
         self.scene.camera = camera_obj
         camera_matrix = Matrix((
@@ -1066,10 +1166,7 @@ class BpySceneCtx:
         self.scene.render.resolution_x = width
         self.scene.render.resolution_y = height
         self.scene.render.filepath = output_path
-
-        render = self.scene.render
-        render.image_settings.color_mode = 'RGBA'
-        render.film_transparent = hdri_transparent_background
+        self.scene.render.image_settings.color_mode = 'RGBA'
 
         print(f"🎬 渲染中 ({width}x{height})...")
         try:
@@ -1146,6 +1243,7 @@ class BpySceneCtx:
         setup_start = time.perf_counter()
         if not self.if_set_lights:
             self.setup_lighting(lighting_type=lighting_type)
+
         if use_HDRI:
             hdri_path = self.config.get("hdri_path")
             if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
@@ -1325,7 +1423,7 @@ if __name__ == "__main__":
     
     # 测试场景渲染
     line = 15
-    jsonl_path = '/data-nas/data/experiments/mushui/datasets/manycore/spatialllm_raw.jsonl'
+    jsonl_path = '/data-nas/data/experiments/mushui/datasets/manycore/spatiallm_raw.jsonl'
     base_dir = os.path.join(os.path.dirname(__file__), '..')
     test_dir = os.path.join(base_dir, 'test_bpy')
     os.makedirs(test_dir, exist_ok=True)
@@ -1344,17 +1442,17 @@ if __name__ == "__main__":
         print("\n" + "="*60)
         print("渲染俯视图")
         print("="*60)
-        ctx.topdown_view(topdown_path, use_bbox_geometry=False,
+        ctx.topdown_view(topdown_path, geometry_mode="gltf",
                         show_wall=True, show_window=True, show_door=True, show_ceiling=False, auto_fov=True, auto_transparent=False, use_HDRI=True, render_depth=True)
 
         look_at = [
             (ctx.context["meta"]["center"][0], ctx.context["meta"]["center"][1], ctx.context["meta"]["z_max"] / 2)
         ][0]
         views = [
-            ("right", [look_at[0] + ctx.context["meta"]["span"][0]/2 - 0.1, look_at[1], ctx.context["meta"]["z_max"] * 2/3]),
-            ("left", [look_at[0] - ctx.context["meta"]["span"][0]/2 + 0.1, look_at[1], ctx.context["meta"]["z_max"] * 2/3]),
-            ("front", [look_at[0], look_at[1] + ctx.context["meta"]["span"][1]/2 - 0.1, ctx.context["meta"]["z_max"] * 2/3]),
-            ("back", [look_at[0], look_at[1] - ctx.context["meta"]["span"][1]/2 + 0.1, ctx.context["meta"]["z_max"] * 2/3]),
+            # ("right", [look_at[0] + ctx.context["meta"]["span"][0]/2 - 0.1, look_at[1], ctx.context["meta"]["z_max"] * 2/3]),
+            # ("left", [look_at[0] - ctx.context["meta"]["span"][0]/2 + 0.1, look_at[1], ctx.context["meta"]["z_max"] * 2/3]),
+            # ("front", [look_at[0], look_at[1] + ctx.context["meta"]["span"][1]/2 - 0.1, ctx.context["meta"]["z_max"] * 2/3]),
+            # ("back", [look_at[0], look_at[1] - ctx.context["meta"]["span"][1]/2 + 0.1, ctx.context["meta"]["z_max"] * 2/3]),
         ]
         for view_name, camera_pos in views:
             output_file = os.path.join(test_dir, f'scene_view_{view_name}.png')
@@ -1368,7 +1466,7 @@ if __name__ == "__main__":
                 width=1024,
                 height=1024,
                 transparent_alpha=0.3,
-                use_bbox_geometry=False,
+                geometry_mode="gltf",
                 show_wall=True,
                 show_window=False,
                 show_door=False, 
