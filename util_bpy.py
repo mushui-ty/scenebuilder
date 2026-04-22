@@ -831,6 +831,12 @@ def apply_wall_transparency(obj, alpha):
     if bpy is None or obj is None:
         return None
 
+    # For fully transparent (alpha=0), hide the object from render entirely
+    if alpha <= 0.01:
+        obj.hide_render = True
+        obj.hide_viewport = True
+        return [{"slot_idx": -1, "original": None, "replacement": None, "hide": True}]
+
     replacements = []
     for slot_idx, slot in enumerate(obj.material_slots):
         mat = slot.material
@@ -873,6 +879,10 @@ def restore_wall_transparency(obj, records):
         return
 
     for slot in records:
+        if slot.get("hide"):
+            obj.hide_render = False
+            obj.hide_viewport = False
+            continue
         slot_idx = slot["slot_idx"]
         original = slot["original"]
         replacement = slot["replacement"]

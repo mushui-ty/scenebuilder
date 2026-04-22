@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import time
 import numpy as np
@@ -123,6 +124,62 @@ def render_floor_plan(
         
     print(f"✅ [Render] 俯视图与元数据已写入: {plan_dir}")
     return plan_dir
+
+def render_floorplan_view(
+    floor_plan: Dict[str, Any],
+    plan_dir: str,
+    camera_position: List[float],
+    fov_y: float,
+    width: int = 1024,
+    height: int = 1024,
+) -> Optional[str]:
+    """Render floorplan with fixed camera parameters (no auto camera computation).
+
+    Uses render_view instead of topdown_view so that camera_position and fov_y
+    are preserved exactly as given. This allows shift adjustments to be
+    reflected directly in the rendered image.
+
+    Args:
+        floor_plan: Dict with vertices, partition, height (SSL coordinates)
+        plan_dir: Output directory
+        camera_position: Camera position in SSL coords [x, y, z]
+        fov_y: Vertical field of view in radians
+        width, height: Render resolution
+    """
+    vertices_input = floor_plan.get("vertices") or []
+    if not vertices_input:
+        print("⚠️ floor_plan has no valid vertices, skipping render")
+        return None
+
+    ctx = BpySceneCtx("floorplan_view")
+    raw_walls = _build_walls_from_data(floor_plan)
+    if not raw_walls:
+        print("⚠️ No walls built, skipping render")
+        return None
+
+    ctx.add_walls(raw_walls)
+    os.makedirs(plan_dir, exist_ok=True)
+
+    topdown_path = os.path.join(plan_dir, "topdown.png")
+    ctx.render_view(
+        output_path=topdown_path,
+        camera_position=camera_position,
+        look_at_target=[camera_position[0], camera_position[1], 0.0],
+        width=width,
+        height=height,
+        up_vector=[0.0, 1.0, 0.0],
+        auto_fov=False,
+        manual_fov=math.degrees(fov_y),
+        auto_transparent=False,
+        show_wall=True,
+        show_window=False,
+        show_door=False,
+        show_ceiling=False,
+        use_HDRI=False,
+    )
+
+    return plan_dir
+
 
 if __name__ == "__main__":
     # 测试数据

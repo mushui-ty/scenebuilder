@@ -34,7 +34,7 @@ model_generate_path: /data-nas/data/dataset/qunhe/Manycore-Future/generate # 生
 model_hole_path: /data-nas/data/dataset/qunhe/Manycore-Future/holes # 门窗模型路径
 
 # 渲染配置
-array_light_intensity: 20.0 # array 模式下每盏灯的强度
+array_light_intensity: 8.0 # array 模式下每盏灯的强度
 blender_samples: 32 # Blender 渲染采样数
 
 

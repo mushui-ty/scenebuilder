@@ -294,14 +294,19 @@ class BpySceneCtx:
         """批量添加家具"""
         for box in boxes:
             self.add_box(box["center"], box["angle_z"], box["scale"],
-                        box.get("label"), box.get("caption"), box.get("asset_id"))
+                        box.get("label"), box.get("caption"), box.get("asset_id"),
+                        box.get("active", False))
 
     def add_box(self, center: List[float], angle_z: float, scale: List[float],
-                label: Optional[str] = None, caption: Optional[str] = None, 
-                asset_id: Optional[int] = None) -> str:
-        """添加单个家具，返回ID"""
+                label: Optional[str] = None, caption: Optional[str] = None,
+                asset_id: Optional[int] = None, active: bool = False) -> str:
+        """添加单个家具，返回ID
+
+        Args:
+            active: 是否参与物理掉落仿真（True=自由落体，False=固定）
+        """
         box_id = util.generate_unique_id()
-        box_data = {"center": center, "angle_z": angle_z, "scale": scale}
+        box_data = {"center": center, "angle_z": angle_z, "scale": scale, "active": active}
 
         if label: box_data["label"] = label
         if caption: box_data["caption"] = caption
@@ -548,7 +553,7 @@ class BpySceneCtx:
             
             bbox_str = f'Bbox(id="{box_id}", room_id="{room_id}", label="{label}", center={center}, angle_z={angle_z}, scale={scale}'
             if box.get("asset_id") is not None:
-                bbox_str += f', asset_id={box["asset_id"]}'
+                bbox_str += f', asset_id="{box["asset_id"]}"'
             bbox_str += ')'
             lines.append(bbox_str)
         
@@ -909,6 +914,224 @@ class BpySceneCtx:
         print(f"✅ 场景构建完成! 成功添加 {success_count}/{len(self.context['boxes'])} 个物体")
         print(f"   构建耗时: {total_time:.2f}s (加载: {load_time:.2f}s, 变换: {transform_time:.2f}s)")
 
+    def drop_sim(self, sim_time: float = 1.0):
+        """物理掉落仿真：让 active 物体在重力下落到支撑面上。
+
+        必须在 construct_scene() 之后调用。
+        只修改 active 物体的 center.z，其他属性不变。
+        如果没有 active 物体则直接跳过。
+
+        Args:
+            sim_time: 仿真时长（秒），默认 1 秒
+
+        流程：
+            1. 找出所有 active 物体
+            2. 没有 active → 直接返回
+            3. active 物体穿透支撑面 → 抬到支撑面上方
+            4. passive 物体设为 PASSIVE 刚体（MESH，固定不动）
+            5. active 物体设为 ACTIVE 刚体（CONVEX_HULL，自由落体）
+            6. 仿真 sim_time 秒（高摩擦 + 零弹性）
+            7. 读取最终 z，异常检测后写回 context
+        """
+        import math
+
+        # 1. 分类 active / passive
+        active_items = []  # (box_id, box_data, blender_obj)
+        passive_items = []
+
+        for box_id, box_info in self.mesh_nodes.get("boxes", {}).items():
+            box_data = box_info["box_data"]
+            blender_obj = box_info["node"]
+            if box_data.get("active", False):
+                active_items.append((box_id, box_data, blender_obj))
+            else:
+                passive_items.append((box_id, box_data, blender_obj))
+
+        # 2. 没有 active 物体 → 跳过
+        if not active_items:
+            print("⚡ drop_sim: 没有 active 物体，跳过物理仿真")
+            return
+
+        print(f"⚡ drop_sim: {len(active_items)} active, {len(passive_items)} passive")
+
+        # 3. active 物体穿透检测 → 按需抬高
+        #    找到 supported_by 对应的物体顶面，如果 active 底面低于支撑顶面则抬高
+        for box_id, box_data, blender_obj in active_items:
+            my_z_bottom = box_data["center"][2] - box_data["scale"][2] / 2
+            # 在 context 中找支撑物体（通过 label 匹配）
+            supported_by = box_data.get("supported_by", "")
+            parent_z_top = 0.0  # 默认地面
+
+            for _, other_data in self.context["boxes"].items():
+                if other_data.get("label") == supported_by:
+                    parent_z_top = other_data["center"][2] + other_data["scale"][2] / 2
+                    break
+
+            if my_z_bottom < parent_z_top:
+                lift = parent_z_top - my_z_bottom + 0.01
+                blender_obj.location[2] += lift
+                print(f"  ↑ {box_data.get('label', box_id)}: 抬高 {lift*100:.1f}cm (穿透支撑面)")
+
+        # 4. 初始化刚体世界
+        if bpy.context.scene.rigidbody_world is not None:
+            bpy.ops.rigidbody.world_remove()
+        bpy.ops.rigidbody.world_add()
+        bpy.context.scene.rigidbody_world.substeps_per_frame = 10
+        bpy.context.scene.rigidbody_world.solver_iterations = 10
+        bpy.context.scene.rigidbody_world.use_split_impulse = True
+
+        # Helper: add rigid body with proper context
+        def _add_rigidbody(obj, rb_type, collision_shape='MESH', kinematic=False,
+                           mass=1.0, friction=100.0, restitution=0.0,
+                           linear_damping=0.04, angular_damping=0.1):
+            """Add rigid body to obj, handling Empty parents by finding child Mesh."""
+            target = obj
+            # glTF imports often create Empty root → child Mesh; find actual Mesh
+            if obj.type != 'MESH':
+                mesh_children = [c for c in obj.children_recursive if c.type == 'MESH']
+                if mesh_children:
+                    target = mesh_children[0]
+                else:
+                    raise RuntimeError(f"No MESH found in {obj.name} (type={obj.type})")
+
+            bpy.ops.object.select_all(action='DESELECT')
+            bpy.context.view_layer.objects.active = target
+            target.select_set(True)
+            bpy.ops.rigidbody.object_add(type=rb_type)
+            target.rigid_body.collision_shape = collision_shape
+            target.rigid_body.friction = friction
+            if rb_type == 'PASSIVE':
+                target.rigid_body.kinematic = kinematic
+            else:
+                target.rigid_body.mass = mass
+                target.rigid_body.restitution = restitution
+                target.rigid_body.linear_damping = linear_damping
+                target.rigid_body.angular_damping = angular_damping
+            target.select_set(False)
+
+        # 5. 配置 passive 物体（地板、墙体、固定家具）
+        # 地板和墙体
+        for category in ["floor", "walls"]:
+            nodes = self.mesh_nodes.get(category, {})
+            if isinstance(nodes, dict):
+                if "node" in nodes:
+                    obj = nodes["node"]
+                    if obj:
+                        _add_rigidbody(obj, 'PASSIVE', collision_shape='MESH', kinematic=True)
+                else:
+                    for wall_info in nodes.values():
+                        obj = wall_info.get("node") if isinstance(wall_info, dict) else None
+                        if obj:
+                            _add_rigidbody(obj, 'PASSIVE', collision_shape='MESH', kinematic=True)
+
+        # passive 家具
+        for box_id, box_data, blender_obj in passive_items:
+            try:
+                _add_rigidbody(blender_obj, 'PASSIVE', collision_shape='MESH', kinematic=True)
+            except Exception as e:
+                print(f"  ⚠️ passive 设置失败: {box_data.get('label', box_id)}: {e}")
+
+        # 6. 配置 active 物体
+        original_z = {}
+        for box_id, box_data, blender_obj in active_items:
+            original_z[box_id] = blender_obj.location[2]
+            try:
+                _add_rigidbody(blender_obj, 'ACTIVE', collision_shape='CONVEX_HULL',
+                               mass=1.0, friction=100.0, restitution=0.0,
+                               linear_damping=0.5, angular_damping=0.5)
+            except Exception as e:
+                print(f"  ⚠️ active 设置失败: {box_data.get('label', box_id)}: {e}")
+
+        # 7. 仿真
+        fps = bpy.context.scene.render.fps
+        total_frames = int(math.ceil(sim_time * fps))
+        bpy.context.scene.frame_start = 1
+        bpy.context.scene.frame_end = total_frames
+
+        print(f"  仿真: {total_frames} 帧 ({sim_time}s)...")
+        for frame in range(1, total_frames + 1):
+            bpy.context.scene.frame_set(frame)
+
+        # 8. 冻结最终位置 + 读取结果
+        for box_id, box_data, blender_obj in active_items:
+            bpy.context.view_layer.objects.active = blender_obj
+            blender_obj.select_set(True)
+            bpy.ops.object.visual_transform_apply()
+            blender_obj.select_set(False)
+
+            new_z = blender_obj.location[2]
+            old_z = original_z[box_id]
+
+            # 异常检测：z 不合理则回退
+            if new_z < -0.5 or abs(new_z - old_z) > 2.0:
+                print(f"  ⚠️ {box_data.get('label', box_id)}: z={new_z:.3f} 异常，回退到 {old_z:.3f}")
+                new_z = old_z
+
+            # 只更新 center 的 z 分量
+            old_center_z = box_data["center"][2]
+            delta_z = new_z - old_z  # blender location 的变化量
+            box_data["center"][2] = old_center_z + delta_z
+            # 同步 context
+            self.context["boxes"][box_id]["center"][2] = box_data["center"][2]
+
+            label = box_data.get("label", box_id)
+            if abs(delta_z) > 0.001:
+                print(f"  ✓ {label}: z {old_center_z:.3f} → {box_data['center'][2]:.3f} (Δ={delta_z*100:.1f}cm)")
+
+        # 9. 清理刚体
+        for obj in bpy.data.objects:
+            if obj.rigid_body:
+                bpy.context.view_layer.objects.active = obj
+                obj.select_set(True)
+                bpy.ops.rigidbody.object_remove()
+                obj.select_set(False)
+
+        print(f"⚡ drop_sim 完成")
+
+    def export_glb(self, output_path: str, export_wall: bool = True, export_ceiling: bool = False):
+        """将当前 Blender 场景导出为 GLB 文件。
+
+        Args:
+            output_path: GLB 文件保存路径
+            export_wall: 是否导出墙体，默认 True
+            export_ceiling: 是否导出天花板，默认 False
+        """
+        abs_path = os.path.abspath(output_path)
+        out_dir = os.path.dirname(abs_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        # 临时隐藏不需要导出的对象
+        hidden_objs = []
+
+        if not export_wall:
+            for wall_info in self.mesh_nodes.get("walls", {}).values():
+                obj = wall_info.get("node")
+                if obj and not obj.hide_render:
+                    obj.hide_set(True)
+                    hidden_objs.append(obj)
+
+        if not export_ceiling:
+            ceiling_info = self.mesh_nodes.get("ceiling")
+            if ceiling_info:
+                obj = ceiling_info.get("node")
+                if obj and not obj.hide_render:
+                    obj.hide_set(True)
+                    hidden_objs.append(obj)
+
+        try:
+            bpy.ops.export_scene.gltf(
+                filepath=abs_path,
+                export_format='GLB',
+                use_selection=False,
+                export_apply=True,
+            )
+            print(f"✅ GLB 导出完成: {abs_path}")
+        finally:
+            # 恢复被隐藏的对象
+            for obj in hidden_objs:
+                obj.hide_set(False)
+
     def setup_lighting(self, intensity: float = 250,
                       lighting_type: Literal["area", "array", "none"] = "array",
                       ambient_light_color: list = None,
@@ -1016,7 +1239,7 @@ class BpySceneCtx:
                      show_window: bool = True, show_door: bool = True, show_ceiling: bool = True,
                      up_vector: list = None,
                      auto_fov: bool = True, manual_fov: float = None,
-                     auto_transparent: bool = True, transparent_alpha: float = 0.3,
+                     auto_transparent: bool = True, transparent_alpha: float = 0.0,
                      render_depth: bool = False, use_HDRI: bool = True,
                      hdri_transparent_background: bool = True,
                      visible_shadow: bool = True,
@@ -1433,7 +1656,7 @@ if __name__ == "__main__":
         data = util.read_jsonl_line(jsonl_path, line)
         print(f"📁 加载场景: {data['room']['room_type']} ({len(data['bbox'])} 个物体)")
         
-        ctx = BpySceneCtx(data['room']['room_type'])
+        ctx = BpySceneCtx(data['room']['room_type'], render_engine="EEVEE")
         ctx.add_walls(data['wall'])
         ctx.add_doors(data.get('door', []))
         ctx.add_windows(data.get('window', []))

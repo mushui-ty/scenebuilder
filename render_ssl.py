@@ -54,18 +54,21 @@ Bbox(id="20", room_id="D54g", label="dining chair", center=[6.91, 2.76, 0.42], a
 '''
 
 def render_ssl(
-    ssl_text: str, 
-    backend: str = 'bpy', 
-    output_root: str = 'output_ssl', 
-    image: Optional[str] = None, 
+    ssl_text: str,
+    backend: str = 'bpy',
+    output_root: str = 'output_ssl',
+    image: Optional[str] = None,
     retrieve_hole: bool = True,
     asset_mode: Literal["none", "retrieve", "generate"] = "none",
     outpaint_image_dir: Optional[str] = None,
     gen_asset_dir: Optional[str] = "/data-nas/data/dataset/qunhe/Manycore-Future/generate",
     gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
     gen_texture: bool = False,
+    texture_dir: Optional[str] = None,
     correct_tilt: bool = True,
-    correct_yaw: bool = True
+    correct_yaw: bool = True,
+    views: Optional[list] = None,
+    export_glb: bool = True,
 ):
     """
     主渲染函数
@@ -80,6 +83,8 @@ def render_ssl(
         gen_asset_dir: 生成资产保存目录 (默认为 output_root)
         correct_tilt: 是否纠正模型倾斜
         correct_yaw: 是否纠正模型偏航角和输入图片对齐
+        texture_dir: 外部纹理目录路径，包含 floor_texture.png, wall_texture.png, ceiling_texture.png
+                     如果提供，优先使用外部纹理；否则当 gen_texture=True 时内部生成
     """
     if outpaint_image_dir is None:
         outpaint_image_dir = output_root
@@ -134,8 +139,22 @@ def render_ssl(
     # ctx.add_boxes 接受列表，其中元素包含 label, center, angle_z, scale, asset_id, caption
     ctx.add_boxes(scene_json["bbox"])
 
-    # 5. 生成纹理
-    if gen_texture:
+    # 5. 纹理处理
+    if texture_dir and os.path.isdir(texture_dir):
+        # 使用外部预生成的纹理
+        floor_tex = os.path.join(texture_dir, "floor_texture.png")
+        wall_tex = os.path.join(texture_dir, "wall_texture.png")
+        ceiling_tex = os.path.join(texture_dir, "ceiling_texture.png")
+        if os.path.exists(wall_tex):
+            ctx.set_wall_blender_texture_path(wall_tex)
+            print(f"🎨 使用外部墙体纹理: {wall_tex}")
+        if os.path.exists(floor_tex):
+            ctx.set_floor_blender_texture_path(floor_tex)
+            print(f"🎨 使用外部地板纹理: {floor_tex}")
+        if os.path.exists(ceiling_tex) and hasattr(ctx, 'set_ceiling_blender_texture_path'):
+            ctx.set_ceiling_blender_texture_path(ceiling_tex)
+            print(f"🎨 使用外部天花板纹理: {ceiling_tex}")
+    elif gen_texture:
         generate_texture(ctx, image)
 
     
@@ -170,35 +189,52 @@ def render_ssl(
         #     ctx.set_blender_samples(16)
     # -------------------------------
 
-    ctx.topdown_view(os.path.join(output_dir, "topdown.png"), show_ceiling=False, rebuild=True, use_HDRI=False)
-    
+    # Render topdown if requested (or if views is None = all)
+    if views is None or "topdown" in views:
+        ctx.topdown_view(os.path.join(output_dir, "topdown.png"), show_ceiling=False, rebuild=True, use_HDRI=False)
 
-    # 从场景右后方看向场景中心
+
+    # Camera parameters
     center = ctx.context["meta"]["center"]
     span = ctx.context["meta"]["span"]
     z_max = ctx.context["meta"]["z_max"]
     look_at = [center[0], center[1], z_max / 2]
-    camera_pos = [center[0]+span[0]/5, center[1]+9*span[1]/20, z_max * 5/6]
-    
-    ctx.render_view(
-        output_path=os.path.join(output_dir, "right.png"),
-        camera_position=camera_pos,
-        look_at_target=look_at,
-        rebuild=True,
-        use_HDRI=False
-    )
 
-    # 从场景左前方看向场景中心
-    camera_pos = [center[0]-span[0]/3, center[1]-span[1]/3, z_max * 5/6]
-    
-    ctx.render_view(
-        output_path=os.path.join(output_dir, "left.png"),
-        camera_position=camera_pos,
-        look_at_target=look_at,
-        rebuild=True,
-        use_HDRI=False
-    )
-    # 8. 保存 JSON 和 SSL
+    # View → camera position mapping
+    _view_cameras = {
+        "front":        [center[0],                center[1] - span[1] / 3, z_max * 5 / 6],
+        "behind":       [center[0],                center[1] + span[1] / 3, z_max * 5 / 6],
+        "left":         [center[0] - span[0] / 3,  center[1],               z_max * 5 / 6],
+        "right":        [center[0] + span[0] / 3,  center[1],               z_max * 5 / 6],
+        "leftfront":    [center[0] - span[0] / 3,  center[1] - span[1] / 3, z_max * 5 / 6],
+        "rightfront":   [center[0] + span[0] / 3,  center[1] - span[1] / 3, z_max * 5 / 6],
+        "leftbehind":   [center[0] - span[0] / 3,  center[1] + span[1] / 3, z_max * 5 / 6],
+        "rightbehind":  [center[0] + span[0] / 3,  center[1] + span[1] / 3, z_max * 5 / 6],
+    }
+
+    # Determine which views to render (None = all)
+    render_views = list(_view_cameras.keys()) if views is None else [v for v in views if v in _view_cameras]
+
+    first_perspective = True
+    for view_name in render_views:
+        ctx.render_view(
+            output_path=os.path.join(output_dir, f"{view_name}.png"),
+            camera_position=_view_cameras[view_name],
+            look_at_target=look_at,
+            rebuild=first_perspective,
+            use_HDRI=False
+        )
+        first_perspective = False
+
+    # 8. 导出 GLB
+    if export_glb:
+        glb_path = os.path.join(output_dir, "scene.glb")
+        try:
+            ctx.export_glb(glb_path)
+        except Exception as e:
+            print(f"⚠️ GLB 导出失败: {e}")
+
+    # 9. 保存 JSON 和 SSL
     with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(scene_json, f, indent=2, ensure_ascii=False)
     with open(os.path.join(output_dir, "ssl.txt"), "w", encoding="utf-8") as f:
