@@ -1,0 +1,1 @@
+/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_room_id.py

@@ -68,7 +68,9 @@ def render_ssl(
     correct_tilt: bool = True,
     correct_yaw: bool = True,
     views: Optional[list] = None,
-    export_glb: bool = True,
+    export_glb: bool = False,
+    append_timestamp: bool = False,
+    samples: Optional[int] = None,
 ):
     """
     主渲染函数
@@ -85,23 +87,22 @@ def render_ssl(
         correct_yaw: 是否纠正模型偏航角和输入图片对齐
         texture_dir: 外部纹理目录路径，包含 floor_texture.png, wall_texture.png, ceiling_texture.png
                      如果提供，优先使用外部纹理；否则当 gen_texture=True 时内部生成
+        samples: 渲染采样数
     """
     if outpaint_image_dir is None:
         outpaint_image_dir = output_root
- 
 
     print(f"\n🚀 开始渲染 [后端: {backend}, 资产模式: {asset_mode}]")
-    
+
     # 1. 解析为 JSON
     scene_json = parse_ssl_to_json(ssl_text)
-    # print(scene_json)
     room_type = scene_json["room"]["room_type"]
-    
+
     # 2. 资产处理
     scene_json = get_mesh(
-        scene_json, 
-        image_path=image, 
-        retrieve_hole=retrieve_hole, 
+        scene_json,
+        image_path=image,
+        retrieve_hole=retrieve_hole,
         asset_mode=asset_mode,
         outpaint_image_dir=outpaint_image_dir,
         gen_asset_dir=gen_asset_dir,
@@ -109,12 +110,9 @@ def render_ssl(
         correct_tilt=correct_tilt,
         correct_yaw=correct_yaw
     )
-    
+
     # 将更新后的 asset_id 填回 SSL
     updated_ssl = update_ssl_with_asset_id(ssl_text, scene_json)
-
-    
-      
 
     # 3. 选择 Context
     if backend == 'bpy':
@@ -130,18 +128,20 @@ def render_ssl(
             from fast_scene import SceneCtx
         ctx = SceneCtx(room_type, gen_asset_dir)
 
-    # 4. 填充数据
+    # 3.5 设置渲染采样数
+    if samples is not None and hasattr(ctx, 'set_blender_samples'):
+        ctx.set_blender_samples(samples)
+
+    # 4. 填充数据（add_walls 内部会自动过滤 height<=0 的墙）
     ctx.add_walls(scene_json["wall"])
     if scene_json["door"]: ctx.add_doors(scene_json["door"])
     if scene_json["window"]: ctx.add_windows(scene_json["window"])
-    
+
     # 将 JSON 中的 bbox 数据适配到 ctx.add_boxes
-    # ctx.add_boxes 接受列表，其中元素包含 label, center, angle_z, scale, asset_id, caption
     ctx.add_boxes(scene_json["bbox"])
 
     # 5. 纹理处理
     if texture_dir and os.path.isdir(texture_dir):
-        # 使用外部预生成的纹理
         floor_tex = os.path.join(texture_dir, "floor_texture.png")
         wall_tex = os.path.join(texture_dir, "wall_texture.png")
         ceiling_tex = os.path.join(texture_dir, "ceiling_texture.png")
@@ -157,42 +157,33 @@ def render_ssl(
     elif gen_texture:
         generate_texture(ctx, image)
 
-    
-
-
     # 6. 准备输出目录
-    timestamp = int(time.time())
-    output_dir = os.path.join(output_root, f"{timestamp}")
+    if append_timestamp:
+        timestamp = int(time.time())
+        output_dir = os.path.join(output_root, f"{timestamp}")
+    else:
+        output_dir = output_root
     os.makedirs(output_dir, exist_ok=True)
 
     # 7. 执行渲染 (俯视图 + 前视图)
     print("🎨 正在生成视图...")
-    
+
     # --- 风险评估逻辑：提前预防 OOM ---
-    # 统计物体总数
     total_objects = len(scene_json.get("bbox", [])) + \
                     len(scene_json.get("door", [])) + \
                     len(scene_json.get("window", []))
-    
-    # 阈值设定：如果物体超过 20 个，认为高风险
+
     OBJ_RISK_THRESHOLD = 25
-    
+
     if total_objects > OBJ_RISK_THRESHOLD:
         print(f"⚠️ 场景物体较多 ({total_objects} 个)，检测到 OOM 风险。")
         simplified_path = ctx.config.get("model_simplified_path", "/data-nas/data/dataset/qunhe/Manycore-Future/simplified")
         print(f"🚀 直接切换到简化模型路径进行渲染: {simplified_path}")
         ctx.set_model_path(simplified_path)
-        
-        # # 同时降低采样数以加快渲染并减小压力
-        # if ctx.config.get("blender_samples", 32) > 16:
-        #     print("📉 降低渲染采样数至 16 以减轻负载。")
-        #     ctx.set_blender_samples(16)
-    # -------------------------------
 
     # Render topdown if requested (or if views is None = all)
     if views is None or "topdown" in views:
         ctx.topdown_view(os.path.join(output_dir, "topdown.png"), show_ceiling=False, rebuild=True, use_HDRI=False)
-
 
     # Camera parameters
     center = ctx.context["meta"]["center"]
@@ -212,7 +203,6 @@ def render_ssl(
         "rightbehind":  [center[0] + span[0] / 3,  center[1] + span[1] / 3, z_max * 5 / 6],
     }
 
-    # Determine which views to render (None = all)
     render_views = list(_view_cameras.keys()) if views is None else [v for v in views if v in _view_cameras]
 
     first_perspective = True

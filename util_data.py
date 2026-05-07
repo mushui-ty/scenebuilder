@@ -689,7 +689,6 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
             add_if_present(bbox_item, "asset_id", get_attr(r'asset_id="([^"]+)"', line))
             add_if_present(bbox_item, "caption", get_attr(r'caption="([^"]+)"', line))
             add_if_present(bbox_item, "bbox_2d", get_list_attr(r'bbox_2d=\[([^\]]+)\]', line))
-            add_if_present(bbox_item, "supported_by", get_attr(r'supported_by="([^"]+)"', line))
             data["bbox"].append(bbox_item)
 
     # 将独立的 Caption 匹配回对应的物体

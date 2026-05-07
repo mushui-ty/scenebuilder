@@ -65,7 +65,6 @@ class SceneCtx:
             "windows": {},    # window_id -> node
             "boxes": {},      # box_id -> node
             "floor": None,    # floor node
-            "ceiling": None,  # ceiling node
         }
 
         # Load config
@@ -372,7 +371,6 @@ class SceneCtx:
                     baseColorFactor=[0.8, 0.7, 0.5, 1.0])
 
         self.scene.add(pyrender.Mesh.from_trimesh(floor_mesh))
-        self.mesh_nodes["floor"] = {"mesh": floor_mesh}
 
         # 创建墙体
         if show_wall:
@@ -485,7 +483,6 @@ class SceneCtx:
             ceiling_mesh.visual.material = trimesh.visual.material.PBRMaterial(baseColorFactor=ceiling_color)
         
         self.scene.add(pyrender.Mesh.from_trimesh(ceiling_mesh))
-        self.mesh_nodes["ceiling"] = {"mesh": ceiling_mesh}
 
     def construct_scene(self, show_wall: bool = True, show_window: bool = True,
                         show_door: bool = True, fix_coordinate: bool = False,
@@ -645,70 +642,6 @@ class SceneCtx:
         self.setup_lighting()
         # 通用视角渲染逻辑 (略，已包含在之前的实现中)
         pass
-
-    def export_glb(self, output_path: str, export_wall: bool = True, export_ceiling: bool = False):
-        """将构建好的场景导出为 GLB 文件。
-
-        收集 mesh_nodes 中所有 trimesh 网格，合并为 trimesh.Scene 后导出。
-
-        Args:
-            output_path: GLB 文件保存路径
-            export_wall: 是否导出墙体，默认 True
-            export_ceiling: 是否导出天花板，默认 False
-        """
-        if self.scene is None:
-            raise RuntimeError("场景未构建，请先调用 construct_scene()")
-
-        export_scene = trimesh.Scene()
-
-        # Floor
-        floor_info = self.mesh_nodes.get("floor")
-        if floor_info and floor_info.get("mesh"):
-            export_scene.add_geometry(floor_info["mesh"], node_name="floor")
-
-        # Ceiling
-        if export_ceiling:
-            ceiling_info = self.mesh_nodes.get("ceiling")
-            if ceiling_info and ceiling_info.get("mesh"):
-                export_scene.add_geometry(ceiling_info["mesh"], node_name="ceiling")
-
-        # Walls
-        if export_wall:
-            for wall_id, wall_info in self.mesh_nodes.get("walls", {}).items():
-                mesh = wall_info.get("mesh")
-                if mesh:
-                    export_scene.add_geometry(mesh, node_name=f"wall_{wall_id}")
-
-        # Doors
-        for door_id, door_info in self.mesh_nodes.get("doors", {}).items():
-            mesh = door_info.get("mesh")
-            if mesh:
-                export_scene.add_geometry(mesh, node_name=f"door_{door_id}")
-
-        # Windows
-        for window_id, window_info in self.mesh_nodes.get("windows", {}).items():
-            mesh = window_info.get("mesh")
-            if mesh:
-                export_scene.add_geometry(mesh, node_name=f"window_{window_id}")
-
-        # Boxes (furniture)
-        for box_id, box_info in self.mesh_nodes.get("boxes", {}).items():
-            mesh = box_info.get("mesh")
-            if mesh is None:
-                continue
-            label = box_info.get("box_data", {}).get("label", box_id)
-            if isinstance(mesh, trimesh.Scene):
-                for geom_name, geom in mesh.geometry.items():
-                    export_scene.add_geometry(geom, node_name=f"{label}_{geom_name}")
-            else:
-                export_scene.add_geometry(mesh, node_name=label)
-
-        abs_path = os.path.abspath(output_path)
-        out_dir = os.path.dirname(abs_path)
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
-        export_scene.export(abs_path, file_type="glb")
-        print(f"✅ GLB 导出完成: {abs_path}")
 
 if __name__ == "__main__":
     pass
