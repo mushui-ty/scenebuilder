@@ -1,22 +1,318 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-使用SSL格式数据渲染场景 - 支持 BPY 和 Pyrender 双后端
+使用 SSL 或 JSON 场景数据渲染 - 支持 BPY 和 Pyrender 双后端。
+每视角独立子进程渲染；直接运行本文件可查看 render_ssl 用法示例。
 """
 
-import os
 import json
-import time
-import yaml
-import numpy as np
-from typing import Dict, Any, List, Optional, Literal
+import os
+import subprocess
+import sys
+from typing import Optional, Literal
 
 try:
-    from .util_data import parse_ssl_to_json, get_mesh, update_ssl_with_asset_id, generate_texture
+    from .core.util_data import parse_scene_input, format_standard_ssl
 except (ImportError, ValueError):
-    from util_data import parse_ssl_to_json, get_mesh, update_ssl_with_asset_id, generate_texture # type: ignore
+    from core.util_data import parse_scene_input, format_standard_ssl  # type: ignore
 
-# 默认 SSL 示例
+
+# ---------------------------------------------------------------------------
+# 子进程 worker（每视角独立进程）
+# ---------------------------------------------------------------------------
+
+def _load_job(job_path: str) -> dict:
+    with open(job_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _instantiate_ctx(backend: str, room_type: str, asset_dir: Optional[str]):
+    """按 backend 创建 SceneCtx / BpySceneCtx。"""
+    if backend == "pyrender":
+        try:
+            from .core.fast_scene import SceneCtx
+        except (ImportError, ValueError):
+            from core.fast_scene import SceneCtx  # type: ignore
+        return SceneCtx(room_type, asset_dir)
+
+    try:
+        from .core.fast_scene_bpy import BpySceneCtx
+    except (ImportError, ValueError):
+        from core.fast_scene_bpy import BpySceneCtx  # type: ignore
+    return BpySceneCtx(room_type, asset_dir)
+
+
+def _prepare_render_ctx(
+    ctx,
+    scene_json: dict,
+    *,
+    texture_dir: Optional[str] = None,
+    gen_texture: bool = False,
+    image: Optional[str] = None,
+    samples: Optional[int] = None,
+):
+    if samples is not None and hasattr(ctx, "set_blender_samples"):
+        ctx.set_blender_samples(samples)
+
+    ctx.add_walls(scene_json["wall"])
+    if scene_json.get("door"):
+        ctx.add_doors(scene_json["door"])
+    if scene_json.get("window"):
+        ctx.add_windows(scene_json["window"])
+    ctx.add_boxes(scene_json["bbox"])
+
+    if texture_dir and os.path.isdir(texture_dir):
+        floor_tex = os.path.join(texture_dir, "floor_texture.png")
+        wall_tex = os.path.join(texture_dir, "wall_texture.png")
+        ceiling_tex = os.path.join(texture_dir, "ceiling_texture.png")
+        if os.path.exists(wall_tex):
+            ctx.set_wall_blender_texture_path(wall_tex)
+        if os.path.exists(floor_tex):
+            ctx.set_floor_blender_texture_path(floor_tex)
+        if os.path.exists(ceiling_tex) and hasattr(ctx, "set_ceiling_blender_texture_path"):
+            ctx.set_ceiling_blender_texture_path(ceiling_tex)
+    elif gen_texture:
+        try:
+            from .core.util_data import generate_texture
+        except (ImportError, ValueError):
+            from core.util_data import generate_texture  # type: ignore
+        generate_texture(ctx, image)
+
+    ctx.normalize_scene_data()
+    return ctx
+
+
+def _create_render_ctx(job: dict):
+    scene_json = job["scene_json"]
+    ctx = _instantiate_ctx(
+        job.get("backend", "bpy"),
+        scene_json["room"]["room_type"],
+        job.get("asset_dir"),
+    )
+    return _prepare_render_ctx(
+        ctx,
+        scene_json,
+        texture_dir=job.get("texture_dir"),
+        gen_texture=job.get("gen_texture", False),
+        image=job.get("image"),
+        samples=job.get("samples"),
+    )
+
+
+def _job_render_kwargs(job: dict) -> dict:
+    return dict(
+        export_glb=job.get("export_glb", False),
+        export_point_cloud=job.get("export_point_cloud", False),
+        visible_geometry=job.get("visible_geometry", False),
+        render_semantic=job.get("semantic", False),
+        render_depth=job.get("depth", False),
+        view_transform=job.get("view_transform", False),
+    )
+
+
+def worker_render_view(job_path: str, view_name: str) -> None:
+    job = _load_job(job_path)
+    ctx = _create_render_ctx(job)
+    output_dir = job["output_dir"]
+    extra = _job_render_kwargs(job)
+
+    if view_name == "topdown":
+        ctx.topdown_view(
+            output_dir,
+            show_ceiling=False,
+            rebuild=True,
+            use_HDRI=False,
+            **extra,
+        )
+        return
+
+    look_at = job["look_at"]
+    view_cameras = job["view_cameras"]
+    if view_name not in view_cameras:
+        raise ValueError(f"未知视角: {view_name}")
+
+    ctx.render_view(
+        output_path=output_dir,
+        camera_position=view_cameras[view_name],
+        look_at_target=look_at,
+        rebuild=True,
+        use_HDRI=False,
+        **extra,
+    )
+
+
+def worker_render_post(job_path: str) -> None:
+    job = _load_job(job_path)
+    ctx = _create_render_ctx(job)
+    output_dir = job["output_dir"]
+    scene_json = job["scene_json"]
+
+    if job.get("export_glb"):
+        glb_path = os.path.join(output_dir, "scene.glb")
+        try:
+            ctx.export_glb(glb_path, rebuild=True, show_ceiling=True)
+        except Exception as exc:
+            print(f"⚠️ GLB 导出失败: {exc}")
+
+    if job.get("export_point_cloud"):
+        point_cloud_dir = os.path.join(output_dir, "pointcloud")
+        try:
+            ctx.export_point_cloud(point_cloud_dir, rebuild=True, show_ceiling=True)
+        except Exception as exc:
+            print(f"⚠️ 点云导出失败: {exc}")
+
+    with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
+        json.dump(scene_json, f, indent=2, ensure_ascii=False)
+
+
+def _spawn_worker_view(job_path: str, view_name: str) -> None:
+    subprocess.run([
+        sys.executable, "-c",
+        "from fast_scene.render_ssl import worker_render_view; "
+        f"worker_render_view({job_path!r}, {view_name!r})",
+    ], check=True)
+
+
+def _spawn_worker_post(job_path: str) -> None:
+    subprocess.run([
+        sys.executable, "-c",
+        "from fast_scene.render_ssl import worker_render_post; "
+        f"worker_render_post({job_path!r})",
+    ], check=True)
+
+
+# ---------------------------------------------------------------------------
+# 主入口
+# ---------------------------------------------------------------------------
+
+def render_ssl(
+    input_text: str,
+    backend: str = 'bpy',
+    output_root: str = 'output_ssl',
+    image: Optional[str] = None,
+    retrieve_hole: bool = True,
+    asset_mode: Literal["none", "retrieve", "generate"] = "none",
+    outpaint_image_dir: Optional[str] = None,
+    asset_dir: Optional[str] = "/data-nas/data/dataset/qunhe/Manycore-Future/generate",
+    gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
+    gen_texture: bool = False,
+    texture_dir: Optional[str] = None,
+    correct_tilt: bool = True,
+    correct_yaw: bool = True,
+    views: Optional[list] = None,
+    export_glb: bool = False,
+    export_point_cloud: bool = False,
+    visible_geometry: bool = False,
+    semantic: bool = False,
+    depth: bool = False,
+    view_transform: bool = False,
+    samples: Optional[int] = None,
+):
+    """渲染场景。``input_text`` 可为标准 SSL 文本，或 JSON 字符串（含 wall/door/window/bbox/room）。"""
+    if outpaint_image_dir is None:
+        outpaint_image_dir = output_root
+
+    try:
+        from .core.util_data import get_mesh
+    except (ImportError, ValueError):
+        from core.util_data import get_mesh  # type: ignore
+
+    print(f"\n🚀 开始渲染 [后端: {backend}, 资产模式: {asset_mode}]")
+
+    scene_json = parse_scene_input(input_text)
+
+    scene_json = get_mesh(
+        scene_json,
+        image_path=image,
+        retrieve_hole=retrieve_hole,
+        asset_mode=asset_mode,
+        outpaint_image_dir=outpaint_image_dir,
+        asset_dir=asset_dir,
+        gen_3d_model=gen_3d_model,
+        correct_tilt=correct_tilt,
+        correct_yaw=correct_yaw,
+    )
+
+    output_dir = output_root
+    os.makedirs(output_dir, exist_ok=True)
+
+    room_type = scene_json["room"]["room_type"]
+    ctx = _instantiate_ctx(backend, room_type, asset_dir)
+    _prepare_render_ctx(
+        ctx,
+        scene_json,
+        texture_dir=texture_dir,
+        gen_texture=gen_texture,
+        image=image,
+        samples=samples,
+    )
+
+    standard_ssl = format_standard_ssl(ctx.context)
+    ssl_path = os.path.join(output_dir, "ssl.txt")
+    with open(ssl_path, "w", encoding="utf-8") as f:
+        f.write(standard_ssl)
+
+    center = ctx.context["meta"]["center"]
+    span = ctx.context["meta"]["span"]
+    z_max = ctx.context["meta"]["z_max"]
+    look_at = [center[0], center[1], z_max / 2]
+    z_cam = z_max * 5 / 6
+    # 透视视角相机位置（改这里即可，子进程从 job 读取）
+    view_cameras = {
+        "front": [center[0], center[1] - span[1] / 3, z_cam],
+        "behind": [center[0], center[1] + span[1] / 3, z_cam],
+        "left": [center[0] - span[0] / 3, center[1], z_cam],
+        "right": [center[0] + span[0] / 3, center[1], z_cam],
+        "leftfront": [center[0] - span[0] / 3, center[1] - span[1] / 3, z_cam],
+        "rightfront": [center[0] + span[0] / 3, center[1] - span[1] / 3, z_cam],
+        "leftbehind": [center[0] - span[0] / 3, center[1] + span[1] / 3, z_cam],
+        "rightbehind": [center[0] + span[0] / 3, center[1] + span[1] / 3, z_cam],
+        "left_seq": [
+            [center[0] - span[0] / 3, center[1], z_cam],
+            [center[0], center[1] - span[1] / 3, z_cam],
+        ],
+    }
+
+    job_path = os.path.join(output_dir, ".render_job.json")
+    job = {
+        "backend": backend,
+        "scene_json": scene_json,
+        "output_dir": output_dir,
+        "asset_dir": asset_dir,
+        "texture_dir": texture_dir,
+        "gen_texture": gen_texture,
+        "image": image,
+        "samples": samples,
+        "export_glb": export_glb,
+        "export_point_cloud": export_point_cloud,
+        "visible_geometry": visible_geometry,
+        "semantic": semantic,
+        "depth": depth,
+        "view_transform": view_transform,
+        "look_at": look_at,
+        "view_cameras": view_cameras,
+    }
+    with open(job_path, "w", encoding="utf-8") as f:
+        json.dump(job, f, indent=2, ensure_ascii=False)
+
+    views_to_run = []
+    if views is None or "topdown" in views:
+        views_to_run.append("topdown")
+    if views is None:
+        views_to_run.extend(view_cameras.keys())
+    else:
+        views_to_run.extend(v for v in views if v in view_cameras)
+
+    print(f"🎨 正在生成视图 ({len(views_to_run)} 个子进程)...")
+    for view_name in views_to_run:
+        print(f"🔄 子进程渲染: {view_name}")
+        _spawn_worker_view(job_path, view_name)
+    print("🔄 子进程导出 GLB/点云/metadata...")
+    _spawn_worker_post(job_path)
+    print(f"✅ 渲染完成！结果保存在: {os.path.abspath(output_dir)}")
+    return output_dir, standard_ssl
+
+
 ssl_example = '''
 Room(id="D54g", room_type="dining room")
 Wall(id="0", room_id="D54g", p=[0.0, 1.38, 0.0], q=[3.11, 1.38, 0.0], height=2.9)
@@ -31,208 +327,9 @@ Door(id="2", wall_id="4", center=[6.41, 4.28, 1.1], width=2.6, height=2.2)
 Door(id="3", wall_id="3", center=[7.82, 2.47, 1.0], width=3.13, height=2.0)
 Window(id="0", wall_id="5", center=[0.0, 2.8, 1.43], width=1.56, height=1.2)
 Bbox(id="0", room_id="D54g", label="curtain", center=[0.02, 2.81, 1.51], angle_z=90, scale=[1.6, 0.05, 1.3], asset_id="3922456")
-Bbox(id="3", room_id="D54g", label="kitchen cabinet", center=[0.3, 1.88, 0.66], angle_z=90, scale=[1.0, 0.6, 1.33], asset_id="12038494")
-Bbox(id="1", room_id="D54g", label="kitchen cabinet", center=[0.3, 2.87, 0.43], angle_z=90, scale=[0.99, 0.6, 0.86], asset_id="7886809")
-Bbox(id="2", room_id="D54g", label="kitchen cabinet", center=[0.3, 3.81, 0.43], angle_z=90, scale=[0.93, 0.6, 0.86], asset_id="7887034")
-Bbox(id="4", room_id="D54g", label="kitchen cabinet", center=[2.47, 2.76, 0.51], angle_z=180, scale=[2.2, 0.93, 1.03], asset_id="2840139")
-Bbox(id="5", room_id="D54g", label="kitchen cabinet", center=[5.47, 0.36, 1.56], angle_z=180, scale=[4.7, 0.67, 3.13], asset_id="40342063")
-Bbox(id="6", room_id="D54g", label="ornaments", center=[0.09, 3.95, 1.39], angle_z=90, scale=[0.64, 0.18, 0.76], asset_id="34142540")
-Bbox(id="7", room_id="D54g", label="ornaments", center=[0.23, 3.9, 1.02], angle_z=90, scale=[0.74, 0.46, 0.33], asset_id="34142599")
-Bbox(id="8", room_id="D54g", label="ornaments", center=[0.31, 3.01, 0.94], angle_z=0, scale=[0.43, 0.55, 0.17], asset_id="13848022")
-Bbox(id="9", room_id="D54g", label="ornaments", center=[1.87, 2.61, 0.93], angle_z=0, scale=[0.58, 0.39, 0.19], asset_id="35368125")
-Bbox(id="10", room_id="D54g", label="decorative painting", center=[1.97, 1.4, 1.8], angle_z=180, scale=[1.23, 0.05, 0.54], asset_id="48510583")
-Bbox(id="11", room_id="D54g", label="dining chair", center=[3.98, 3.59, 0.42], angle_z=0, scale=[0.6, 0.58, 0.84], asset_id="5829816")
-Bbox(id="12", room_id="D54g", label="dining chair", center=[4.02, 1.97, 0.42], angle_z=180, scale=[0.6, 0.58, 0.84], asset_id="5829816")
-Bbox(id="13", room_id="D54g", label="dining chair", center=[4.74, 3.59, 0.42], angle_z=0, scale=[0.6, 0.58, 0.84], asset_id="5829816")
-Bbox(id="14", room_id="D54g", label="dining chair", center=[4.76, 1.97, 0.42], angle_z=180, scale=[0.6, 0.58, 0.84], asset_id="5829816")
 Bbox(id="15", room_id="D54g", label="dining table", center=[5.1, 2.77, 0.6], angle_z=0, scale=[3.05, 0.93, 1.21], asset_id="17116819")
-Bbox(id="16", room_id="D54g", label="dining chair", center=[5.47, 3.59, 0.42], angle_z=0, scale=[0.6, 0.58, 0.84], asset_id="5829816")
-Bbox(id="17", room_id="D54g", label="dining chair", center=[5.51, 1.97, 0.42], angle_z=180, scale=[0.6, 0.58, 0.84], asset_id="5829816")
-Bbox(id="18", room_id="D54g", label="dining chair", center=[6.16, 3.59, 0.42], angle_z=0, scale=[0.6, 0.58, 0.84], asset_id="5829816")
-Bbox(id="19", room_id="D54g", label="dining chair", center=[6.23, 1.97, 0.42], angle_z=180, scale=[0.6, 0.58, 0.84], asset_id="5829816")
-Bbox(id="20", room_id="D54g", label="dining chair", center=[6.91, 2.76, 0.42], angle_z=270, scale=[0.6, 0.58, 0.84], asset_id="5829816")
 '''
 
-def render_ssl(
-    ssl_text: str,
-    backend: str = 'bpy',
-    output_root: str = 'output_ssl',
-    image: Optional[str] = None,
-    retrieve_hole: bool = True,
-    asset_mode: Literal["none", "retrieve", "generate"] = "none",
-    outpaint_image_dir: Optional[str] = None,
-    gen_asset_dir: Optional[str] = "/data-nas/data/dataset/qunhe/Manycore-Future/generate",
-    gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
-    gen_texture: bool = False,
-    texture_dir: Optional[str] = None,
-    correct_tilt: bool = True,
-    correct_yaw: bool = True,
-    views: Optional[list] = None,
-    export_glb: bool = False,
-    append_timestamp: bool = False,
-    samples: Optional[int] = None,
-):
-    """
-    主渲染函数
-    Args:
-        ssl_text: SSL文本
-        backend: 'bpy' 或 'pyrender'
-        output_root: 输出根目录
-        image: 可选的输入图片路径
-        retrieve_hole: 是否检索门窗的 asset_id
-        asset_mode: 资产处理模式 ("none", "retrieve", "generate")
-        outpaint_image_dir: 扩图结果保存目录 (默认为 output_root)
-        gen_asset_dir: 生成资产保存目录 (默认为 output_root)
-        correct_tilt: 是否纠正模型倾斜
-        correct_yaw: 是否纠正模型偏航角和输入图片对齐
-        texture_dir: 外部纹理目录路径，包含 floor_texture.png, wall_texture.png, ceiling_texture.png
-                     如果提供，优先使用外部纹理；否则当 gen_texture=True 时内部生成
-        samples: 渲染采样数
-    """
-    if outpaint_image_dir is None:
-        outpaint_image_dir = output_root
-
-    print(f"\n🚀 开始渲染 [后端: {backend}, 资产模式: {asset_mode}]")
-
-    # 1. 解析为 JSON
-    scene_json = parse_ssl_to_json(ssl_text)
-    room_type = scene_json["room"]["room_type"]
-
-    # 2. 资产处理
-    scene_json = get_mesh(
-        scene_json,
-        image_path=image,
-        retrieve_hole=retrieve_hole,
-        asset_mode=asset_mode,
-        outpaint_image_dir=outpaint_image_dir,
-        gen_asset_dir=gen_asset_dir,
-        gen_3d_model=gen_3d_model,
-        correct_tilt=correct_tilt,
-        correct_yaw=correct_yaw
-    )
-
-    # 将更新后的 asset_id 填回 SSL
-    updated_ssl = update_ssl_with_asset_id(ssl_text, scene_json)
-
-    # 3. 选择 Context
-    if backend == 'bpy':
-        try:
-            from .fast_scene_bpy import BpySceneCtx
-        except (ImportError, ValueError):
-            from fast_scene_bpy import BpySceneCtx # type: ignore
-        ctx = BpySceneCtx(room_type, gen_asset_dir)
-    else:
-        try:
-            from .fast_scene import SceneCtx
-        except (ImportError, ValueError):
-            from fast_scene import SceneCtx
-        ctx = SceneCtx(room_type, gen_asset_dir)
-
-    # 3.5 设置渲染采样数
-    if samples is not None and hasattr(ctx, 'set_blender_samples'):
-        ctx.set_blender_samples(samples)
-
-    # 4. 填充数据（add_walls 内部会自动过滤 height<=0 的墙）
-    ctx.add_walls(scene_json["wall"])
-    if scene_json["door"]: ctx.add_doors(scene_json["door"])
-    if scene_json["window"]: ctx.add_windows(scene_json["window"])
-
-    # 将 JSON 中的 bbox 数据适配到 ctx.add_boxes
-    ctx.add_boxes(scene_json["bbox"])
-
-    # 5. 纹理处理
-    if texture_dir and os.path.isdir(texture_dir):
-        floor_tex = os.path.join(texture_dir, "floor_texture.png")
-        wall_tex = os.path.join(texture_dir, "wall_texture.png")
-        ceiling_tex = os.path.join(texture_dir, "ceiling_texture.png")
-        if os.path.exists(wall_tex):
-            ctx.set_wall_blender_texture_path(wall_tex)
-            print(f"🎨 使用外部墙体纹理: {wall_tex}")
-        if os.path.exists(floor_tex):
-            ctx.set_floor_blender_texture_path(floor_tex)
-            print(f"🎨 使用外部地板纹理: {floor_tex}")
-        if os.path.exists(ceiling_tex) and hasattr(ctx, 'set_ceiling_blender_texture_path'):
-            ctx.set_ceiling_blender_texture_path(ceiling_tex)
-            print(f"🎨 使用外部天花板纹理: {ceiling_tex}")
-    elif gen_texture:
-        generate_texture(ctx, image)
-
-    # 6. 准备输出目录
-    if append_timestamp:
-        timestamp = int(time.time())
-        output_dir = os.path.join(output_root, f"{timestamp}")
-    else:
-        output_dir = output_root
-    os.makedirs(output_dir, exist_ok=True)
-
-    # 7. 执行渲染 (俯视图 + 前视图)
-    print("🎨 正在生成视图...")
-
-    # --- 风险评估逻辑：提前预防 OOM ---
-    total_objects = len(scene_json.get("bbox", [])) + \
-                    len(scene_json.get("door", [])) + \
-                    len(scene_json.get("window", []))
-
-    OBJ_RISK_THRESHOLD = 25
-
-    if total_objects > OBJ_RISK_THRESHOLD:
-        print(f"⚠️ 场景物体较多 ({total_objects} 个)，检测到 OOM 风险。")
-        simplified_path = ctx.config.get("model_simplified_path", "/data-nas/data/dataset/qunhe/Manycore-Future/simplified")
-        print(f"🚀 直接切换到简化模型路径进行渲染: {simplified_path}")
-        ctx.set_model_path(simplified_path)
-
-    # Render topdown if requested (or if views is None = all)
-    if views is None or "topdown" in views:
-        ctx.topdown_view(os.path.join(output_dir, "topdown.png"), show_ceiling=False, rebuild=True, use_HDRI=False)
-
-    # Camera parameters
-    center = ctx.context["meta"]["center"]
-    span = ctx.context["meta"]["span"]
-    z_max = ctx.context["meta"]["z_max"]
-    look_at = [center[0], center[1], z_max / 2]
-
-    # View → camera position mapping
-    _view_cameras = {
-        "front":        [center[0],                center[1] - span[1] / 3, z_max * 5 / 6],
-        "behind":       [center[0],                center[1] + span[1] / 3, z_max * 5 / 6],
-        "left":         [center[0] - span[0] / 3,  center[1],               z_max * 5 / 6],
-        "right":        [center[0] + span[0] / 3,  center[1],               z_max * 5 / 6],
-        "leftfront":    [center[0] - span[0] / 3,  center[1] - span[1] / 3, z_max * 5 / 6],
-        "rightfront":   [center[0] + span[0] / 3,  center[1] - span[1] / 3, z_max * 5 / 6],
-        "leftbehind":   [center[0] - span[0] / 3,  center[1] + span[1] / 3, z_max * 5 / 6],
-        "rightbehind":  [center[0] + span[0] / 3,  center[1] + span[1] / 3, z_max * 5 / 6],
-    }
-
-    render_views = list(_view_cameras.keys()) if views is None else [v for v in views if v in _view_cameras]
-
-    first_perspective = True
-    for view_name in render_views:
-        ctx.render_view(
-            output_path=os.path.join(output_dir, f"{view_name}.png"),
-            camera_position=_view_cameras[view_name],
-            look_at_target=look_at,
-            rebuild=first_perspective,
-            use_HDRI=False
-        )
-        first_perspective = False
-
-    # 8. 导出 GLB
-    if export_glb:
-        glb_path = os.path.join(output_dir, "scene.glb")
-        try:
-            ctx.export_glb(glb_path)
-        except Exception as e:
-            print(f"⚠️ GLB 导出失败: {e}")
-
-    # 9. 保存 JSON 和 SSL
-    with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
-        json.dump(scene_json, f, indent=2, ensure_ascii=False)
-    with open(os.path.join(output_dir, "ssl.txt"), "w", encoding="utf-8") as f:
-        f.write(updated_ssl)
-
-    print(f"✅ 渲染完成！结果保存在: {os.path.abspath(output_dir)}")
-    return output_dir, updated_ssl
 
 if __name__ == "__main__":
-    # 示例运行
     render_ssl(ssl_example)

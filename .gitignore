@@ -1,6 +1,4 @@
 /__pycache__/
 /fast_scene.egg-info/
 /manycore/
-/output_ssl/
-/embeddings.pkl
-/mesh_database.pkl
+/build/

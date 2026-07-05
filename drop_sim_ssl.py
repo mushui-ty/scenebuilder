@@ -11,9 +11,9 @@ import re
 from typing import Optional
 
 try:
-    from .util_data import parse_ssl_to_json
+    from .core.util_data import parse_ssl_to_json
 except (ImportError, ValueError):
-    from util_data import parse_ssl_to_json  # type: ignore
+    from core.util_data import parse_ssl_to_json  # type: ignore
 
 
 PASSIVE_SUPPORTS = {"floor", "wall", "ceiling"}
@@ -65,9 +65,9 @@ def drop_sim_ssl(
 
     # 4. 构建场景
     try:
-        from .fast_scene_bpy import BpySceneCtx
+        from .core.fast_scene_bpy import BpySceneCtx
     except (ImportError, ValueError):
-        from fast_scene_bpy import BpySceneCtx  # type: ignore
+        from core.fast_scene_bpy import BpySceneCtx  # type: ignore
 
     room_type = scene_json["room"].get("room_type", "unknown")
     ctx = BpySceneCtx(room_type, asset_dir)

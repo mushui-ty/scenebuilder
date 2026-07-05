@@ -7,8 +7,11 @@ name = "fast-scene"
 version = "0.0.1"
 
 [tool.setuptools]
-packages = ["fast_scene"]
+packages = ["fast_scene", "fast_scene.core"]
 
 [tool.setuptools.package-dir]
 fast_scene = "."
+
+[tool.setuptools.package-data]
+fast_scene = ["config.yaml", "assets/**/*"]
 

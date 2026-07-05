@@ -1,186 +1,630 @@
 # Fast Scene 场景渲染工具库
 
-这是一个室内场景渲染库，支持从简单的几何描述（墙体、家具、门窗的 layout json 或者 ssl）生成 3D 场景并进行任意视角渲染。
+从 SSL / JSON 描述（墙体、门窗、家具）构建 3D 室内场景，支持 **Blender (bpy)** 与 **Pyrender** 双后端渲染、多视角导出、语义图、深度图、可见几何与平面内表面顶点。
+
+**SSL 世界坐标约定见下文 [§2 SSL 坐标系与实体约定](#2-ssl-坐标系与实体约定)。**
 
 ---
+
 # 一. 渲染模块
 
 ## 1. 安装与依赖
 
-### Python 版本要求: 3.11  !!!!
+### Python 版本要求: 3.11
 
-不是 3.11 无法安装最新版本的 bpy
+不是 3.11 无法安装最新版本的 `bpy`。
 
-### 基础依赖 (Python 环境)
-
-适用于 `fast_scene` (Pyrender版) 和 `fast_scene_bpy` (Blender版) 的通用工具逻辑：
+### 基础依赖
 
 ```bash
-pip install numpy shapely scipy imageio yaml
+pip install numpy shapely scipy imageio pyyaml
 ```
 
-### 渲染后端依赖
+### 渲染后端
 
-- **Pyrender 版**: `pip install pyrender trimesh`
-  ```bash
-  conda install -c conda-forge libstdcxx-ng=12 -y  # 使用 conda 安装 c++
-  apt update
-  apt install -y libegl1-mesa-dev libgles2-mesa-dev mesa-utils xvfb libgl1-mesa-glx libglu1-mesa libxrender1 libxext6
-  ```
-- **Blender 版**: `pip install bpy`
-  ```bash
-  apt update
-  apt install -y libxi6 libxrender1 libxrandr2 libxfixes3 libxcursor1 libxinerama1 libxxf86vm1 libgl1-mesa-glx libglu1-mesa libxkbcommon0 libxkbcommon-dev libgl1-mesa-glx libgl1-mesa-dev libxi6 libxrender1 libxrandr2 libxfixes3 libxcomposite1 libxcursor1 libxdamage1 libxext6 libxss1 libgtk-3-0 libgtk-3-dev libgconf-2-4 libasound2 libpulse0
-  ```
+| 后端 | 安装 | 适用场景 |
+|------|------|----------|
+| **bpy (推荐)** | `pip install bpy` | PBR 渲染、语义图、Cycles 深度、可见几何 |
+| **pyrender** | `pip install pyrender trimesh` | 轻量 OpenGL 渲染、无 bpy 环境 |
+
+**Pyrender 无头服务器额外依赖：**
+
+```bash
+conda install -c conda-forge libstdcxx-ng=12 -y
+apt install -y libegl1-mesa-dev libgles2-mesa-dev mesa-utils xvfb \
+  libgl1-mesa-glx libglu1-mesa libxrender1 libxext6
+export PYOPENGL_PLATFORM=egl
+```
+
+**Blender 版系统库（按需）：**
+
+```bash
+apt install -y libxi6 libxrender1 libxrandr2 libxfixes3 libxcursor1 libxinerama1 \
+  libxxf86vm1 libgl1-mesa-glx libglu1-mesa libxkbcommon0 libgtk-3-0
+```
+
+### 安装到 Python 环境
+
+```bash
+cd fast-scene
+pip install -e . --config-settings editable_mode=strict
+```
 
 ---
 
-### 安装到python 环境
-  ```bash
-  pip install -e . --config-settings editable_mode=strict
-  ```
+## 2. SSL 坐标系与实体约定
 
-## 2. Quickstart
+库内 SSL 解析、场景 `context`、渲染与导出（`ssl.txt`、点云等）共用同一套**世界坐标系**，单位为**米 (m)**。
 
-渲染 ssl 使用 render_ssl.py
+### 2.1 坐标轴
 
-渲染指定房间 id 使用 render_room_id.py
+俯视房间（topdown）时：
 
-渲染 json 文件使用 fast_scene_bpy.py 中的例子
+| 轴 | 正方向 | 俯视图中的方向 |
+|----|--------|----------------|
+| **X** | +X | 右 |
+| **Y** | +Y | **上** |
+| **Z** | +Z | 竖直向上（高度） |
+
+- 地面在 **XY 平面**，一般取 **Z = 0** 为地面。
+- 家具 **`angle_z`**：`0°` 时面向 **−Y**（俯视图**下方**）；绕 **Z 轴逆时针**增大（右手定则）。
+
+```
+俯视图（+Y 在上，+X 在右）：
+
+        +Y
+         ↑
+         |
+    −X ←─┼─→ +X
+         |
+         ↓
+        −Y     angle_z=0° 的朝向 →
+```
+
+### 2.2 实体字段
+
+**Room**
+
+```ssl
+Room(room_type="balcony")
+```
+
+**Wall** — 地面线段，竖直向上拉伸：
+
+```ssl
+Wall(label="wall0", p=[x1, y1, 0], q=[x2, y2, 0], height=2.7)
+```
+
+| 字段 | 含义 |
+|------|------|
+| `p`, `q` | 墙段起点、终点；第三维写 `0`，仅 XY 有效 |
+| `height` | 墙高，从 `z=0` 到 `z=height` |
+
+**Door / Window**
+
+```ssl
+Door(label="door0", center=[x, y, z], width=2.32, height=2.3, wall="wall2", asset_id="61064792")
+Window(label="window0", center=[x, y, z], width=2.37, height=2.2, wall="wall0")
+```
+
+| 字段 | 含义 |
+|------|------|
+| `center` | 洞口**几何中心**（3D）。如 `height=2.3, z=1.15` 表示中心在高度中间，底边约在 `z≈0` |
+| `width` | 沿**墙走向**的宽度 |
+| `height` | 沿 **Z** 的高度 |
+| `wall` | 所属墙 `label`（如 `wall0`） |
+| `asset_id` | 可选；缺失时仍挖洞，不加载门/窗模型 |
+
+门/窗 `center` 的 XY 若不在墙线上，加载时会吸附到最近墙。
+
+**Bbox**
+
+```ssl
+Bbox(label="sidetable0", center=[1.96, 0.21, 0.31], angle_z=180, scale=[0.42, 0.42, 0.63], asset_id="56056912")
+```
+
+| 字段 | 含义 |
+|------|------|
+| `center` | 旋转后 OBB 的**几何中心** |
+| `angle_z` | 绕 Z 轴旋转（度），逆时针为正 |
+| `scale` | 局部 XYZ **全长**（非半长）；落地物通常 `center.z ≈ scale.z / 2` |
+| `asset_id` | 对应 `{asset_id}.glb`；不存在时该 bbox 会被剔除 |
+
+GLB：`居中 → 按 scale 缩放 → 绕 Z 转 angle_z → 平移到 center`。
+
+### 2.3 与渲染视角
+
+- **`front` 等透视视角**：相机在 **−Y** 侧（`y = center_y − span_y/3`），朝房间中心（**+Y**）看。
+- **`topdown`**：相机在 **+Z** 向下俯视 XY 平面。
+
+### 2.4 标准 SSL 输出
+
+`normalize_scene_data()` 后写出的 `ssl.txt` 使用规范 `label`（`wall0`, `door0`, `sidetable0` …），去掉原始 `id`/`room_id`；字段语义同上。
+
+---
+
+## 3. Quickstart
+
+### 3.1 渲染 SSL（推荐入口）
 
 ```python
-# 以 Blender 版本为例, 可选版本 pyrender
-from fast_scene.fast_scene_bpy import BpySceneCtx  # 使用 blender 渲染
-# from fast_scene import SceneCtx       # 使用 pyrender 渲染
+from fast_scene.render_ssl import render_ssl
 
-ctx = BpySceneCtx(scene_type="living_room")
+with open("ssl.txt", "r", encoding="utf-8") as f:
+    ssl_text = f.read()
 
-# 1. 添加元素
+output_dir, updated_ssl = render_ssl(
+    ssl_text,
+    backend="bpy",
+    output_root="output",
+    views=["topdown", "front"],   # None 或省略 = 全部视角
+    export_glb=True,
+    export_point_cloud=True,
+    visible_geometry=True,        # 每个视角额外导出可见几何
+    semantic=True,
+    depth=True,
+    gen_asset_dir="/path/to/assets",
+    texture_dir="/path/to/texture",  # 含 floor/wall/ceiling_texture.png
+)
+```
+
+**命令行（SpatialFactory）：**
+
+```bash
+python scripts/render_scene.py --ssl path/to/ssl.txt \
+  --views topdown front \
+  --glb --ply --visible_geometry --semantic --depth \
+  --texture path/to/texture --assets path/to/assets
+```
+
+可用视角：`topdown`, `front`, `behind`, `left`, `right`, `leftfront`, `rightfront`, `leftbehind`, `rightbehind`, `all`
+
+### 3.2 直接调用 Context API
+
+```python
+from fast_scene.core.fast_scene_bpy import BpySceneCtx
+
+ctx = BpySceneCtx(room_type="living_room", gen_asset_dir="/path/to/assets")
 ctx.add_walls(walls_data)
-ctx.add_door(center=[2.0, 0, 1.0], width=0.9, height=2.0)
-ctx.add_window(center=[0, 3.5, 1.5], width=1.2, height=1.0)
+ctx.add_doors(doors_data)
+ctx.add_windows(windows_data)
 ctx.add_boxes(furniture_data)
 
-# 2. 渲染
-ctx.topdown_view("topdown.png")
-ctx.render_view("side_view.png", camera_position=[6, 4, 2], look_at_target=[0, 0, 1])
+ctx.topdown_view(
+    "topdown/topdown.png",
+    show_ceiling=False,
+    rebuild=True,
+    render_depth=True,
+    render_semantic=True,
+    visible_geometry=True,
+    export_glb=True,
+    export_point_cloud=True,
+)
+
+ctx.render_view(
+    "view.png",
+    camera_position=[6, 4, 2],
+    look_at_target=[0, 0, 1],
+    visible_geometry=True,
+    export_glb=True,
+)
 ```
 
 ---
 
-## 3. 核心渲染函数参数详解
+## 4. `render_ssl` API
 
-## 渲染 API 详述
+```python
+def render_ssl(
+    ssl_text: str,
+    backend: str = "bpy",           # "bpy" | "pyrender"
+    output_root: str = "output_ssl",
+    image: Optional[str] = None,    # retrieve/generate 模式用
+    retrieve_hole: bool = True,
+    asset_mode: Literal["none", "retrieve", "generate"] = "none",
+    outpaint_image_dir: Optional[str] = None,
+    gen_asset_dir: Optional[str] = None,
+    gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
+    gen_texture: bool = False,
+    texture_dir: Optional[str] = None,
+    correct_tilt: bool = True,
+    correct_yaw: bool = True,
+    views: Optional[list] = None,   # None = 全部视角
+    export_glb: bool = False,       # 导出全场景 scene.glb
+    export_point_cloud: bool = False,  # 导出全场景点云到 output_root/pointcloud/
+    visible_geometry: bool = False, # 每个视角额外导出可见 GLB/点云
+    semantic: bool = False,         # 每个视角导出语义图
+    depth: bool = False,            # 每个视角导出深度图 + 法线图（bpy）
+    append_timestamp: bool = False,
+    samples: Optional[int] = None,  # Blender 采样数
+)
+```
 
-`topdown_view` 和 `render_view` 共享大部分控制参数。
+| 参数 | 说明 |
+|------|------|
+| `export_glb` | 在 `output_root/scene.glb` 导出**完整场景**（与视角无关） |
+| `export_point_cloud` | 在 `output_root/pointcloud/` 导出**完整场景**点云；并在**每个视角目录**自动导出平面内表面顶点 JSON 与连线图（见 §7） |
+| `visible_geometry` | 需配合 `--glb` 或 `--ply`：在**每个视角目录**下额外导出该视角可见几何（GLB/可见点云） |
+| `semantic` | 每个视角输出 `{view}_semantic.png` + `{view}_semantic.json` |
+| `depth` | 每个视角输出 `{view}_depth.png` + `{view}_normal.png`（bpy：Cycles Z/Normal pass，同一次渲染） |
+| `texture_dir` | 优先使用外部 `floor/wall/ceiling_texture.png`；否则 `gen_texture=True` 时内部生成 |
 
-### 核心共有参数
+**bpy + depth 特殊行为：** 为避免 Cycles 合成器内存泄漏，每个视角在独立子进程（`render_ssl_view.py`）中渲染，最后 `--post` 阶段再导出全场景 GLB/点云。
+
+---
+
+## 5. 输出目录结构
+
+以 `output_root/` 为例：
+
+```
+output_root/
+├── data.json                 # 场景 JSON
+├── ssl.txt                   # 规范化 label / asset_id 校验后的标准 SSL
+├── scene.glb                 # [--glb] 完整场景
+├── pointcloud/               # [--ply] 完整场景点云（全部物体）
+│   ├── metadata.json
+│   ├── scene_all.ply
+│   ├── floor.ply
+│   ├── walls/wall0.ply
+│   ├── doors/door0_{asset_id}.ply
+│   ├── windows/window0_{asset_id}.ply
+│   └── boxes/sidetable0_{asset_id}.ply
+├── topdown/                  # 俯视图（固定目录名）
+│   ├── topdown.png
+│   ├── topdown_depth.png     # [--depth]
+│   ├── topdown_normal.png    # [--depth] 世界空间法线（与深度同次渲染）
+│   ├── topdown_semantic.png  # [--semantic]
+│   ├── topdown_semantic.json
+│   ├── topdown_lines.png     # [--ply] 平面内表面顶点连线 overlay
+│   ├── planar_faces.json     # [--ply] 墙/门/窗/地板/天花内表面顶点（3D + 像素坐标）
+│   ├── camera_para.json
+│   ├── scene_visible.glb     # [--visible_geometry + --glb]
+│   └── pointcloud/           # [--visible_geometry + --ply]
+│       ├── metadata_visible.json
+│       ├── scene_visible.ply
+│       ├── floor_visible[_cutted].ply
+│       ├── walls/wall0_visible[_cutted].ply
+│       ├── doors/door0_{asset_id}_visible[_cutted].ply
+│       └── boxes/sidetable0_{asset_id}_visible[_cutted].ply
+└── {毫秒时间戳}/              # 单视角或相机序列（left_seq 等多帧共用一个目录）
+    ├── {stamp}.png           # 单视角一张；序列则多帧 {frame_stamp}.png
+    ├── {stamp}_depth.png
+    ├── {stamp}_normal.png    # [--depth]
+    ├── {stamp}_semantic.png
+    ├── {stamp}_lines.png     # [--ply]
+    ├── {frame}_planar_faces.json  # [--ply]
+    ├── camera_para.json
+    ├── scene_visible.glb     # 该视角/序列的可见几何（序列为多相机并集）
+    └── pointcloud/
+```
+
+**两类点云的区别：**
+
+| 路径 | 内容 |
+|------|------|
+| `output_root/pointcloud/` | 场景内**所有**物体（墙/门/窗/家具/地面/天花） |
+| `{视角}/pointcloud/` | 该视角**可见**物体（遮挡剔除 + 视锥裁剪后，需 `--visible_geometry`） |
+| `{视角}/planar_faces.json` | 该视角下墙/门/窗/地板/天花**内表面**顶点（视锥裁剪后，需 `--ply`） |
+
+**命名与 context 规范（`ssl.txt`、context 键、点云文件名一致）：**
+
+- 墙：`wall0`, `wall1`, … → `walls/wall0.ply`（无 `asset_id`）
+- 门/窗：`door0`, `window0`, … → `doors/door0_{asset_id}.ply`；若 `asset_id` 在资产目录不存在则**保留空洞**、去掉 `asset_id`，文件名与 SSL 均不含 `asset_id`
+- 家具：`sidetable0`, `armchair0`, … → `boxes/sidetable0_{asset_id}.ply`；若 `asset_id` 不存在则**删除该 bbox**
+
+可见几何后缀：`_visible`、视锥裁剪后 `_visible_cutted`。
+
+---
+
+## 6. 可见几何 (`visible_geometry`)
+
+开启 `--visible_geometry` 且同时开启 `--glb` 或 `--ply` 时，每个视角目录下导出 `scene_visible.glb` 和/或 `pointcloud/`。
+
+**相机序列（如 `left_seq`）**：与其他视角一样使用 `{stamp}/` 目录，序列内多帧 png 与**一份**序列级可见几何同目录；语义为「序列内任意一帧相机可见则保留，视锥裁剪取各帧并集」——不是逐帧各一份，也不是多帧交集。
+
+### 处理流程（按顺序）
+
+1. **遮挡可见性（物体级，基于完整 mesh）**
+   - 对物体表面采样点做射线检测（透明墙/天花/地板可穿透）
+   - **完全被挡** → 丢弃该物体
+   - **部分可见或全部可见** → 保留，进入下一步
+
+2. **视锥裁剪（三角形级）**
+   - 使用 Blender `calc_matrix_camera` 投影矩阵，在 clip space 做几何裁剪
+   - 切掉视锥外的三角形或三角形部分
+   - 裁剪后无几何 → 丢弃该物体
+
+3. **命名规则**
+   - 统计时仅 **三顶点都在** 视口 `[0,1]×[0,1]` 的面片算「在视锥内」；跨边界面片不计入
+   - **cutted**：上述面片占比 **< 95%**；≥ 95% 视为整体在视锥内
+   - `metadata_visible.json` 含 `"frustum_in_view_ratio"` 便于排查
+
+### 适用类别
+
+floor、ceiling、walls、doors、windows、boxes 均参与可见性判定与视锥裁剪。
+
+---
+
+## 7. 平面内表面顶点 (`export_point_cloud` / `--ply`)
+
+开启 `--ply` 时，**每个视角**在渲染完成后自动额外导出（无需单独 flag）：
+
+| 文件 | 说明 |
+|------|------|
+| `planar_faces.json` | 墙/门/窗/地板/天花内表面多边形顶点 |
+| `{view}_lines.png` | 在渲染图副本上绘制顶点连线（每对象一色） |
+
+### 几何定义
+
+与 fast_scene 建 mesh 逻辑一致：
+
+- **墙**：SSL 中 `p`/`q` 即内墙底两点，高度为 `align_height ? z_max : wall.height`；带门/窗洞时 JSON 含 `outer` 环与 `hole` 环
+- **门/窗**：按 `center`、`width`、`height` 及所属墙计算内面四顶点（同 `create_door_or_window_mesh`）
+- **地板**：房间 `vertices` 多边形 @ z=0
+- **天花**：房间 `vertices` 多边形 @ z=z_max（仅 `show_ceiling=True` 且已构建时）
+
+### 视锥裁剪与顶点顺序
+
+- 多边形在 **Blender `calc_matrix_camera` 齐次 clip space** 裁剪（与可见几何相同），沿边插值 world 坐标以保持共面
+- **保持边界拓扑顺序**（地板/天花沿用房间 `vertices` 环路；墙/门/窗沿用 mesh 定义顺序；视锥裁剪不重新按角度排序）
+- 若从相机看为 CW 则整体反转；再旋转起点为 z 最小 → y 最小 → x 最小的顶点
+- 同时记录 3D 坐标、投影像素坐标 `vertices_2d_px` 与遮挡标记 `occluded`（1=被遮挡未呈现在渲染图，0=可见）
+
+### JSON 结构示例
+
+```json
+{
+  "image": {"path": ".../topdown.png", "width": 1024, "height": 1024, "lines_overlay": ".../topdown_lines.png"},
+  "objects": [
+    {
+      "category": "walls",
+      "id": "0",
+      "color_rgb": [255, 128, 64],
+      "loops": [
+        {"role": "outer", "vertices_3d": [[...], ...], "vertices_2d_px": [[px, py], ...], "occluded": [0, 0, 1, 0]},
+        {"role": "hole", "opening_type": "window", "opening_id": "0", "vertices_3d": [...], "vertices_2d_px": [...]}
+      ]
+    }
+  ]
+}
+```
+
+**说明：** 平面顶点导出与 `visible_geometry` 独立——仅 `--ply` 即可；可见点云 `{视角}/pointcloud/` 仍须 `--visible_geometry`。
+
+---
+
+## 8. 语义图 (`semantic`)
+
+- 每个实体独立颜色（`entity:{category}:{id}` HSV 哈希），每面墙不同色
+- 颜色不与背景 `(0,0,0)` 相同
+- bpy：创建 proxy mesh + Emission 材质，`view_transform=Raw`，关闭 HDRI/灯光后单独渲染
+- 输出：`{view}_semantic.png` + `{view}_semantic.json`（含 entity 与 RGB 映射）
+
+---
+
+## 9. 深度图与法线图 (`depth`)
+
+开启 `--depth` 时，**bpy + Cycles** 在**同一次渲染**中通过合成器同时导出深度与法线（无额外渲染时间）。`pyrender` 后端仅导出深度，不含法线。
+
+### 9.1 深度图 `{view}_depth.png`
+
+| 项目 | 说明 |
+|------|------|
+| 格式 | **uint16 单通道 PNG**（非 EXR） |
+| 含义 | 相机坐标系下沿视线方向的**米制距离**（与 Cycles Z pass 一致，近大远小） |
+| 编码 | `pixel = round(depth_m * depth_scale)`，clamp 到 `[0, 65535]` |
+| 解码 | `depth_m = pixel / depth_scale` |
+| `depth_scale` | 写入同目录 `camera_para.json` 的 `depth_scale` 字段；由场景有效最大深度动态计算（`max(depth)*1.5` 映射到 65535） |
+| 无效像素 | `depth_m == 0`（背景、透明区域、超出 clip 等） |
+
+**bpy 实现：** Cycles 合成器 **Z pass** → 临时 EXR → 转 uint16 PNG。失败时回退逐像素 `ray_cast`（此时**不**导出法线）。
+
+### 9.2 法线图 `{view}_normal.png`（随 `--depth` 自动导出）
+
+| 项目 | 说明 |
+|------|------|
+| 格式 | **uint8 RGB PNG**（3 通道） |
+| 坐标系 | **世界空间**（World Space），与 Blender Cycles **Normal pass** 一致 |
+| 含义 | 每个像素处**可见最前表面**的单位法向量 `n = (nx, ny, nz)`，方向指向房间外侧/表面外法线（随 mesh 朝向，与光照计算用法线一致） |
+| 编码 | Cycles 输出每通道 `c in [0, 1]`，存盘为 `pixel_channel = round(c * 255)` |
+| 解码 | `normal_world = (pixel_rgb / 255.0) * 2.0 - 1.0`，得到 `[-1, 1]` 三分量；可按需再 `normalize` |
+| 无效像素 | 与深度对齐：当对应 `depth` 像素为 `0` 时视为无效，不应依赖法线值 |
+| 背景 | 无几何处 Normal pass 可能为 `(0.5, 0.5, 1.0)`（解码为 `(0,0,1)`），**务必用 depth 掩码过滤** |
+
+**为何是世界空间而非相机空间：** Cycles Normal pass 原生即为世界空间；便于与 SSL/场景坐标、平面顶点 JSON 的 3D 坐标直接对比。若需要相机空间法线，可在解码后左乘相机旋转的逆：`normal_cam = R_cw @ normal_world`。
+
+**`camera_para.json` 元数据（有深度时一并写入）：**
+
+```json
+{
+  "depth_unit": "meter",
+  "depth_scale": 5811.535562,
+  "normal_space": "world",
+  "normal_encoding": "uint8_rgb",
+  "normal_decode": "normal_world = (pixel_rgb / 255.0) * 2.0 - 1.0",
+  "normal_invalid_mask": "depth_pixel == 0"
+}
+```
+
+### 9.3 Python 解码示例
+
+```python
+import imageio
+import numpy as np
+from fast_scene.core import util
+
+depth_u16 = imageio.imread("topdown_depth.png")
+depth_scale = 5811.535562  # from camera_para.json
+depth_m = depth_u16.astype(np.float64) / depth_scale
+
+normal_u8 = imageio.imread("topdown_normal.png")
+normal_world = util.decode_normal_world_uint8(normal_u8)  # (H, W, 3)
+
+valid = depth_m > 0
+nx, ny, nz = normal_world[..., 0], normal_world[..., 1], normal_world[..., 2]
+# 仅对 valid 像素使用法线
+```
+
+### 9.4 其他说明
+
+- 透明遮挡物（自动透明的墙/天花/地板）在深度射线回退路径中跳过；Cycles pass 路径则与彩色图一致（透明处可见后方）
+- **bpy + depth** 仍走每视角独立子进程（`render_ssl_view.py`），避免合成器内存泄漏
+
+---
+
+## 10. 核心渲染参数（`topdown_view` / `render_view`）
+
+两函数共享大部分参数。
+
+### 共有参数
 
 | 参数 | 类型 | 默认值 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `output_path` | `str` | - | 输出图像路径（支持 .png, .jpg） |
-| `width` / `height` | `int` | `1024` | 渲染分辨率 |
-| `geometry_mode` | `str` | `"gltf"` | 几何体模式: `"gltf"`(仅模型), `"mixed"`(模型优先), `"bbox"`(纯方块) |
-| `lighting_type` | `str` | `"array"` | 灯光模式: `"array"`(阵列筒灯), `"area"`(单盏大柔光灯), `"none"`(无灯) |
-| `visible_shadow` | `bool` | `True` | 墙体和天花板是否投射阴影。设为 `False` 可让 HDRI 光线穿透进入室内 |
-| `align_height` | `bool` | `True` | 是否将所有墙体的高度统一对齐到场景的最大高度 `z_max` |
-| `rebuild` | `bool` | `False` | 是否强制清空当前 Blender 场景并重新构建（包括灯光和 HDRI） |
-| `show_wall` / `window` / `door` / `ceiling` | `bool` | `True` | 分别控制墙体、窗户、门、天花板的可见性 |
-| `auto_fov` | `bool` | `True` | 是否根据场景内容自动计算最佳视角 (FOV) |
-| `manual_fov` | `float` | `None` | 手动指定视角范围（角度制）。若提供，则覆盖 `auto_fov` |
-| `auto_transparent` | `bool` | `True` | **核心功能**：自动检测并透明化挡在相机前的墙体 |
-| `transparent_alpha` | `float` | `0.3` | 自动透明化时，被遮挡墙体的 Alpha 透明度 (0-1) |
-| `use_HDRI` | `bool` | `True` | 是否启用配置文件中指定的 HDRI 环境光 |
-| `hdri_transparent_background` | `bool` | `False` | 启用 HDRI 时是否隐藏背景贴图（保留光照）。俯视图默认 `True` |
-| `render_depth` | `bool` | `False` | 是否同时导出深度图 (同名 `.exr` 格式) |
+|------|------|--------|------|
+| `output_path` | `str` | - | 输出图像路径 |
+| `width` / `height` | `int` | `1024` | 分辨率 |
+| `geometry_mode` | `str` | `"gltf"` | `"gltf"` / `"mixed"` / `"bbox"` |
+| `lighting_type` | `str` | `"array"` | `"array"` / `"area"` / `"none"` |
+| `visible_shadow` | `bool` | `True` | 墙/天花是否投射阴影 |
+| `align_height` | `bool` | `True` | 墙体高度对齐到 `z_max` |
+| `rebuild` | `bool` | `False` | 强制重建场景（改材质/光照后建议 `True`） |
+| `show_wall/window/door/ceiling` | `bool` | `True` | 各元素可见性 |
+| `auto_fov` | `bool` | `True` | 自动计算 FOV |
+| `manual_fov` | `float` | `None` | 手动 FOV（角度制），覆盖 `auto_fov` |
+| `auto_transparent` | `bool` | `True` | 自动透明化挡在相机前的墙体 |
+| `transparent_alpha` | `float` | `0.0` | 透明墙 Alpha |
+| `use_HDRI` | `bool` | `True` | 启用 config 中 HDRI |
+| `hdri_transparent_background` | `bool` | 俯视图 `True`，其他 `False` | HDRI 光照保留、背景透明 |
+| `render_depth` | `bool` | `False` | 导出 `{view}_depth.png` + `{view}_normal.png`（bpy Cycles pass） |
+| `render_semantic` | `bool` | `False` | 导出语义图 |
+| `export_glb` | `bool` | `False` | 在该视角目录导出 `scene_visible.glb`（需 `visible_geometry=True`） |
+| `export_point_cloud` | `bool` | `False` | 在该视角目录导出可见点云（需 `visible_geometry=True`）；同时自动导出 `planar_faces.json` 与 `{view}_lines.png` |
+| `visible_geometry` | `bool` | `False` | 启用可见几何导出流程（GLB / 可见点云） |
 
----
-**!!!注意在改变了模型光照等属性重新渲染时要将`rebuild`设为`True`**
-**!!!一般情况不用修改后面的一堆默认参数, 以下情况除外:**
+### `topdown_view` 建议
 
-### `topdown_view` (俯视图渲染)
+- `show_ceiling=False`
+- `hdri_transparent_background=True`
 
-用于生成从上往下的场景视图。通常建议将 `show_ceiling` 设为 `False`, `hdri_transparent_background`设置为 `True`以隐藏 HDRI 贴图
+### `render_view` 独有参数
 
-### `render_view` (任意视角渲染)
-
-用于生成指定相机位置和观察点的自由视角视图。
-
-*   **独有参数**：
-    *   `camera_position`: `list` (必填)。相机 3D 坐标 `[x, y, z]`。
-    *   `look_at_target`: `list`。相机看向的目标点（默认指向房间中心）。
-
-如果相机在房间中且希望房间是封闭的, 建议设置参数`show_ceiling` 为默认 `True` 
-
+| 参数 | 说明 |
+|------|------|
+| `camera_position` | 相机坐标 `[x, y, z]`（必填） |
+| `look_at_target` | 观察目标点（默认房间中心） |
 
 ---
 
-## 4. 版本对比
+## 11. 版本对比
 
-| 特性               | fast_scene (Pyrender) | fast_scene_bpy (Blender)                 |
-| :----------------- | :-------------------- | :--------------------------------------- |
-| **渲染品质** | 基础 OpenGL 效果      | PBR 物理渲染 (Eevee/Cycles)              |
-| **转角处理** | 简单重叠              | **斜接修正 (Miter Joint)**，无黑影 |
-| **遮挡处理** | 简单裁切              | 智能半透明材质                           |
-| **光照支持** | 点光源                | 点光源 + HDRI 贴图                       |
+| 特性 | fast_scene (Pyrender) | fast_scene_bpy (Blender) |
+|------|----------------------|--------------------------|
+| 渲染品质 | 基础 OpenGL | PBR (Eevee/Cycles) |
+| 转角处理 | 简单重叠 | 斜接修正 (Miter Joint) |
+| 遮挡处理 | 简单裁切 | 智能半透明材质 |
+| 可见几何 | 支持（手动 FOV 平面） | 支持（`calc_matrix_camera` 对齐渲染） |
+| 平面内表面顶点 | - | 支持（`--ply` 自动导出 JSON + 连线图） |
+| 语义图 | 支持 | 支持（proxy + Raw） |
+| 深度图 | Pyrender 深度缓冲 | Cycles Z pass + ray_cast 回退 |
+| 法线图 | - | Cycles Normal pass（随 `--depth` 同次渲染） |
+| 深度 + 多视角 | 单进程 | 每视角独立子进程（防内存泄漏） |
 
 ---
 
-## 5. 配置文件 (config.yaml)
+## 12. 配置文件 (`config.yaml`)
 
-用户可以通过 `config.yaml` 统一管理：墙体厚度、地板纹理路径、家具模型库路径、默认光照强度等全局参数。
+统一管理：画布尺寸、墙厚、默认 FOV、HDRI 路径、家具模型库路径、光照强度等。可通过 `BpySceneCtx` / `SceneCtx` 的 `config` 属性读取。
 
 ---
 
-# 二. 资产处理模块 (get_mesh)
+# 二. 资产处理模块 (`get_mesh`)
 
-在 `render_ssl.py` 的执行流程中，系统首先从 SSL 文本中提取出场景 JSON。在将 JSON 传递给 Blender 渲染引擎之前，会调用 `get_mesh` 函数对资产进行处理（检索或生成）。
+`render_ssl` 会先将 SSL 解析为 JSON，再调用 `get_mesh` 处理资产（检索或生成），最后交给渲染引擎。
 
-- **默认行为**：`asset_mode` 默认设置为 `"none"`。在这种模式下，`get_mesh` 不会对 JSON 进行任何修改，直接返回包含原始占位方块信息的场景描述。
-- **检索前提**：若要执行检索逻辑，必须先完成 LanceDB 向量数据库的构建。
+- **默认**：`asset_mode="none"`，不修改 JSON，直接使用 SSL 中的 `asset_id` 占位
+- **检索**：需先构建 LanceDB（见下）
 
 ## 检索分支
 
 ### 1. 数据库构建
 
-运行以下脚本以构建检索所需的三个表（`door`, `window`, `furniture`）：
-
 ```bash
 python build_lancedb.py
 ```
 
-**注意事项：**
-- **存储位置**：数据库将构建在当前工作目录下的 `manycore` 文件夹中。
-- **构建耗时**：由于 `furniture` 表需要对全量资产计算 Embedding 向量，首次构建大约需要 **16 小时**（取决于 GPU 性能）。
-- **环境依赖**：确保已安装 `lancedb` 并在 `fast_scene/util_data.py` 中正确配置了 `Qwen3VLEmbedder` 的路径。
+- 存储位置：当前工作目录下 `manycore/`
+- `furniture` 表首次构建约需 16 小时（全量 Embedding）
+- 需配置 `Qwen3VLEmbedder` 路径（`util_data.py`）
 
-### 2. 检索逻辑说明
+### 2. 检索逻辑
 
-系统会自动根据 `scene_json` 中的信息匹配最接近的 3D 资产：
+**门/窗：** 按 `width`×`height` L2 距离匹配最近模型。
 
-#### A. 门与窗 (Holes)
-- **匹配特征**：使用物体的 `width` 和 `height` 构造 2D 向量。
-- **检索度量**：使用 **L2 距离** 查找尺寸最接近的模型。
+**家具 (Bbox)：**
 
-#### B. 家具 (Bboxes)
-检索逻辑支持两种模式，均采用 **余弦相似度 (Cosine Similarity)** 进行匹配：
+1. **有图像**（`retrieve` + `image_path`）：按 `mesh_id` 分组，bbox_2d 裁剪 + label/caption 多模态 Embedding
+2. **无图像**：label + caption 文本 Embedding，Batch 并行
 
-1. **有图像输入 (retrieve 模式下提供 image_path)**:
-   - **资产分组**：根据 `mesh_id` 属性进行分组，确保同一资产在场景中多次出现时只计算一次并共享结果。
-   - **多模态 Embedding**：对图像进行 `bbox_2d` 裁剪，结合 `label` 和 `caption` 构造多模态输入，调用 Qwen3-VL-Embedding 模型进行 Batch 计算。
-2. **无图像输入**:
-   - **文本检索**：仅根据 `label`（必须提供）和 `caption`（可选）构造文本 Prompt 进行检索。
-   - **并行处理**：对场景内所有待处理物体进行 Batch Embedding 计算以提高效率。
+## 生成分支 (`asset_mode="generate"`)
+
+- 需提供 `image_path`
+- 按 `mesh_id` 分组 → 裁剪 → 扩图/超分 → 3D 生成（Hunyuan 等）
+- 模型保存至 `gen_asset_dir`（默认 `/data-nas/data/dataset/qunhe/Manycore-Future/generate/`）
 
 ---
 
-## 生成分支 (generate)
+## 附录：常用 Python 调用示例
 
-当 `asset_mode="generate"` 时，系统将进入 3D 资产生成流程（目前为占位实现）：
-- **前置条件**：必须提供 `image_path`。
-- **处理流程**：
-  1. 按 `mesh_id` 对物体分组。
-  2. 对每组首个物体进行图像裁剪。
-  3. 执行图像补全与超分辨率处理。
-  4. 调用 3D 生成工具生成 `.glb` 模型。
-- **存储路径**：生成的模型将以 `asset_id`（如 001_timestamp）命名，存储在 `/data-nas/data/dataset/qunhe/Manycore-Future/generate/` 目录下。
+```python
+# 仅俯视图 + 可见几何
+render_ssl(ssl_text, backend="bpy", views=["topdown"],
+           export_glb=True, export_point_cloud=True, visible_geometry=True)
+
+# 全视角 + 语义 + 深度（bpy 自动走子进程 depth）
+render_ssl(ssl_text, backend="bpy", views=None,
+           semantic=True, depth=True, samples=64)
+
+# 低内存：大场景 (>25 物体) 自动切换 simplified 模型路径
+render_ssl(ssl_text, backend="bpy", gen_asset_dir="/path/to/assets")
+```
+
+---
+
+## 附录：视锥裁剪与 Blender 原生 API（实现备忘）
+
+bpy 路径下，**可见几何**（`visible_geometry`）与**平面内表面顶点**（`planar_faces.json` / `*_lines.png`）都依赖「当前渲染相机能看到什么、裁切后顶点在哪」。这块多次出问题的共同根因是：**没有用与 Cycles 实际渲染一致的投影矩阵**。
+
+### 正确做法（当前实现）
+
+与 Blender 渲染对齐，使用：
+
+1. **`camera.calc_matrix_camera(depsgraph, x, y, ...)`** 获取投影矩阵  
+2. **相机 `matrix_world.inverted()`** 作为 modelview  
+3. 在 **齐次 clip space** 中对三角形/多边形环做 Sutherland-Hodgman 裁剪  
+4. 沿边插值时 **同时插值 `clip` 与 `world`**，保证裁切后的交点仍在原平面（墙/门/窗/地板/天花）上  
+
+可见几何的三角形裁剪（`fast_scene_bpy._clip_triangle_to_render_frustum`）与平面顶点的多边形裁剪（`util_bpy.clip_polygon_to_render_frustum`）均遵循上述流程。
+
+**遮挡标记 `occluded`** 与视锥无关，使用 `scene.ray_cast`（与可见几何物体级遮挡判定相同），透明墙/天花/地板可穿透。
+
+### 错误做法（已废弃，勿再使用）
+
+| 做法 | 问题 |
+|------|------|
+| 手写视锥平面 / 手动 FOV 切平面 | 与 Blender 渲染视锥不对齐，俯视图/边缘物体易误判 cutted |
+| `world_to_camera_view` 得 `(u,v,z)` 后在屏幕空间裁切，交点用 3D 线性插值 | 透视下交点**脱离原平面**；部分在视锥内时墙/天花顶点坐标错乱、连线图自交 |
+| 按质心角度对多边形顶点重排 | 破坏 L 形/凹多边形边界拓扑（地板顺序错误） |
+
+### 其他独立问题（非视锥 API）
+
+- **环起点规则**：规范起点为 z 最小 → y 最小 → x 最小；仅旋转起点，不重排边界顺序  
+- **cutted 统计**：仅当三角形**三顶点都在**视口 `[0,1]×[0,1]` 时才算「在视锥内」；面片占比 < 95% 才标 `_cutted`  
+
+### 经验结论
+
+- **判断点是否在视锥内（统计/命名）**：可用 `world_to_camera_view`，阈值与渲染视口 `[0,1]×[0,1]`、`z>0` 一致  
+- **裁切几何并求 3D 交点**：必须用 **`calc_matrix_camera` + clip space**，不能用屏幕 `(u,v)` 反推 3D  
+- **导出多边形顶点顺序**：保留 SSL/房间 `vertices` 或 mesh 定义的边界顺序，只做 CCW 整体反转 + 起点旋转  
+
+俯视图因物体全在视锥内，旧错误裁剪不易暴露；**透视视角（如 left）部分裁切**时，非原生 API 裁剪的问题会非常明显。
+
