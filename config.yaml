@@ -48,5 +48,9 @@ ceiling_texture_scale: 0.5  # 天花板纹理缩放系数
 indoor_fov: 90  # 相机在房间内时的固定FOV（度）
 outdoor_fov_scale: 1.1  # 相机在房间外时FOV的缩放系数
 
+# 4. 归一化俯视图地板路径（深度 nav mask）
+nav_mask_depth_tolerance_m: 0.05  # 可行走深度：相机到地面距离 ± 此值（米）
+nav_mask_inset_m: 0.15           # 贴外边界向内偏移（米）
+nav_mask_point_spacing_m: 0.3    # 沿内边界采样点间距（米）
 
 

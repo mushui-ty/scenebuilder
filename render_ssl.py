@@ -2,19 +2,45 @@
 # -*- coding: utf-8 -*-
 """
 使用 SSL 或 JSON 场景数据渲染 - 支持 BPY 和 Pyrender 双后端。
-每视角独立子进程渲染；直接运行本文件可查看 render_ssl 用法示例。
+每视角独立子进程渲染。
+
+命令行用法:
+    python fast_scene/render_ssl.py --ssl path/to/ssl.txt --views topdown left_seq --output out_dir
+    python fast_scene/render_ssl.py --help
 """
 
+import argparse
+import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
-from typing import Optional, Literal
+from typing import Optional, Literal, Any, Dict, Union
+
+_PKG_ROOT = os.path.dirname(os.path.abspath(__file__))
+_PKG_PARENT = os.path.dirname(_PKG_ROOT)
+for _p in (_PKG_PARENT, _PKG_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+def _load_util_data_module():
+    util_path = os.path.join(_PKG_ROOT, "core", "util_data.py")
+    spec = importlib.util.spec_from_file_location("fast_scene_util_data", util_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 util_data: {util_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 
 try:
     from .core.util_data import parse_scene_input, format_standard_ssl
 except (ImportError, ValueError):
-    from core.util_data import parse_scene_input, format_standard_ssl  # type: ignore
+    _util_data = _load_util_data_module()
+    parse_scene_input = _util_data.parse_scene_input
+    format_standard_ssl = _util_data.format_standard_ssl
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +211,99 @@ def _spawn_worker_post(job_path: str) -> None:
 # 主入口
 # ---------------------------------------------------------------------------
 
+def render_normalized_topdown(
+    input_text: str,
+    output_dir: str,
+    backend: str = "bpy",
+    asset_dir: Optional[str] = None,
+    texture_dir: Optional[str] = None,
+    gen_texture: bool = False,
+    image: Optional[str] = None,
+    samples: Optional[int] = None,
+    width: int = 1000,
+    height: int = 1000,
+    show_ceiling: bool = False,
+    retrieve_hole: bool = True,
+    asset_mode: Literal["none", "retrieve", "generate"] = "none",
+    outpaint_image_dir: Optional[str] = None,
+    gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
+    correct_tilt: bool = True,
+    correct_yaw: bool = True,
+    floor_path: bool = True,
+) -> Union[str, Dict[str, Any]]:
+    """像素对齐俯视图：平移 SSL 后渲染 1000×1000 俯视图，输出 ssl/topdown/camera_para。
+
+    floor_path=True（默认）时额外渲染深度图+语义图，并基于
+    (深度mask - 墙门窗mask) ∪ 地板mask 采样地板闭环路径。
+    """
+    if outpaint_image_dir is None:
+        outpaint_image_dir = output_dir
+
+    try:
+        from .core.util_data import get_mesh
+    except (ImportError, ValueError):
+        from core.util_data import get_mesh  # type: ignore
+
+    print(f"\n🚀 像素对齐俯视图渲染 [后端: {backend}]")
+    scene_json = parse_scene_input(input_text)
+    scene_json = get_mesh(
+        scene_json,
+        image_path=image,
+        retrieve_hole=retrieve_hole,
+        asset_mode=asset_mode,
+        outpaint_image_dir=outpaint_image_dir,
+        asset_dir=asset_dir,
+        gen_3d_model=gen_3d_model,
+        correct_tilt=correct_tilt,
+        correct_yaw=correct_yaw,
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+    room_type = scene_json["room"]["room_type"]
+    ctx = _instantiate_ctx(backend, room_type, asset_dir)
+    _prepare_render_ctx(
+        ctx,
+        scene_json,
+        texture_dir=texture_dir,
+        gen_texture=gen_texture,
+        image=image,
+        samples=samples,
+    )
+
+    if not hasattr(ctx, "normalized_topdown_view"):
+        raise RuntimeError(f"后端 {backend!r} 不支持 normalized_topdown_view")
+
+    ctx.normalized_topdown_view(
+        output_dir,
+        width=width,
+        height=height,
+        show_ceiling=show_ceiling,
+        use_HDRI=False,
+        render_depth=floor_path,
+        render_semantic=floor_path,
+    )
+    print(f"✅ 完成: {output_dir}")
+
+    if not floor_path:
+        return output_dir
+
+    try:
+        from .core.config_utils import load_config
+        from .core.nav_mask_path import run_nav_mask_floor_path
+    except (ImportError, ValueError):
+        from core.config_utils import load_config  # type: ignore
+        from core.nav_mask_path import run_nav_mask_floor_path  # type: ignore
+
+    config = load_config()
+    floor_result = run_nav_mask_floor_path(output_dir, config)
+    return {
+        "output_dir": output_dir,
+        "path_points_px": floor_result["path_points_px"],
+        "path_points_ssl": floor_result["path_points_ssl"],
+        "floor_path": floor_result,
+    }
+
+
 def render_ssl(
     input_text: str,
     backend: str = 'bpy',
@@ -313,6 +432,145 @@ def render_ssl(
     return output_dir, standard_ssl
 
 
+ALL_VIEWS = [
+    "topdown", "front", "behind", "left", "right",
+    "leftfront", "rightfront", "leftbehind", "rightbehind",
+    "left_seq",
+]
+
+
+def _prepare_ssl_and_dirs(args) -> tuple:
+    """读取 SSL/JSON 输入，解析输出目录与资产/贴图路径。"""
+    output_dir = args.output
+    if output_dir is None:
+        output_dir = os.path.join(os.path.dirname(args.ssl), "render_output")
+
+    asset_dir = args.assets
+    if asset_dir is None:
+        ssl_dir = os.path.dirname(args.ssl)
+        for candidate in ("assets", "Assets", "nano_gen_asset"):
+            path = os.path.join(ssl_dir, candidate)
+            if os.path.isdir(path):
+                asset_dir = path
+                break
+
+    texture_dir = args.texture
+    if texture_dir is None:
+        candidate = os.path.join(os.path.dirname(args.ssl), "texture")
+        if os.path.isdir(candidate):
+            texture_dir = candidate
+
+    with open(args.ssl, "r", encoding="utf-8") as f:
+        input_text = f.read()
+
+    if "asset_id=" not in input_text and "mesh_id=" in input_text:
+        timestamp = os.path.basename(os.path.dirname(args.ssl))
+
+        def _add_asset_id(match):
+            full = match.group(0)
+            mesh_id_match = re.search(r'mesh_id="([^"]*)"', full)
+            if mesh_id_match:
+                mesh_id_str = mesh_id_match.group(1)
+                try:
+                    mesh_id_padded = f"{int(mesh_id_str):03d}"
+                except ValueError:
+                    mesh_id_padded = mesh_id_str
+                asset_id = f"{mesh_id_padded}_{timestamp}"
+                return full[:-1] + f', asset_id="{asset_id}")'
+            return full
+
+        input_text = re.sub(r"(?:Bbox|Door|Window)\([^)]+\)", _add_asset_id, input_text)
+        print(f"Inferred asset_id from mesh_id + timestamp ({timestamp})")
+
+    return input_text, output_dir, asset_dir, texture_dir
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="从 SSL/JSON 场景文件渲染多视角图像并导出 GLB/点云等",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例（等价于 SpatialFactory/scripts/render_scene.py 的常用命令）:
+
+  python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py \\
+    --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt \\
+    --views topdown left_seq \\
+    --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out8 \\
+    --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified \\
+    --ply --visible_geometry --semantic --depth
+""",
+    )
+    parser.add_argument("--ssl", required=True, help="SSL 或 JSON 场景文件路径")
+    parser.add_argument("--output", default=None, help="输出目录（默认: ssl 同目录下 render_output）")
+    parser.add_argument(
+        "--views", nargs="+", default=["all"],
+        help=f"要渲染的视角，可选: {', '.join(ALL_VIEWS)}, all",
+    )
+    parser.add_argument("--backend", choices=["bpy", "pyrender"], default="bpy", help="渲染后端")
+    parser.add_argument("--texture", default=None, help="贴图目录")
+    parser.add_argument("--assets", default=None, help="3D 资产目录（未指定时尝试自动检测）")
+    parser.add_argument("--glb", action="store_true", help="导出 GLB")
+    parser.add_argument("--ply", action="store_true", help="导出彩色点云 PLY")
+    parser.add_argument("--visible_geometry", action="store_true",
+                        help="按视角视锥裁剪后导出可见 GLB/PLY（需配合 --glb 或 --ply）")
+    parser.add_argument("--semantic", action="store_true", help="导出语义分割图")
+    parser.add_argument("--depth", action="store_true", help="导出深度图与法线图")
+    parser.add_argument("--view_transform", action="store_true",
+                        help="渲染前将场景变换到各视角 SSL 坐标系")
+    parser.add_argument("--normalized_topdown", action="store_true",
+                        help="像素对齐俯视图（ssl.txt + topdown.png + camera_para.json + 地板路径）")
+    parser.add_argument("--no_floor_path", action="store_true",
+                        help="配合 --normalized_topdown：跳过地板导航路径采样")
+    parser.add_argument("--samples", type=int, default=None, help="Blender 采样数")
+
+    args = parser.parse_args()
+    input_text, output_dir, asset_dir, texture_dir = _prepare_ssl_and_dirs(args)
+
+    if args.normalized_topdown:
+        render_kwargs = dict(
+            input_text=input_text,
+            output_dir=output_dir,
+            backend=args.backend,
+            asset_dir=asset_dir,
+            texture_dir=texture_dir,
+            retrieve_hole=True,
+            asset_mode="none",
+            floor_path=not args.no_floor_path,
+        )
+        if args.samples is not None:
+            render_kwargs["samples"] = args.samples
+        result = render_normalized_topdown(**render_kwargs)
+        if isinstance(result, dict):
+            print(f"Normalized topdown done: {result['output_dir']}")
+            if "path_points_ssl" in result:
+                print(f"Floor path (ssl): {len(result['path_points_ssl'])} points")
+        else:
+            print(f"Normalized topdown done: {result}")
+        return
+
+    views = None if "all" in args.views else args.views
+    render_kwargs = dict(
+        backend=args.backend,
+        output_root=output_dir,
+        retrieve_hole=True,
+        asset_mode="none",
+        asset_dir=asset_dir,
+        texture_dir=texture_dir,
+        views=views,
+        export_glb=args.glb,
+        export_point_cloud=args.ply,
+        visible_geometry=args.visible_geometry,
+        semantic=args.semantic,
+        depth=args.depth,
+        view_transform=args.view_transform,
+    )
+    if args.samples is not None:
+        render_kwargs["samples"] = args.samples
+
+    output_path, _ = render_ssl(input_text, **render_kwargs)
+    print(f"Render done: {output_path}")
+
+
 ssl_example = '''
 Room(id="D54g", room_type="dining room")
 Wall(id="0", room_id="D54g", p=[0.0, 1.38, 0.0], q=[3.11, 1.38, 0.0], height=2.9)
@@ -332,4 +590,4 @@ Bbox(id="15", room_id="D54g", label="dining table", center=[5.1, 2.77, 0.6], ang
 
 
 if __name__ == "__main__":
-    render_ssl(ssl_example)
+    main()

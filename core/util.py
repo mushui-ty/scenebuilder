@@ -2561,6 +2561,18 @@ def encode_depth_uint16(depth_m: np.ndarray, depth_scale: float) -> np.ndarray:
     return depth_png
 
 
+def decode_depth_uint16(depth_png: np.ndarray, depth_scale: float) -> np.ndarray:
+    """uint16 深度 PNG → 米制深度 depth_m = pixel / depth_scale；0 表示无效。"""
+    if depth_scale <= 0:
+        raise ValueError("depth_scale 必须 > 0")
+    arr = np.asarray(depth_png)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    depth_m = arr.astype(np.float64) / float(depth_scale)
+    depth_m[arr == 0] = 0.0
+    return depth_m
+
+
 def encode_normal_world_png(normal_01: np.ndarray) -> np.ndarray:
     """Cycles Normal pass (每通道 0..1) -> uint8 RGB PNG。"""
     arr = np.asarray(normal_01, dtype=np.float64)

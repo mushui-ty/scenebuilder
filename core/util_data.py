@@ -8,6 +8,7 @@ import shutil
 import time
 import copy
 import base64
+import math
 import numpy as np
 from typing import Dict, Any, Optional, Literal, List
 from pathlib import Path
@@ -1552,6 +1553,179 @@ def compute_topdown_camera_pose(context: Dict[str, Any]):
     camera_position = [center[0], center[1], height]
     look_at_target = [center[0], center[1], 0.0]
     return camera_position, look_at_target
+
+
+def ssl_xy_to_image_xy(ssl_x: float, ssl_y: float) -> tuple:
+    """SSL 坐标 (Y 北) → SpatialFactory 图像坐标 (Y 南)。"""
+    return float(ssl_x), float(-ssl_y)
+
+
+def image_xy_to_ssl_xy(image_x: float, image_y: float) -> tuple:
+    """图像坐标 → SSL 坐标。"""
+    return float(image_x), float(-image_y)
+
+
+def compute_pixel2real_ratio(camera_z: float, fov_y_rad: float, image_half: float = 500.0) -> float:
+    """1 像素 = ratio 米；与 SpatialFactory Stage 1 一致。"""
+    return float(camera_z) * math.tan(float(fov_y_rad) / 2.0) / float(image_half)
+
+
+def compute_pixel_align_translation_ssl(
+    camera_position_ssl,
+    fov_y_rad: float,
+    image_half: float = 500.0,
+) -> tuple:
+    """计算像素对齐平移量，使图像主点落在 (ratio*half, ratio*half) 像素。
+
+    返回 (pixel2real_ratio, dx_ssl, dy_ssl, target_image_x, target_image_y)。
+    """
+    cam = np.asarray(camera_position_ssl, dtype=float)
+    z = float(cam[2])
+    ratio = compute_pixel2real_ratio(z, fov_y_rad, image_half)
+    img_x, img_y = ssl_xy_to_image_xy(float(cam[0]), float(cam[1]))
+    target_x = ratio * image_half
+    target_y = ratio * image_half
+    dx_img = target_x - img_x
+    dy_img = target_y - img_y
+    return ratio, dx_img, -dy_img, target_x, target_y
+
+
+def _round_xy(values, round_decimals: Optional[int]):
+    x, y = float(values[0]), float(values[1])
+    if round_decimals is not None:
+        x, y = round(x, round_decimals), round(y, round_decimals)
+    return [x, y]
+
+
+def _round_xyz(values, round_decimals: Optional[int]):
+    xy = _round_xy(values[:2], round_decimals)
+    z = float(values[2]) if len(values) > 2 else 0.0
+    if round_decimals is not None:
+        z = round(z, round_decimals)
+    return [xy[0], xy[1], z]
+
+
+def apply_context_xy_translation(
+    context: Dict[str, Any],
+    dx_ssl: float,
+    dy_ssl: float,
+    *,
+    round_decimals: Optional[int] = 2,
+) -> None:
+    """将场景 context 在 SSL XY 平面平移 (dx_ssl, dy_ssl)，并重算 meta。"""
+    for wall in context.get("walls", {}).values():
+        wall["s"] = _round_xy([wall["s"][0] + dx_ssl, wall["s"][1] + dy_ssl], round_decimals)
+        wall["e"] = _round_xy([wall["e"][0] + dx_ssl, wall["e"][1] + dy_ssl], round_decimals)
+        for door in wall.get("doors", {}).values():
+            door["center"] = _round_xyz(
+                [door["center"][0] + dx_ssl, door["center"][1] + dy_ssl, door["center"][2]],
+                round_decimals,
+            )
+        for window in wall.get("windows", {}).values():
+            window["center"] = _round_xyz(
+                [window["center"][0] + dx_ssl, window["center"][1] + dy_ssl, window["center"][2]],
+                round_decimals,
+            )
+    for box in context.get("boxes", {}).values():
+        box["center"] = _round_xyz(
+            [box["center"][0] + dx_ssl, box["center"][1] + dy_ssl, box["center"][2]],
+            round_decimals,
+        )
+    recompute_context_meta_from_walls(context)
+
+
+def build_pixel_aligned_camera_para(
+    camera_position_ssl,
+    look_at_target_ssl,
+    fov_y_rad: float,
+    pixel2real_ratio: float,
+    width: int = 1000,
+    height: int = 1000,
+    *,
+    round_decimals: int = 2,
+) -> Dict[str, Any]:
+    """SpatialFactory 兼容的 camera_para（图像坐标系 + pixel2real_ratio）。"""
+    cam = np.asarray(camera_position_ssl, dtype=float)
+    look = np.asarray(look_at_target_ssl, dtype=float)
+    cam_img_x, cam_img_y = ssl_xy_to_image_xy(float(cam[0]), float(cam[1]))
+    look_img_x, look_img_y = ssl_xy_to_image_xy(float(look[0]), float(look[1]))
+    cam_z = round(float(cam[2]), round_decimals)
+    look_z = round(float(look[2]), round_decimals)
+    return {
+        "camera_position": [
+            round(cam_img_x, round_decimals),
+            round(cam_img_y, round_decimals),
+            cam_z,
+        ],
+        "look_at_target": [
+            round(look_img_x, round_decimals),
+            round(look_img_y, round_decimals),
+            look_z,
+        ],
+        "fov_y": float(fov_y_rad),
+        "aspectRatio": float(width) / float(height),
+        "pixel2real_ratio": float(pixel2real_ratio),
+        "image_size": [int(width), int(height)],
+        "coordinate_system": "image",
+    }
+
+
+def write_standard_ssl_to_path(context: Dict[str, Any], ssl_path: str) -> str:
+    os.makedirs(os.path.dirname(ssl_path) or ".", exist_ok=True)
+    ssl_text = format_standard_ssl(context)
+    with open(ssl_path, "w", encoding="utf-8") as f:
+        f.write(ssl_text)
+    print(f"✅ SSL 已导出: {ssl_path}")
+    return ssl_path
+
+
+def prepare_pixel_aligned_topdown_context(
+    context: Dict[str, Any],
+    *,
+    width: int = 1000,
+    height: int = 1000,
+    indoor_fov: float = 160.0,
+    outdoor_fov_scale: float = 1.05,
+    round_decimals: int = 2,
+) -> Dict[str, Any]:
+    """按 SpatialFactory Stage 1 规则平移 context，并返回渲染/导出参数。"""
+    try:
+        from . import util
+    except ImportError:
+        import util  # type: ignore
+
+    image_half = float(width) / 2.0
+    world_cam_w, world_look_w = compute_topdown_camera_pose(context)
+    meta = context["meta"]
+    fov_y = util.calculate_optimal_fov(
+        np.asarray(world_cam_w, dtype=float),
+        np.asarray(world_look_w, dtype=float),
+        meta["vertices"],
+        meta["z_max"],
+        meta["bounds"],
+        indoor_fov,
+        outdoor_fov_scale,
+    )
+    ratio, dx_ssl, dy_ssl, _, _ = compute_pixel_align_translation_ssl(
+        world_cam_w, fov_y, image_half=image_half
+    )
+    apply_context_xy_translation(context, dx_ssl, dy_ssl, round_decimals=round_decimals)
+    aligned_cam, aligned_look = compute_topdown_camera_pose(context)
+    return {
+        "pixel2real_ratio": ratio,
+        "fov_y": float(fov_y),
+        "camera_position_ssl": aligned_cam,
+        "look_at_target_ssl": aligned_look,
+        "camera_para": build_pixel_aligned_camera_para(
+            aligned_cam,
+            aligned_look,
+            fov_y,
+            ratio,
+            width=width,
+            height=height,
+            round_decimals=round_decimals,
+        ),
+    }
 
 
 def view_ssl_transform_params(
