@@ -1603,6 +1603,90 @@ class SceneCtx:
             self.scene.add(pyrender.PointLight(color=[1,1,1], intensity=intensity), pose=trimesh.transformations.translation_matrix(pos))
         self.if_set_lights = True
 
+    def normalized_topdown_view(
+        self,
+        output_dir: str,
+        width: int = 1000,
+        height: int = 1000,
+        show_ceiling: bool = False,
+        round_decimals: int = 2,
+        render_depth: bool = False,
+        render_semantic: bool = False,
+        transparent_alpha: float = 0.0,
+        align: Optional[Dict[str, Any]] = None,
+        write_ssl: bool = True,
+        **kwargs,
+    ):
+        """像素对齐俯视图（pyrender）：平移 SSL 后渲染并写出 camera_para.json。"""
+        for key in (
+            "export_glb", "export_point_cloud", "visible_geometry",
+            "rebuild", "use_HDRI", "geometry_mode", "show_wall", "show_window", "show_door",
+            "align_height", "auto_fov", "manual_fov", "glb_path",
+        ):
+            kwargs.pop(key, None)
+
+        os.makedirs(output_dir, exist_ok=True)
+        png_path = os.path.join(output_dir, "topdown.png")
+        ssl_path = os.path.join(output_dir, "ssl.txt")
+        camera_para_path = os.path.join(output_dir, "camera_para.json")
+
+        align = util_data.prepare_pixel_aligned_topdown_context(
+            self.context,
+            width=width,
+            height=height,
+            round_decimals=round_decimals,
+        ) if align is None else align
+        if write_ssl:
+            util_data.write_standard_ssl_to_path(self.context, ssl_path)
+
+        self.clear_scene()
+        self.construct_scene(show_ceiling=show_ceiling)
+        self.setup_lighting()
+
+        meta = self.context["meta"]
+        camera_pos = np.array(align["camera_position_ssl"], dtype=float)
+        look_at = list(align["look_at_target_ssl"])
+        fov_y = float(align["fov_y"])
+
+        camera_pose = np.eye(4)
+        camera_pose[:3, 1], camera_pose[:3, 2], camera_pose[:3, 3] = [0, 1, 0], [0, 0, 1], camera_pos
+
+        trans_ids = util.find_walls_to_make_transparent(
+            camera_pos[:2], look_at[:2], meta["vertices"], self.context["walls"]
+        )
+        for wid in trans_ids:
+            util.set_mesh_alpha(self.mesh_nodes, "walls", wid, transparent_alpha)
+
+        znear = 0.05
+        zfar = max(float(camera_pos[2] + meta["z_max"] + max(meta["span"]) * 2.0), znear + 1.0)
+        camera_node = self.scene.add(
+            pyrender.PerspectiveCamera(yfov=fov_y, aspectRatio=width / height, znear=znear, zfar=zfar),
+            pose=camera_pose,
+        )
+        renderer = pyrender.OffscreenRenderer(width, height)
+        color, depth = renderer.render(self.scene)
+        imageio.imwrite(png_path, color)
+
+        depth_scale = None
+        if render_depth:
+            depth_scale = self._write_depth_outputs(png_path, depth)
+        if render_semantic:
+            self.render_semantic_png(
+                png_path, camera_pose, fov_y, width / height, width, height, znear, zfar, renderer=renderer
+            )
+
+        for wid in trans_ids:
+            util.reset_mesh_alpha(self.mesh_nodes, "walls", wid)
+        self.scene.remove_node(camera_node)
+        renderer.delete()
+
+        camera_para = dict(align["camera_para"])
+        if depth_scale is not None:
+            camera_para["depth_scale"] = float(depth_scale)
+        with open(camera_para_path, "w", encoding="utf-8") as f:
+            json.dump(camera_para, f, indent=4)
+        print(f"✅ 像素对齐俯视图完成: {output_dir}")
+
     def topdown_view(self, output_path: str, width: int = 1024, height: int = 1024, **kwargs):
         if not output_path.lower().endswith((".png", ".jpg", ".jpeg", ".exr", ".webp")):
             output_path = util.resolve_topdown_image_path(output_path)
@@ -1617,7 +1701,7 @@ class SceneCtx:
         render_depth = bool(kwargs.pop("render_depth", False))
         kwargs.pop("render_depth_scale", None)
         render_semantic = bool(kwargs.pop("render_semantic", False))
-        view_transform = bool(kwargs.pop("view_transform", False))
+        kwargs.pop("view_transform", None)
         transparent_alpha = kwargs.pop("transparent_alpha", 0.0)
         construct_kwargs = {
             key: kwargs[key]
@@ -1634,28 +1718,19 @@ class SceneCtx:
         world_look_w = [meta["center"][0], meta["center"][1], 0.0]
         world_up_raw = [0.0, 1.0, 0.0]
 
-        with util_data.ViewSslSession(self, view_transform) as vss:
+        with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam_w, world_look_w, world_up_raw)
-            vss.write_ssl(view_dir)
 
-            if view_transform or rebuild or self._scene_show_ceiling != bool(show_ceiling):
+            if rebuild or self._scene_show_ceiling != bool(show_ceiling):
                 self._reset_render_state()
-            if view_transform or rebuild or self.scene is None:
+            if rebuild or self.scene is None:
                 self.construct_scene(**construct_kwargs)
             self.setup_lighting()
 
-            if view_transform:
-                render_cam, render_look = vss.render_camera_pose(
-                    world_cam_w, world_look_w, reference_frame=True
-                )
-                camera_pos = np.array(render_cam, dtype=float)
-                look_at = list(render_look)
-                world_up = np.array(vss.render_world_up(world_up_raw), dtype=float)
-            else:
-                camera_height = meta["z_max"] + max(meta["span"]) * 1.5
-                camera_pos = np.array([meta["center"][0], meta["center"][1], camera_height])
-                look_at = [meta["center"][0], meta["center"][1], 0.0]
-                world_up = np.array(world_up_raw, dtype=float)
+            camera_height = meta["z_max"] + max(meta["span"]) * 1.5
+            camera_pos = np.array([meta["center"][0], meta["center"][1], camera_height])
+            look_at = [meta["center"][0], meta["center"][1], 0.0]
+            world_up = np.array(world_up_raw, dtype=float)
 
             fov_y = util.calculate_optimal_fov(
                 camera_pos, look_at,
@@ -1741,7 +1816,7 @@ class SceneCtx:
         render_depth = bool(kwargs.pop("render_depth", False))
         kwargs.pop("render_depth_scale", None)
         render_semantic = bool(kwargs.pop("render_semantic", False))
-        view_transform = bool(kwargs.pop("view_transform", False))
+        kwargs.pop("view_transform", None)
         rebuild = bool(kwargs.pop("rebuild", False))
         show_ceiling = kwargs.pop("show_ceiling", True)
 
@@ -1766,30 +1841,21 @@ class SceneCtx:
         }
         construct_kwargs["show_ceiling"] = show_ceiling
 
-        with util_data.ViewSslSession(self, view_transform) as vss:
+        with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam_w, world_look_w, world_up_raw)
-            vss.write_ssl(view_dir)
 
-            if view_transform or rebuild or self._scene_show_ceiling != bool(show_ceiling):
+            if rebuild or self._scene_show_ceiling != bool(show_ceiling):
                 self._reset_render_state()
-            if view_transform or rebuild or self.scene is None:
+            if rebuild or self.scene is None:
                 self.construct_scene(**construct_kwargs)
             self.setup_lighting()
 
             bounds = self.context["meta"]["bounds"]
-            if view_transform:
-                render_cam, render_look = vss.render_camera_pose(
-                    world_cam_w, world_look_w, reference_frame=True
-                )
-                camera_position = np.array(render_cam, dtype=float)
-                look_at_target = np.array(render_look, dtype=float)
-                up_vector = np.array(vss.render_world_up(world_up_raw), dtype=float)
-            else:
-                if look_at_target is None:
-                    look_at_target = [center[0], center[1], z_max / 2]
-                camera_position = np.array(camera_position, dtype=float)
-                look_at_target = np.array(look_at_target, dtype=float)
-                up_vector = np.array(world_up_raw, dtype=float)
+            if look_at_target is None:
+                look_at_target = [center[0], center[1], z_max / 2]
+            camera_position = np.array(camera_position, dtype=float)
+            look_at_target = np.array(look_at_target, dtype=float)
+            up_vector = np.array(world_up_raw, dtype=float)
 
             if np.linalg.norm(up_vector) < 1e-6:
                 up_vector = np.array([0.0, 0.0, 1.0], dtype=float)

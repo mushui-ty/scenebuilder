@@ -1,6 +1,6 @@
 # Fast Scene 场景渲染工具库
 
-从 SSL / JSON 描述（墙体、门窗、家具）构建 3D 室内场景，支持 **Blender (bpy)** 与 **Pyrender** 双后端渲染、多视角导出、语义图、深度图、可见几何与平面内表面顶点。
+从 SSL / JSON 描述（墙体、门窗、家具）构建 3D 室内场景，支持 **Blender (bpy)** 与 **Pyrender** 双后端渲染、多视角导出、语义图、深度图、可见几何、平面内表面顶点，以及**像素对齐俯视图 + 地板闭环路径规划**。
 
 > SSL 世界坐标约定（+Y 为俯视图上方、各实体字段含义）见 **§2**。
 
@@ -183,7 +183,7 @@ python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
 |----------|--------------------------|------|
 | `--ssl` | `input_text`（从文件读取） | SSL 或 JSON 场景文件 |
 | `--output` | `output_root` | 输出目录；省略时为 ssl 同目录下 `render_output` |
-| `--views` | `views` | 视角列表，或 `all`（默认） |
+| `--views` | `views` | 视角列表；**不指定** = 不渲染视角；`auto` = 规范化+路径规划+按路径自动生成视角 |
 | `--backend` | `backend` | `bpy`（默认）或 `pyrender` |
 | `--assets` | `asset_dir` | 3D 资产目录；省略时尝试 ssl 旁的 `assets/` 等 |
 | `--texture` | `texture_dir` | 贴图目录 |
@@ -192,12 +192,13 @@ python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
 | `--visible_geometry` | `visible_geometry=True` | 各视角可见 GLB/PLY（需配合 `--glb` 或 `--ply`） |
 | `--semantic` | `semantic=True` | 语义分割图 |
 | `--depth` | `depth=True` | 深度图 + 法线图（bpy） |
-| `--view_transform` | `view_transform=True` | 渲染前变换到各视角 SSL 坐标系 |
-| `--normalized_topdown` | — | 像素对齐俯视图模式（调用 `render_normalized_topdown`） |
-| `--no_floor_path` | — | 配合 `--normalized_topdown`：跳过地板路径采样 |
+| `--normalized_topdown` | — | pixel-aligned SSL；Y=`{output}_normalized` |
+| `--no_floor_path` | — | 跳过 `topdown_normalized/` 地板路径 |
 | `--samples` | `samples` | Blender 采样数 |
 
-可用视角：`topdown`, `front`, `behind`, `left`, `right`, `leftfront`, `rightfront`, `leftbehind`, `rightbehind`, `left_seq`, `all`
+可用视角：`topdown`, `front`, `behind`, `left`, `right`, `leftfront`, `rightfront`, `leftbehind`, `rightbehind`, `left_seq`；**不指定 `--views` 则不渲染视角**；`--views auto` 见 **§4.2**。
+
+> 各视角目录下在世界（或 `--normalized_topdown` 时的规范化）SSL 下渲染；可见几何主文件为世界 SSL，并自动生成 `*_opencv` 相机系副本。根目录 `scene.glb` / `pointcloud/` 同为世界 SSL。
 
 > 历史包装脚本 `SpatialFactory/scripts/render_scene.py` 的静态视角渲染与上述 CLI 等价；新用法请直接调用本库 `fast_scene/render_ssl.py`。
 
@@ -206,7 +207,7 @@ python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
 ```python
 from fast_scene.core.fast_scene_bpy import BpySceneCtx
 
-ctx = BpySceneCtx(room_type="living_room", gen_asset_dir="/path/to/assets")
+ctx = BpySceneCtx(room_type="living_room", asset_dir="/path/to/assets")
 ctx.add_walls(walls_data)
 ctx.add_doors(doors_data)
 ctx.add_windows(windows_data)
@@ -232,6 +233,47 @@ ctx.render_view(
 )
 ```
 
+### 3.3 像素对齐俯视图 + 地板路径规划
+
+与 §3.1 的 `--views` 可**同时**使用：`--normalized_topdown` 决定唯一输出 Y=`{output}_normalized`，先规范化 SSL，再自动渲染 `Y/topdown_normalized/` 路径规划，最后渲染各 views。
+
+**命令行：**
+
+```bash
+python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+  --normalized_topdown \
+  --output path/to/out_normalized \
+  --assets path/to/assets
+# 仅渲染俯视图，不做路径采样：
+#   加 --no_floor_path
+```
+
+**Python API：**
+
+```python
+from fast_scene.render_ssl import render_normalized_topdown
+
+result = render_normalized_topdown(
+    ssl_text,
+    output_dir="out_normalized",
+    backend="bpy",
+    asset_dir="/path/to/assets",
+    floor_path=True,   # 默认 True：渲染深度+语义并采样地板路径
+)
+# result["path_points_ssl"]  — 闭环路径点（像素对齐 SSL 地面坐标）
+# result["floor_path"]       — nav_mask_path 完整返回 dict
+```
+
+**与 `--views topdown` 的区别：**
+
+| | `--views topdown`（多视角渲染） | `--normalized_topdown`（路径规划） |
+|---|---|---|
+| 入口 | `render_ssl()` | `render_normalized_topdown()` |
+| 输出目录 | `{output}/` | `{output}_normalized/`（见 §5） |
+| 路径规划 | 无 | `{output}_normalized/topdown_normalized/` |
+
+批量 benchmark 脚本：`SpatialFactory/scripts/batch_benchmark_floor_path.py`（输出子目录默认 `out_normalized/`）。
+
 ---
 
 ## 4. `render_ssl` API
@@ -251,16 +293,17 @@ def render_ssl(
     texture_dir: Optional[str] = None,
     correct_tilt: bool = True,
     correct_yaw: bool = True,
-    views: Optional[list] = None,   # None = 全部视角
-    export_glb: bool = False,       # 导出全场景 scene.glb
-    export_point_cloud: bool = False,  # 导出全场景点云到 output_root/pointcloud/
-    visible_geometry: bool = False, # 每个视角额外导出可见 GLB/点云
-    semantic: bool = False,         # 每个视角导出语义图
-    depth: bool = False,            # 每个视角导出深度图 + 法线图（bpy）
-    view_transform: bool = False,   # 渲染前变换到各视角 SSL 坐标系
-    samples: Optional[int] = None,  # Blender 采样数
+    views: Optional[list] = None,   # None = 不渲染视角；列表 = 指定视角
+    export_glb: bool = False,
+    export_point_cloud: bool = False,
+    visible_geometry: bool = False,
+    semantic: bool = False,
+    depth: bool = False,
+    samples: Optional[int] = None,
 )
 ```
+
+各视角渲染在世界（或 `--normalized_topdown` 时的规范化）SSL 下 construct / 渲染；可见几何主文件为世界 SSL，并自动生成 `*_opencv` 相机系副本。根目录全场景 GLB/点云同为世界 SSL。
 
 命令行入口：`python fast_scene/render_ssl.py --help`（参数见 §3.1 表格）。
 
@@ -277,107 +320,249 @@ def render_ssl(
 
 ---
 
+## 4.1 像素对齐俯视图与地板路径（`render_normalized_topdown`）
+
+### API
+
+```python
+def render_normalized_topdown(
+    input_text: str,
+    output_dir: str,
+    backend: str = "bpy",
+    asset_dir: Optional[str] = None,
+    texture_dir: Optional[str] = None,
+    width: int = 1000,
+    height: int = 1000,
+    show_ceiling: bool = False,
+    floor_path: bool = True,   # True 时渲染 depth+semantic 并调用 nav_mask_path
+    ...
+) -> Union[str, Dict[str, Any]]
+```
+
+底层渲染：`BpySceneCtx.normalized_topdown_view()` / `SceneCtx.normalized_topdown_view()`（`core/util_data.prepare_pixel_aligned_topdown_context` 做 XY 平移）。
+
+### 像素对齐规则
+
+1. 计算 topdown 相机与 `fov_y`（与常规俯视图相同）
+2. `pixel2real_ratio = camera_z × tan(fov_y/2) / 500`
+3. **平移整场景 SSL**，使相机地面投影落在图像像素 `(ratio×500, ratio×500)`（图像坐标系）
+4. 渲染 1000×1000 俯视图 → 图像左上角 `(0,0)` 对应地面 `(0,0)`
+5. `camera_para.json` 使用**图像坐标系** + `pixel2real_ratio`（SpatialFactory 兼容）
+
+### 地板路径 pipeline（`core/nav_mask_path.py`）
+
+`floor_path=True`（默认）时在渲染完成后自动调用 `run_nav_mask_floor_path(output_dir, config)`：
+
+```
+topdown.png + topdown_depth.png + topdown_semantic.*
+        ↓
+① depth_mask     — 深度在「相机到地面距离 ± tol」内的像素
+② structure_mask — 语义图中墙/门/窗
+③ floor_mask     — 语义图中 floor
+        ↓
+nav_mask = (depth_mask − structure_mask) ∪ floor_mask
+        ↓
+沿最大连通域内边界采样闭环路径（默认 8–20 点）
+        ↓
+floor_path_points.json / floor_path_ssl.txt / topdown_floor_path.png
+```
+
+**nav mask 合并公式**（`combine_nav_mask`）：
+
+```
+nav_mask = (depth_mask \ structure_mask) ∪ floor_mask
+```
+
+即从深度可行走区域中去掉墙门窗，再并入语义地板区域。
+
+输出目录树见 **§5 B**。
+
+### 配置项（`config.yaml`）
+
+| 键 | 默认 | 说明 |
+|----|------|------|
+| `nav_mask_depth_tolerance_m` | `0.05` | 深度 mask：相机到地面距离 ± 此值（米） |
+| `nav_mask_inset_m` | `0.15` | 路径采样：沿 nav mask 内边界向内偏移（米） |
+| `nav_mask_point_spacing_m` | `0.3` | 闭环路径点间距（米） |
+
+---
+
+## 4.2 自动视角（`--views auto`）
+
+等价于 **`--normalized_topdown` + 地板路径 + 常规 topdown + 按路径自动生成视角**（目前仅 `backend=bpy`）。
+
+```bash
+python fast_scene/render_ssl.py --ssl scene.txt \
+  --views auto --output out \
+  --glb --ply --visible_geometry --semantic --depth --pano \
+  --assets path/to/assets
+# → Y = out_normalized/
+```
+
+### 流程
+
+1. **Step 1–2**：与 §4.1 相同——pixel-aligned SSL 规范化 + `topdown_normalized/` 地板路径规划  
+   路径输出 `path_points_ssl`：地面闭环路点 `0…n-1`（首尾相连）
+2. **Step 3**：
+   - 常规 **`Y/topdown/`** 俯视图（1024²，与 `--views topdown` 相同；**不是** Step 2 的像素对齐俯视图）
+   - `core/auto_views.py` 根据路径点生成相机并子进程渲染，manifest 写入 `Y/auto_views.json`
+
+### 两种自动渲染
+
+**类型 A — 单帧（多次 `render_view`）**
+
+- 从路径点索引 `0, 4, 8, …` 每隔 4 点采样（stride=4）
+- 相机位置：`(x, y, z)`，`x,y` 为路点；`z ∈ [0.5, 2.5]` 随机，且 `<` 墙高最大值
+- `world_up = (0, 0, 1)`；初始 `look_at` = 场景 3D bbox 中心
+- 俯仰：在射线 AB 上调整，随机 **−40° ~ 5°**
+- FOV：**60° ~ 90°** 随机；分辨率 **1000×1000**
+- 每个路点一个输出目录 `auto_path_{索引}/`（如 `auto_path_0000/`）
+
+**类型 B — 三帧序列（一次 `render_view`）**
+
+- 从 `n` 个路点中**随机**选一点 `(x, y, 0)`，记索引为 `k`
+- 相机位置固定 `(x, y, 1.5)`；`look_at` 初始为 bbox 中心
+- 三帧 `look_at`（同相机位置）：
+  - 帧 1：向左偏航 **10° ~ 40°**
+  - 帧 2：中心（不偏航）
+  - 帧 3：向右偏航 **0° ~ 40°**
+- FOV：**60° ~ 90°** 随机；分辨率 **1000×1000**
+- 输出目录 **`auto_path_{k:04d}_seq/`**（与类型 A 同索引命名规则）
+
+### 附属产物（与 `--views topdown left_seq` 相同）
+
+auto 模式下 Step 3 的 **`topdown/`**、**`auto_path_*`**、**`auto_path_*_seq`** 均走同一套 `worker_render_view` → `render_view` / `topdown_view`，CLI 开关**全部生效**：
+
+| CLI | auto 单帧 `auto_path_*` | auto 序列 `auto_path_*_seq` | auto 的 `topdown/` |
+|-----|---------------------------|-------------------------------|---------------------|
+| `--depth` | ✅ 深度 + 法线 | ✅ 每帧深度 + 法线 | ✅ |
+| `--semantic` | ✅ | ✅ 每帧 | ✅ |
+| `--pano` | ✅ 全景 pass | ✅ 每帧全景 | ❌（topdown 固定无 pano） |
+| `--glb` + `--visible_geometry` | ✅ `scene_visible.glb` + `_opencv` | ✅ 多帧并集一份 | ✅ |
+| `--ply` + `--visible_geometry` | ✅ 可见点云 + `_opencv` | ✅ 多帧并集 | ✅ |
+| `--ply`（无 visible_geometry） | ✅ `planar_faces.json` / lines | ✅ 每帧 | ✅ |
+
+根目录 **`scene.glb` / `pointcloud/scene_all.ply`** 仍由 Step 3 结束后的 `worker_render_post` 导出（全场景，与视角无关）。
+
+### 输出示例
+
+```
+out_normalized/
+├── topdown/                     # Step 3 常规俯视图（1024²）
+│   └── topdown.png
+├── auto_views.json              # 全部 auto 相机 spec
+├── auto_path_0000/              # 类型 A（路点 0）
+├── auto_path_0004/              # 类型 A（路点 4）
+├── …
+└── auto_path_0012_seq/          # 类型 B（路点 12 的三帧序列）
+    ├── {frame0}.png
+    ├── {frame1}.png
+    └── {frame2}.png
+```
+
+> 手动传入相机**序列**时（如 `left_seq`），序列目录名仍为 `{timestamp}_seq/`。
+
+---
+
 ## 5. 输出目录结构
 
-以 `output_root/` 为例：
+**唯一输出根目录 Y**（所有产物都在 Y 下）：
+
+| `--normalized_topdown` | Y |
+|------------------------|---|
+| 否 | `{output}/` |
+| 是 | `{output}_normalized/` |
+
+`--normalized_topdown` 是**全局配置**：先规范化 SSL，后续所有渲染（各视角、GLB、点云）均基于该坐标系。
+
+**流程（启用 `--normalized_topdown`）：**
+
+1. 确定 Y = `{output}_normalized`，写入规范化 `ssl.txt` + `data.json`
+2. `Y/topdown_normalized/`：1000² 像素对齐俯视图 + 地板路径（自动）
+3. `Y/topdown/`、`Y/{时间戳}/`、`Y/{时间戳}_seq/` …：按 `--views` 或 `auto` 渲染
+4. `Y/scene.glb`、`Y/pointcloud/`：全场景导出
 
 ```
-output_root/
-├── data.json                 # 场景 JSON（世界 SSL）
-├── ssl.txt                   # 场景级标准 SSL（世界坐标，未做视角变换）
-├── scene.glb                 # [--glb] 完整场景（世界 SSL）
-├── pointcloud/               # [--ply] 完整场景点云（世界 SSL，post 阶段导出）
-│   ├── metadata.json
-│   ├── scene_all.ply
-│   ├── scene_all_opencv.ply  # 若 post 传入相机位姿则生成（少见）
-│   ├── floor.ply
-│   ├── walls/wall0.ply
-│   ├── doors/door0_{asset_id}.ply
-│   ├── windows/window0_{asset_id}.ply
-│   └── boxes/sidetable0_{asset_id}.ply
-├── topdown/                  # 俯视图（固定目录名）
-│   ├── ssl.txt               # [--view_transform] 或默认视角 SSL 文本
+Y/                                    # {output} 或 {output}_normalized
+├── ssl.txt
+├── data.json
+├── scene.glb                         # [--glb]
+├── pointcloud/                       # [--ply]
+├── topdown_normalized/               # [--normalized_topdown] 像素对齐 + 路径规划
+│   ├── topdown.png                   # 1000×1000
+│   ├── camera_para.json              # 图像坐标 + pixel2real_ratio
+│   ├── topdown_depth.png             # [floor_path]
+│   ├── topdown_semantic.*
+│   ├── nav_mask*.png                 # [floor_path]
+│   ├── floor_path_ssl.txt            # [floor_path]
+│   └── topdown_floor_path.png        # [floor_path]
+├── auto_views.json                   # [--views auto]
+├── auto_path_0000/ …                 # [--views auto] 单帧
+├── auto_path_0008_seq/               # [--views auto] 三帧序列
+├── {timestamp}_seq/                  # left_seq 等手动序列
+├── topdown/                          # [--views topdown] 1024² 常规俯视图
 │   ├── topdown.png
-│   ├── topdown_depth.png     # [--depth]
-│   ├── topdown_normal.png    # [--depth] 世界空间法线（与深度同次渲染）
-│   ├── topdown_semantic.png  # [--semantic]
-│   ├── topdown_semantic.json
-│   ├── topdown_lines.png     # [--ply] 平面内表面顶点连线 overlay
-│   ├── planar_faces.json     # [--ply] 内表面顶点（世界 SSL 3D 坐标）
-│   ├── camera_para.json      # 含 world + *_view 字段（见 §5.1）
-│   ├── scene_visible.glb     # [--visible_geometry + --glb] 视角 SSL
-│   ├── scene_visible_opencv.glb  # 同上，OpenCV 相机系副本
-│   └── pointcloud/           # [--visible_geometry + --ply]
-│       ├── metadata_visible.json   # objects[].path / path_opencv
-│       ├── scene_visible.ply       # 视角 SSL（主文件）
-│       ├── scene_visible_opencv.ply  # OpenCV 相机系副本
-│       ├── floor_visible[_cutted].ply
-│       ├── floor_visible[_cutted]_opencv.ply
-│       ├── walls/wall0_visible[_cutted].ply
-│       ├── walls/wall0_visible[_cutted]_opencv.ply
-│       └── boxes/sidetable0_{asset_id}_visible[_cutted].ply
-│           └── …_opencv.ply    # 每个 PLY 均有对应 _opencv 副本
-└── {毫秒时间戳}/              # 单视角或 left_seq 等多帧序列
-    ├── ssl.txt               # 视角 SSL（序列以首帧定义坐标系）
-    ├── {stamp}.png           # 单视角一张；序列多帧
-    ├── {stamp}_depth.png
-    ├── {stamp}_normal.png    # [--depth]
-    ├── {stamp}_semantic.png
-    ├── {stamp}_lines.png     # [--ply]
-    ├── planar_faces.json     # [--ply]
-    ├── camera_para.json
-    ├── scene_visible.glb
-    ├── scene_visible_opencv.glb
-    └── pointcloud/           # 可见点云：主文件 + _opencv 副本（结构同 topdown/）
+│   ├── topdown_depth.png             # [--depth]
+│   ├── topdown_semantic.*            # [--semantic]
+│   ├── planar_faces.json             # [--ply]
+│   └── pointcloud/                   # [--visible_geometry + --ply]
+└── {毫秒时间戳}/                      # 单相机视角
+    └── …
 ```
 
-### 5.1 几何导出坐标系（视角 SSL 与 OpenCV）
+```bash
+# 规范化 + auto 路径视角
+python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+  --views auto --output path/to/out --glb --assets path/to/assets
 
-开启 `--glb` / `--ply` 且（对可见几何）`--visible_geometry` 时，**每个视角目录**下的 GLB/PLY 会成对导出：**主文件（视角 SSL）** + **`_opencv` 副本（OpenCV 相机系）**。实现见 `core/geometry_opencv.py`。
+# 规范化 + 多视角
+python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+  --normalized_topdown --views topdown left_seq \
+  --output path/to/out --glb --assets path/to/assets
+# → 唯一输出: path/to/out_normalized/
+# left_seq → {timestamp}_seq/
+```
+
+---
+
+### 5.3 几何导出坐标系（世界 SSL 与 OpenCV）
+
+各视角在世界（或规范化）SSL 下 construct / 渲染。开启 `--glb` / `--ply` 且 `--visible_geometry` 时，**每个视角目录**下的可见 GLB/PLY **主文件为世界 SSL**；同时写出 `*_opencv.ply` / `*_opencv.glb`（OpenCV 相机系，见 `core/geometry_opencv.py`）。
 
 | 坐标系 | 适用文件 | 原点与轴向 |
 |--------|----------|------------|
-| **世界 SSL** | 根目录 `ssl.txt`、`data.json`；`worker_render_post` 的 `scene.glb`、`pointcloud/scene_all.ply` | 与 §2 一致：+X 右、+Y 上、+Z 高 |
-| **视角 SSL** | `{视角}/pointcloud/*.ply`（无 `_opencv`）、`scene_visible.ply`、`scene_visible.glb` | 原点：相机位置到地面的垂足；+Y：视线在地面上的投影；+Z：竖直向上 |
+| **世界 SSL** | 根目录 `ssl.txt`、`data.json`；`worker_render_post` 的 `scene.glb`、`pointcloud/scene_all.ply`；`{视角}/pointcloud/*.ply`（无 `_opencv`）、`scene_visible.ply`、`scene_visible.glb` | 与 §2 一致：+X 右、+Y 上、+Z 高 |
 | **OpenCV 相机系** | 上述每个几何文件的 `*_opencv.ply` / `*_opencv.glb` | 原点：相机光心；+X：图像右；+Y：图像下；+Z：沿视线向场景深处（深度为正） |
 
 **约定：**
 
-- 主 PLY/GLB 先从 Blender 世界坐标变换到**该视角的视角 SSL**，再写盘。
-- `_opencv` 副本在**视角 SSL 坐标**下，再变换到以**首帧参考相机**为原点的 OpenCV 系（`camera_position_view = (0,0,h)`，`look_at_target_view = (0,x,e)`）。
-- **`left_seq` 等多帧序列**：OpenCV 副本统一以**序列首帧**相机为参考系；可见几何为各帧视锥并集。
+- 主 PLY/GLB 直接以 Blender 世界坐标（= 世界/规范化 SSL）写盘，**不做视角 SSL 变换**。
+- `_opencv` 副本由世界 SSL 坐标变换到**该视角（或序列首帧）相机**的 OpenCV 系。
+- **`left_seq` 等多帧序列**：OpenCV 副本以**序列首帧**相机为参考系；可见几何为各帧视锥并集。
 - `metadata_visible.json` / `metadata.json` 中可为合并点云记录 `"path_opencv": "scene_visible_opencv.ply"` 等字段。
-- `planar_faces.json`、深度/语义 PNG 仍用**世界 SSL** 或与渲染图对齐的像素坐标，不生成 `_opencv` 副本。
+- `planar_faces.json`、深度/语义 PNG 仍用世界 SSL 或与渲染图对齐的像素坐标。
+- 各视角目录**不再**写出 `{视角}/ssl.txt`（场景 SSL 仅在输出根目录 Y）。
 
-**`camera_para.json`（每视角）** 同时记录世界与视角 SSL 相机位姿，例如：
+**`camera_para.json`（每视角）** 记录世界 SSL 相机位姿，例如：
 
 ```json
 {
   "camera_position": [wx, wy, wz],
   "look_at_target": [wx, wy, wz],
   "world_up": [0, 0, 1],
-  "camera_position_view": [0, 0, h],
-  "look_at_target_view": [0, x, e],
-  "world_up_view": [...],
-  "view_origin_xy": [a, b],
-  "view_theta": 0.42,
-  "fov_y": 1.2,
   "aspectRatio": 1.0,
+  "fov_y": 1.2,
   "depth_scale": 1000.0
 }
 ```
-
-- 单视角 / topdown / 序列首帧：`camera_position_view = (0,0,h)`，`look_at_target_view = (0,x,e)`。
-- 序列后续帧：在同一视角 SSL 基底下写入该帧完整 `*_view` 坐标。
-- 加 `--view_transform` 时还会在 `{视角}/ssl.txt` 写出变换后的场景 SSL，且在该视角 SSL 下 construct / 渲染 / 导出几何。
 
 **三类点云的区别：**
 
 | 路径 | 坐标系 | 内容 |
 |------|--------|------|
 | `output_root/pointcloud/` | 世界 SSL | 场景内**所有**物体（post 阶段，与视角无关） |
-| `{视角}/pointcloud/*.ply` | 视角 SSL | 该视角**可见**物体（需 `--visible_geometry`） |
-| `{视角}/pointcloud/*_opencv.ply` | OpenCV（首帧相机） | 与上一行相同几何，换到 OpenCV 相机系 |
+| `{视角}/pointcloud/*.ply` | 世界 SSL | 该视角**可见**物体（需 `--visible_geometry`） |
+| `{视角}/pointcloud/*_opencv.ply` | OpenCV（该视角/首帧相机） | 与上一行相同几何，换到 OpenCV 相机系 |
 | `{视角}/planar_faces.json` | 世界 SSL（3D 顶点） | 墙/门/窗/地板/天花内表面（需 `--ply`） |
 
 **命名与 context 规范（`ssl.txt`、context 键、点云文件名一致）：**
@@ -419,7 +604,7 @@ walls/wall2_visible_cutted_opencv.ply  # 同上，OpenCV 坐标副本
 
 ## 6. 可见几何 (`visible_geometry`)
 
-开启 `--visible_geometry` 且同时开启 `--glb` 或 `--ply` 时，每个视角目录下导出 `scene_visible.glb` / `pointcloud/`；每个几何文件另有 `_opencv` 副本（见 §5.1）。
+开启 `--visible_geometry` 且同时开启 `--glb` 或 `--ply` 时，每个视角目录下导出 `scene_visible.glb` / `pointcloud/`；每个几何文件另有 `_opencv` 副本（见 §5.3）。
 
 ### 处理流程（按顺序）
 
@@ -668,13 +853,18 @@ python build_lancedb.py
 
 - 需提供 `image_path`
 - 按 `mesh_id` 分组 → 裁剪 → 扩图/超分 → 3D 生成（Hunyuan 等）
-- 模型保存至 `gen_asset_dir`（默认 `/data-nas/data/dataset/qunhe/Manycore-Future/generate/`）
+- 模型保存至 `asset_dir`（默认 `/data-nas/data/dataset/qunhe/Manycore-Future/generate/`）
 
 ---
 
 ## 附录：常用 Python 调用示例
 
 ```python
+# 像素对齐俯视图 + 地板闭环路径
+from fast_scene.render_ssl import render_normalized_topdown
+result = render_normalized_topdown(ssl_text, "out_normalized", backend="bpy", floor_path=True)
+print(len(result["path_points_ssl"]), "path points")
+
 # 仅俯视图 + 可见几何
 render_ssl(ssl_text, backend="bpy", views=["topdown"],
            export_glb=True, export_point_cloud=True, visible_geometry=True)
@@ -685,6 +875,19 @@ render_ssl(ssl_text, backend="bpy", views=None,
 
 # 低内存：大场景 (>25 物体) 自动切换 simplified 模型路径
 render_ssl(ssl_text, backend="bpy", asset_dir="/path/to/assets")
+```
+
+**命令行等价：**
+
+```bash
+# 像素对齐俯视图 + 地板路径
+python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+  --normalized_topdown --output out_normalized --assets path/to/assets
+
+# 多视角渲染（不含地板路径）
+python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+  --views topdown left_seq --output out_dir \
+  --glb --assets path/to/assets --semantic --depth
 ```
 
 ---

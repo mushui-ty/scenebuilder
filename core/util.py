@@ -31,9 +31,15 @@ def allocate_millis_stamp(exclude=None) -> str:
         time.sleep(0.001)
 
 
-def allocate_view_output_dir(output_root: str, view_name: Optional[str] = None) -> Tuple[str, str]:
+def allocate_view_output_dir(
+    output_root: str,
+    view_name: Optional[str] = None,
+    *,
+    sequence: bool = False,
+) -> Tuple[str, str]:
     """分配视角输出目录：topdown 固定名，其余用毫秒时间戳。返回 (view_dir, dir_stamp)。
 
+    sequence=True 时目录名为 ``{timestamp}_seq``（相机位姿序列）。
     dir_stamp 标识一次 render_view 调用；单帧/序列内各帧 png 名用 allocate_millis_stamp(exclude={dir_stamp}) 另取。
     """
     os.makedirs(output_root, exist_ok=True)
@@ -43,10 +49,11 @@ def allocate_view_output_dir(output_root: str, view_name: Optional[str] = None) 
         return view_dir, "topdown"
     while True:
         stamp = str(int(time.time() * 1000))
-        view_dir = os.path.join(output_root, stamp)
+        dir_name = f"{stamp}_seq" if sequence else stamp
+        view_dir = os.path.join(output_root, dir_name)
         if not os.path.exists(view_dir):
             os.makedirs(view_dir, exist_ok=True)
-            return view_dir, stamp
+            return view_dir, dir_name
         time.sleep(0.001)
 
 
@@ -56,11 +63,29 @@ def resolve_topdown_image_path(output_root: str) -> str:
     return os.path.join(view_dir, "topdown.png")
 
 
-def resolve_view_image_path(output_root: str) -> str:
-    """单视角：分配 {dir_stamp}/{image_stamp}.png 路径。"""
-    view_dir, dir_stamp = allocate_view_output_dir(output_root)
+def resolve_view_image_path(output_root: str, view_dir_name: Optional[str] = None) -> str:
+    """单视角：分配 ``{view_dir_name 或 毫秒时间戳}/{image_stamp}.png`` 路径。"""
+    if view_dir_name:
+        view_dir = os.path.join(output_root, view_dir_name)
+        os.makedirs(view_dir, exist_ok=True)
+        dir_stamp = view_dir_name
+    else:
+        view_dir, dir_stamp = allocate_view_output_dir(output_root)
     image_stamp = allocate_millis_stamp(exclude={dir_stamp})
     return os.path.join(view_dir, f"{image_stamp}.png")
+
+
+def allocate_sequence_view_output_dir(
+    output_root: str,
+    view_dir_name: Optional[str] = None,
+) -> Tuple[str, str]:
+    """序列视角目录：``view_dir_name`` 给定则用之，否则 ``{timestamp}_seq``。"""
+    os.makedirs(output_root, exist_ok=True)
+    if view_dir_name:
+        view_dir = os.path.join(output_root, view_dir_name)
+        os.makedirs(view_dir, exist_ok=True)
+        return view_dir, view_dir_name
+    return allocate_view_output_dir(output_root, sequence=True)
 
 
 SEMANTIC_BACKGROUND = (0, 0, 0)

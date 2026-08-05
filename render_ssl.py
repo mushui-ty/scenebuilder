@@ -16,7 +16,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import Optional, Literal, Any, Dict, Union
+from typing import Optional, Literal, Any, Dict, Union, List, Tuple
 
 _PKG_ROOT = os.path.dirname(os.path.abspath(__file__))
 _PKG_PARENT = os.path.dirname(_PKG_ROOT)
@@ -36,11 +36,118 @@ def _load_util_data_module():
 
 
 try:
-    from .core.util_data import parse_scene_input, format_standard_ssl
+    from .core.util_data import (
+        parse_scene_input,
+        format_standard_ssl,
+        prepare_pixel_aligned_topdown_context,
+        apply_scene_json_xy_translation,
+    )
 except (ImportError, ValueError):
     _util_data = _load_util_data_module()
     parse_scene_input = _util_data.parse_scene_input
     format_standard_ssl = _util_data.format_standard_ssl
+    prepare_pixel_aligned_topdown_context = _util_data.prepare_pixel_aligned_topdown_context
+    apply_scene_json_xy_translation = _util_data.apply_scene_json_xy_translation
+
+
+def resolve_output_dir(output_root: str, normalized_topdown: bool) -> str:
+    """确定唯一输出根目录 Y：规范化时 ``{output}_normalized``，否则 ``{output}``。"""
+    return normalized_output_dir(output_root) if normalized_topdown else output_root
+
+
+def normalized_output_dir(output_root: str) -> str:
+    return f"{output_root}_normalized"
+
+
+ViewsSpec = Optional[Union[List[str], Literal["auto"]]]
+
+TOPDOWN_NORMALIZED_SUBDIR = "topdown_normalized"
+
+
+def _resolve_views_to_run(views: ViewsSpec, view_cameras: dict) -> List[str]:
+    """将 views 参数解析为待渲染视角名列表。None / [] → 不渲染；auto 由上层单独处理。"""
+    if not views or views == "auto":
+        return []
+    names: List[str] = []
+    for name in views:
+        if name == "topdown":
+            if "topdown" not in names:
+                names.append("topdown")
+        elif name in view_cameras and name not in names:
+            names.append(name)
+        elif name not in view_cameras:
+            print(f"⚠️  未知视角 {name!r}，已跳过")
+    return names
+
+
+def _run_auto_views_from_path(
+    y_dir: str,
+    floor_result: Optional[Dict[str, Any]],
+    context: Dict[str, Any],
+) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    """根据地板路径生成 auto 视角 spec，并写入 auto_views.json。"""
+    try:
+        from .core.auto_views import build_auto_views_from_path, write_auto_views_manifest
+    except (ImportError, ValueError):
+        from core.auto_views import build_auto_views_from_path, write_auto_views_manifest  # type: ignore
+
+    if floor_result is None:
+        print("⚠️  无 floor_path 结果，auto 视角不可用")
+        return {}, []
+    path_points = floor_result.get("path_points_ssl") or []
+    if not path_points:
+        print("⚠️  path_points_ssl 为空，auto 视角不可用")
+        return {}, []
+
+    specs, names = build_auto_views_from_path(path_points, context)
+    manifest = write_auto_views_manifest(y_dir, specs)
+    n_path = len(path_points)
+    n_single = sum(1 for n in names if not n.endswith("_seq"))
+    print(
+        f"🎯 views=auto：路径 {n_path} 点 → "
+        f"{n_single} 个单帧视角 + 1 个三帧序列；manifest → {manifest}"
+    )
+    return specs, names
+
+
+def _render_auto_view_spec(
+    ctx,
+    output_dir: str,
+    spec: Dict[str, Any],
+    extra: dict,
+    view_dir_name: str,
+) -> None:
+    """按 auto_view spec 调用 render_view；输出目录名为 view_dir_name（如 auto_path_0004_seq）。"""
+    common = dict(
+        rebuild=True,
+        use_HDRI=False,
+        width=int(spec.get("width", 1000)),
+        height=int(spec.get("height", 1000)),
+        manual_fov=float(spec["manual_fov"]),
+        auto_fov=False,
+        auto_transparent=True,
+        view_dir_name=view_dir_name,
+        **extra,
+    )
+    if spec["type"] == "single":
+        ctx.render_view(
+            output_path=output_dir,
+            camera_position=spec["camera_position"],
+            look_at_target=spec["look_at_target"],
+            up_vector=spec.get("up_vector", [0.0, 0.0, 1.0]),
+            **common,
+        )
+        return
+    if spec["type"] == "sequence":
+        ctx.render_view(
+            output_path=output_dir,
+            camera_position=spec["camera_positions"],
+            look_at_target=spec["look_at_targets"],
+            up_vector=spec.get("up_vectors", [0.0, 0.0, 1.0]),
+            **common,
+        )
+        return
+    raise ValueError(f"未知 auto_view type: {spec.get('type')!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +217,8 @@ def _prepare_render_ctx(
 
 def _create_render_ctx(job: dict):
     scene_json = job["scene_json"]
+    if job.get("normalized_topdown"):
+        print("   [worker] 使用 job 内已规范化的 scene_json（pixel-aligned SSL）")
     ctx = _instantiate_ctx(
         job.get("backend", "bpy"),
         scene_json["room"]["room_type"],
@@ -132,7 +241,8 @@ def _job_render_kwargs(job: dict) -> dict:
         visible_geometry=job.get("visible_geometry", False),
         render_semantic=job.get("semantic", False),
         render_depth=job.get("depth", False),
-        view_transform=job.get("view_transform", False),
+        pano=job.get("pano", False),
+        pano_resolution=job.get("pano_resolution", 4096),
     )
 
 
@@ -142,7 +252,14 @@ def worker_render_view(job_path: str, view_name: str) -> None:
     output_dir = job["output_dir"]
     extra = _job_render_kwargs(job)
 
+    auto_specs = job.get("auto_view_specs") or {}
+    if view_name in auto_specs:
+        _render_auto_view_spec(ctx, output_dir, auto_specs[view_name], extra, view_dir_name=view_name)
+        return
+
     if view_name == "topdown":
+        extra.pop("pano", None)
+        extra.pop("pano_resolution", None)
         ctx.topdown_view(
             output_dir,
             show_ceiling=False,
@@ -170,8 +287,8 @@ def worker_render_view(job_path: str, view_name: str) -> None:
 def worker_render_post(job_path: str) -> None:
     job = _load_job(job_path)
     ctx = _create_render_ctx(job)
-    output_dir = job["output_dir"]
     scene_json = job["scene_json"]
+    output_dir = job["output_dir"]
 
     if job.get("export_glb"):
         glb_path = os.path.join(output_dir, "scene.glb")
@@ -211,6 +328,51 @@ def _spawn_worker_post(job_path: str) -> None:
 # 主入口
 # ---------------------------------------------------------------------------
 
+def _run_normalized_topdown_phase(
+    ctx,
+    output_dir: str,
+    *,
+    align: Dict[str, Any],
+    floor_path: bool = True,
+    width: int = 1000,
+    height: int = 1000,
+    show_ceiling: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """在 Y/topdown_normalized/ 渲染 1000² 像素对齐俯视图，并可选采样地板路径。"""
+    if not hasattr(ctx, "normalized_topdown_view"):
+        raise RuntimeError("当前后端不支持 normalized_topdown_view")
+
+    topdown_norm_dir = os.path.join(output_dir, TOPDOWN_NORMALIZED_SUBDIR)
+    os.makedirs(topdown_norm_dir, exist_ok=True)
+    print(f"🗺️  像素对齐俯视图 + 地板路径 → {topdown_norm_dir}")
+
+    ctx.normalized_topdown_view(
+        topdown_norm_dir,
+        width=width,
+        height=height,
+        show_ceiling=show_ceiling,
+        use_HDRI=False,
+        render_depth=floor_path,
+        render_semantic=floor_path,
+        align=align,
+        write_ssl=False,
+    )
+
+    if not floor_path:
+        return None
+
+    try:
+        from .core.config_utils import load_config
+        from .core.nav_mask_path import run_nav_mask_floor_path
+    except (ImportError, ValueError):
+        from core.config_utils import load_config  # type: ignore
+        from core.nav_mask_path import run_nav_mask_floor_path  # type: ignore
+
+    config = load_config()
+    floor_result = run_nav_mask_floor_path(topdown_norm_dir, config)
+    return floor_result
+
+
 def render_normalized_topdown(
     input_text: str,
     output_dir: str,
@@ -230,74 +392,44 @@ def render_normalized_topdown(
     correct_tilt: bool = True,
     correct_yaw: bool = True,
     floor_path: bool = True,
+    export_glb: bool = False,
+    export_point_cloud: bool = False,
 ) -> Union[str, Dict[str, Any]]:
-    """像素对齐俯视图：平移 SSL 后渲染 1000×1000 俯视图，输出 ssl/topdown/camera_para。
+    """像素对齐模式：等价于 ``render_ssl(..., normalized_topdown=True, views=None)``。
 
-    floor_path=True（默认）时额外渲染深度图+语义图，并基于
-    (深度mask - 墙门窗mask) ∪ 地板mask 采样地板闭环路径。
+    唯一输出目录 Y = ``{output_dir}_normalized``；路径规划产物在 ``Y/topdown_normalized/``。
     """
-    if outpaint_image_dir is None:
-        outpaint_image_dir = output_dir
-
-    try:
-        from .core.util_data import get_mesh
-    except (ImportError, ValueError):
-        from core.util_data import get_mesh  # type: ignore
-
-    print(f"\n🚀 像素对齐俯视图渲染 [后端: {backend}]")
-    scene_json = parse_scene_input(input_text)
-    scene_json = get_mesh(
-        scene_json,
-        image_path=image,
+    y_dir, _, floor_result = render_ssl(
+        input_text,
+        backend=backend,
+        output_root=output_dir,
+        image=image,
         retrieve_hole=retrieve_hole,
         asset_mode=asset_mode,
         outpaint_image_dir=outpaint_image_dir,
         asset_dir=asset_dir,
         gen_3d_model=gen_3d_model,
+        gen_texture=gen_texture,
+        texture_dir=texture_dir,
         correct_tilt=correct_tilt,
         correct_yaw=correct_yaw,
-    )
-
-    os.makedirs(output_dir, exist_ok=True)
-    room_type = scene_json["room"]["room_type"]
-    ctx = _instantiate_ctx(backend, room_type, asset_dir)
-    _prepare_render_ctx(
-        ctx,
-        scene_json,
-        texture_dir=texture_dir,
-        gen_texture=gen_texture,
-        image=image,
+        views=None,
+        export_glb=export_glb,
+        export_point_cloud=export_point_cloud,
         samples=samples,
+        normalized_topdown=True,
+        floor_path=floor_path,
+        normalized_topdown_width=width,
+        normalized_topdown_height=height,
+        normalized_topdown_show_ceiling=show_ceiling,
     )
-
-    if not hasattr(ctx, "normalized_topdown_view"):
-        raise RuntimeError(f"后端 {backend!r} 不支持 normalized_topdown_view")
-
-    ctx.normalized_topdown_view(
-        output_dir,
-        width=width,
-        height=height,
-        show_ceiling=show_ceiling,
-        use_HDRI=False,
-        render_depth=floor_path,
-        render_semantic=floor_path,
-    )
-    print(f"✅ 完成: {output_dir}")
-
     if not floor_path:
-        return output_dir
-
-    try:
-        from .core.config_utils import load_config
-        from .core.nav_mask_path import run_nav_mask_floor_path
-    except (ImportError, ValueError):
-        from core.config_utils import load_config  # type: ignore
-        from core.nav_mask_path import run_nav_mask_floor_path  # type: ignore
-
-    config = load_config()
-    floor_result = run_nav_mask_floor_path(output_dir, config)
+        return y_dir
+    if floor_result is None:
+        return y_dir
     return {
-        "output_dir": output_dir,
+        "output_dir": y_dir,
+        "topdown_normalized_dir": os.path.join(y_dir, TOPDOWN_NORMALIZED_SUBDIR),
         "path_points_px": floor_result["path_points_px"],
         "path_points_ssl": floor_result["path_points_ssl"],
         "floor_path": floor_result,
@@ -318,16 +450,35 @@ def render_ssl(
     texture_dir: Optional[str] = None,
     correct_tilt: bool = True,
     correct_yaw: bool = True,
-    views: Optional[list] = None,
+    views: ViewsSpec = None,
     export_glb: bool = False,
     export_point_cloud: bool = False,
     visible_geometry: bool = False,
     semantic: bool = False,
     depth: bool = False,
-    view_transform: bool = False,
+    pano: bool = False,
+    pano_resolution: int = 4096,
     samples: Optional[int] = None,
+    normalized_topdown: bool = False,
+    floor_path: bool = True,
+    normalized_topdown_width: int = 1000,
+    normalized_topdown_height: int = 1000,
+    normalized_topdown_show_ceiling: bool = False,
 ):
-    """渲染场景。``input_text`` 可为标准 SSL 文本，或 JSON 字符串（含 wall/door/window/bbox/room）。"""
+    """渲染场景。``input_text`` 可为标准 SSL 文本，或 JSON 字符串。
+
+    ``normalized_topdown=True`` 时：
+    - 唯一输出根目录 Y = ``{output_root}_normalized``（否则 Y = ``{output_root}``）
+    - 先对 SSL 做 pixel-aligned 规范化，后续所有渲染均基于该坐标系
+    - 自动在 ``Y/topdown_normalized/`` 渲染像素对齐俯视图 + 地板路径
+    - 再在 Y 下按 ``views`` 渲染 ``topdown/``、序列视角等（``views=None`` 时不渲染任何视角）
+    - ``views="auto"``：强制规范化 + 地板路径，随后渲染常规 topdown + 按路径自动生成视角
+
+    各视角在世界（或规范化）SSL 下渲染；可见几何主文件为世界 SSL，并写 ``*_opencv`` 副本。
+    """
+    if views == "auto":
+        normalized_topdown = True
+        floor_path = True
     if outpaint_image_dir is None:
         outpaint_image_dir = output_root
 
@@ -352,8 +503,8 @@ def render_ssl(
         correct_yaw=correct_yaw,
     )
 
-    output_dir = output_root
-    os.makedirs(output_dir, exist_ok=True)
+    y_dir = resolve_output_dir(output_root, normalized_topdown)
+    os.makedirs(y_dir, exist_ok=True)
 
     room_type = scene_json["room"]["room_type"]
     ctx = _instantiate_ctx(backend, room_type, asset_dir)
@@ -366,10 +517,35 @@ def render_ssl(
         samples=samples,
     )
 
+    pixel_align: Optional[Dict[str, Any]] = None
+    if normalized_topdown:
+        print(f"📐 Step 1: pixel-aligned SSL 规范化 → 输出根目录 Y = {y_dir}")
+        pixel_align = prepare_pixel_aligned_topdown_context(ctx.context)
+        apply_scene_json_xy_translation(
+            scene_json,
+            pixel_align["dx_ssl"],
+            pixel_align["dy_ssl"],
+        )
+
     standard_ssl = format_standard_ssl(ctx.context)
-    ssl_path = os.path.join(output_dir, "ssl.txt")
+    ssl_path = os.path.join(y_dir, "ssl.txt")
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(standard_ssl)
+    with open(os.path.join(y_dir, "data.json"), "w", encoding="utf-8") as f:
+        json.dump(scene_json, f, indent=2, ensure_ascii=False)
+
+    floor_result: Optional[Dict[str, Any]] = None
+    if normalized_topdown and pixel_align is not None:
+        print(f"📐 Step 2: topdown_normalized + 地板路径 → {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
+        floor_result = _run_normalized_topdown_phase(
+            ctx,
+            y_dir,
+            align=pixel_align,
+            floor_path=floor_path,
+            width=normalized_topdown_width,
+            height=normalized_topdown_height,
+            show_ceiling=normalized_topdown_show_ceiling,
+        )
 
     center = ctx.context["meta"]["center"]
     span = ctx.context["meta"]["span"]
@@ -392,11 +568,22 @@ def render_ssl(
         ],
     }
 
-    job_path = os.path.join(output_dir, ".render_job.json")
+    job_path = os.path.join(y_dir, ".render_job.json")
+    auto_view_specs: Dict[str, Dict[str, Any]] = {}
+    auto_view_names: List[str] = []
+    if views == "auto":
+        if backend != "bpy":
+            print("⚠️  views=auto 目前仅支持 backend=bpy，已跳过 auto 视角")
+        else:
+            auto_view_specs, auto_view_names = _run_auto_views_from_path(
+                y_dir, floor_result, ctx.context
+            )
+
     job = {
         "backend": backend,
         "scene_json": scene_json,
-        "output_dir": output_dir,
+        "output_dir": y_dir,
+        "normalized_topdown": normalized_topdown,
         "asset_dir": asset_dir,
         "texture_dir": texture_dir,
         "gen_texture": gen_texture,
@@ -407,29 +594,40 @@ def render_ssl(
         "visible_geometry": visible_geometry,
         "semantic": semantic,
         "depth": depth,
-        "view_transform": view_transform,
+        "pano": pano,
+        "pano_resolution": int(pano_resolution),
         "look_at": look_at,
         "view_cameras": view_cameras,
+        "auto_view_specs": auto_view_specs,
     }
     with open(job_path, "w", encoding="utf-8") as f:
         json.dump(job, f, indent=2, ensure_ascii=False)
 
-    views_to_run = []
-    if views is None or "topdown" in views:
-        views_to_run.append("topdown")
-    if views is None:
-        views_to_run.extend(view_cameras.keys())
-    else:
-        views_to_run.extend(v for v in views if v in view_cameras)
+    views_to_run = _resolve_views_to_run(views, view_cameras)
+    if views == "auto":
+        if backend == "bpy":
+            # 常规 topdown（Y/topdown/，1024²）+ 路径驱动 auto 视角
+            views_to_run = ["topdown"] + list(auto_view_names)
+        else:
+            views_to_run = []
 
-    print(f"🎨 正在生成视图 ({len(views_to_run)} 个子进程)...")
-    for view_name in views_to_run:
-        print(f"🔄 子进程渲染: {view_name}")
-        _spawn_worker_view(job_path, view_name)
-    print("🔄 子进程导出 GLB/点云/metadata...")
-    _spawn_worker_post(job_path)
-    print(f"✅ 渲染完成！结果保存在: {os.path.abspath(output_dir)}")
-    return output_dir, standard_ssl
+    if views_to_run:
+        step = "Step 3: " if normalized_topdown else ""
+        print(f"🎨 {step}多视角渲染 → {y_dir} ({len(views_to_run)} 个子进程)")
+        for view_name in views_to_run:
+            print(f"🔄 子进程渲染: {view_name}")
+            _spawn_worker_view(job_path, view_name)
+    elif views == "auto":
+        print("⏭️  auto 视角未生成（backend 不支持 bpy）")
+    elif normalized_topdown:
+        print("⏭️  未指定 views，跳过多视角渲染")
+
+    if export_glb or export_point_cloud or views_to_run:
+        print(f"🔄 子进程导出 GLB/点云 → {y_dir}")
+        _spawn_worker_post(job_path)
+
+    print(f"✅ 渲染完成！输出目录: {os.path.abspath(y_dir)}")
+    return y_dir, standard_ssl, floor_result
 
 
 ALL_VIEWS = [
@@ -495,16 +693,17 @@ def main() -> None:
   python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py \\
     --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt \\
     --views topdown left_seq \\
-    --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out8 \\
+    --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out9 \\
     --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified \\
-    --ply --visible_geometry --semantic --depth
+    --ply --visible_geometry --semantic --depth --pano
 """,
     )
     parser.add_argument("--ssl", required=True, help="SSL 或 JSON 场景文件路径")
     parser.add_argument("--output", default=None, help="输出目录（默认: ssl 同目录下 render_output）")
     parser.add_argument(
-        "--views", nargs="+", default=["all"],
-        help=f"要渲染的视角，可选: {', '.join(ALL_VIEWS)}, all",
+        "--views", nargs="*", default=None, metavar="VIEW",
+        help=f"视角列表（{', '.join(ALL_VIEWS)}）；不指定则不渲染视角；"
+             f"指定 auto 则强制 normalized_topdown + 地板路径并按路径自动生成视角",
     )
     parser.add_argument("--backend", choices=["bpy", "pyrender"], default="bpy", help="渲染后端")
     parser.add_argument("--texture", default=None, help="贴图目录")
@@ -515,40 +714,36 @@ def main() -> None:
                         help="按视角视锥裁剪后导出可见 GLB/PLY（需配合 --glb 或 --ply）")
     parser.add_argument("--semantic", action="store_true", help="导出语义分割图")
     parser.add_argument("--depth", action="store_true", help="导出深度图与法线图")
-    parser.add_argument("--view_transform", action="store_true",
-                        help="渲染前将场景变换到各视角 SSL 坐标系")
+    parser.add_argument("--pano", action="store_true",
+                        help="为 render_view 普通视角额外导出兄弟目录 {毫秒时间戳}_pano（topdown 不生成）")
+    parser.add_argument("--pano_resolution", type=int, default=4096,
+                        help="全景图横向分辨率，仅 --pano 时生效；高度为横向分辨率的一半（默认: 4096，即 4096x2048）")
     parser.add_argument("--normalized_topdown", action="store_true",
-                        help="像素对齐俯视图（ssl.txt + topdown.png + camera_para.json + 地板路径）")
+                        help="启用 pixel-aligned SSL：唯一输出 Y={output}_normalized，"
+                             "先 Y/topdown_normalized 路径规划，再渲染各 views")
     parser.add_argument("--no_floor_path", action="store_true",
-                        help="配合 --normalized_topdown：跳过地板导航路径采样")
+                        help="配合 --normalized_topdown：跳过 topdown_normalized 下的地板路径采样")
     parser.add_argument("--samples", type=int, default=None, help="Blender 采样数")
 
     args = parser.parse_args()
     input_text, output_dir, asset_dir, texture_dir = _prepare_ssl_and_dirs(args)
 
-    if args.normalized_topdown:
-        render_kwargs = dict(
-            input_text=input_text,
-            output_dir=output_dir,
-            backend=args.backend,
-            asset_dir=asset_dir,
-            texture_dir=texture_dir,
-            retrieve_hole=True,
-            asset_mode="none",
-            floor_path=not args.no_floor_path,
-        )
-        if args.samples is not None:
-            render_kwargs["samples"] = args.samples
-        result = render_normalized_topdown(**render_kwargs)
-        if isinstance(result, dict):
-            print(f"Normalized topdown done: {result['output_dir']}")
-            if "path_points_ssl" in result:
-                print(f"Floor path (ssl): {len(result['path_points_ssl'])} points")
-        else:
-            print(f"Normalized topdown done: {result}")
-        return
+    views: ViewsSpec
+    normalized_topdown = args.normalized_topdown
+    floor_path = not args.no_floor_path
 
-    views = None if "all" in args.views else args.views
+    if args.views is None:
+        views = None
+    elif len(args.views) == 1 and args.views[0] == "auto":
+        views = "auto"
+        normalized_topdown = True
+        floor_path = True
+        print("ℹ️  views=auto → normalized_topdown=True, floor_path=True")
+    else:
+        if "auto" in args.views:
+            parser.error("--views auto 不能与其它视角同时使用")
+        views = list(args.views)
+
     render_kwargs = dict(
         backend=args.backend,
         output_root=output_dir,
@@ -562,13 +757,19 @@ def main() -> None:
         visible_geometry=args.visible_geometry,
         semantic=args.semantic,
         depth=args.depth,
-        view_transform=args.view_transform,
+        pano=args.pano,
+        pano_resolution=args.pano_resolution,
+        normalized_topdown=normalized_topdown,
+        floor_path=floor_path,
     )
     if args.samples is not None:
         render_kwargs["samples"] = args.samples
 
-    output_path, _ = render_ssl(input_text, **render_kwargs)
-    print(f"Render done: {output_path}")
+    y_dir, _, floor_result = render_ssl(input_text, **render_kwargs)
+    print(f"Output: {y_dir}")
+    if args.normalized_topdown and floor_result and floor_result.get("path_points_ssl"):
+        print(f"Floor path (ssl): {len(floor_result['path_points_ssl'])} points")
+        print(f"Topdown normalized: {os.path.join(y_dir, TOPDOWN_NORMALIZED_SUBDIR)}")
 
 
 ssl_example = '''
@@ -591,3 +792,8 @@ Bbox(id="15", room_id="D54g", label="dining table", center=[5.1, 2.77, 0.6], ang
 
 if __name__ == "__main__":
     main()
+
+'''
+python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py     --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt     --views auto     --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out11     -
+-glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified     --ply --visible_geometry --semantic --depth --pano
+'''

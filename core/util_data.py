@@ -15,6 +15,19 @@ from pathlib import Path
 from PIL import Image
 
 
+def _import_core_util():
+    """兼容包内导入与 render_ssl 脚本通过 importlib 加载 util_data 的场景。"""
+    try:
+        from . import util
+        return util
+    except ImportError:
+        core_dir = os.path.dirname(os.path.abspath(__file__))
+        if core_dir not in sys.path:
+            sys.path.insert(0, core_dir)
+        import util  # type: ignore
+        return util
+
+
 def _get_vlm_api_key() -> str:
     return os.environ.get("PIPE_VLM_API_KEY", "")
 
@@ -1689,10 +1702,7 @@ def prepare_pixel_aligned_topdown_context(
     round_decimals: int = 2,
 ) -> Dict[str, Any]:
     """按 SpatialFactory Stage 1 规则平移 context，并返回渲染/导出参数。"""
-    try:
-        from . import util
-    except ImportError:
-        import util  # type: ignore
+    util = _import_core_util()
 
     image_half = float(width) / 2.0
     world_cam_w, world_look_w = compute_topdown_camera_pose(context)
@@ -1713,6 +1723,8 @@ def prepare_pixel_aligned_topdown_context(
     aligned_cam, aligned_look = compute_topdown_camera_pose(context)
     return {
         "pixel2real_ratio": ratio,
+        "dx_ssl": float(dx_ssl),
+        "dy_ssl": float(dy_ssl),
         "fov_y": float(fov_y),
         "camera_position_ssl": aligned_cam,
         "look_at_target_ssl": aligned_look,
@@ -1726,6 +1738,28 @@ def prepare_pixel_aligned_topdown_context(
             round_decimals=round_decimals,
         ),
     }
+
+
+def apply_scene_json_xy_translation(
+    scene_json: Dict[str, Any],
+    dx_ssl: float,
+    dy_ssl: float,
+    *,
+    round_decimals: Optional[int] = 2,
+) -> None:
+    """将 scene_json 的墙/门窗/家具坐标与 context 同步做 XY 平移。"""
+    for wall in scene_json.get("wall", []):
+        p = wall.get("p") or [0.0, 0.0, 0.0]
+        q = wall.get("q") or [0.0, 0.0, 0.0]
+        wall["p"] = _round_xyz([p[0] + dx_ssl, p[1] + dy_ssl, p[2] if len(p) > 2 else 0.0], round_decimals)
+        wall["q"] = _round_xyz([q[0] + dx_ssl, q[1] + dy_ssl, q[2] if len(q) > 2 else 0.0], round_decimals)
+    for cat in ("door", "window", "bbox"):
+        for item in scene_json.get(cat, []):
+            center = item.get("center") or [0.0, 0.0, 0.0]
+            item["center"] = _round_xyz(
+                [center[0] + dx_ssl, center[1] + dy_ssl, center[2] if len(center) > 2 else 0.0],
+                round_decimals,
+            )
 
 
 def view_ssl_transform_params(

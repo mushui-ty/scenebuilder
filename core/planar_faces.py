@@ -204,6 +204,32 @@ def make_bpy_view_context(scene, camera_obj, width: int, height: int) -> Dict[st
     }
 
 
+def make_bpy_pano_view_context(scene, camera_obj, width: int, height: int) -> Dict[str, Any]:
+    """构建 equirectangular 全景像素投影；不提供视锥裁剪矩阵。"""
+    world_to_camera = camera_obj.matrix_world.inverted()
+
+    def to_pixel(co: np.ndarray) -> List[float]:
+        import mathutils
+
+        local = world_to_camera @ mathutils.Vector(co.tolist())
+        direction = np.asarray([local.x, local.y, local.z], dtype=float)
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1e-9:
+            return [float("nan"), float("nan")]
+        direction /= norm
+        lon = float(np.arctan2(direction[0], -direction[2]))
+        lat = float(np.arcsin(np.clip(direction[1], -1.0, 1.0)))
+        u = (lon / (2.0 * np.pi) + 0.5) % 1.0
+        v = 0.5 - lat / np.pi
+        return [u * width, float(np.clip(v, 0.0, 1.0)) * height]
+
+    return {
+        "clip_mats": None,
+        "to_pixel": to_pixel,
+        "camera_pos": np.array(camera_obj.matrix_world.translation, dtype=float),
+    }
+
+
 def make_bpy_project_fn(scene, camera_obj, width: int, height: int):
     """兼容旧接口。"""
     ctx = make_bpy_view_context(scene, camera_obj, width, height)
@@ -356,11 +382,57 @@ def process_planar_objects_for_view(
     return result
 
 
+def process_planar_objects_for_pano(
+    objects: List[Dict[str, Any]],
+    to_pixel: Callable[[np.ndarray], List[float]],
+    camera_pos: np.ndarray,
+    occlusion_fn: Optional[Callable[[str, str, np.ndarray], int]] = None,
+) -> List[Dict[str, Any]]:
+    """不做视锥裁剪，直接将完整平面环投影到 equirectangular 全景图。"""
+    result: List[Dict[str, Any]] = []
+    for obj in objects:
+        color_key = f"{obj['category']}:{obj['id']}"
+        color_rgb = list(util.semantic_entity_color(color_key))
+        processed_loops = []
+        for loop in obj["loops"]:
+            vertices = np.asarray(loop["vertices_3d"], dtype=float)
+            if len(vertices) < 3:
+                continue
+            ordered = finalize_ring_vertices(vertices, camera_pos)
+            pixels = [to_pixel(v) for v in ordered]
+            entry = {
+                "role": loop.get("role", "outer"),
+                "vertices_3d": ordered.tolist(),
+                "vertices_2d_px": pixels,
+                "occluded": _vertex_occluded_flags(
+                    ordered, pixels, obj["category"], obj["id"], occlusion_fn
+                ),
+            }
+            if loop.get("opening_type"):
+                entry["opening_type"] = loop["opening_type"]
+            if loop.get("opening_id"):
+                entry["opening_id"] = loop["opening_id"]
+            processed_loops.append(entry)
+        if not processed_loops:
+            continue
+        out = {
+            "category": obj["category"],
+            "id": obj["id"],
+            "color_rgb": color_rgb,
+            "loops": processed_loops,
+        }
+        if obj.get("wall_id"):
+            out["wall_id"] = obj["wall_id"]
+        result.append(out)
+    return result
+
+
 def draw_lines_overlay(
     image_path: str,
     objects: List[Dict[str, Any]],
     output_path: str,
     line_width: int = 2,
+    break_seams: bool = False,
 ) -> None:
     """在渲染图副本上绘制每个对象的顶点连线（每对象一色）。"""
     if Image is None or ImageDraw is None:
@@ -372,6 +444,7 @@ def draw_lines_overlay(
 
     img = Image.open(image_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
+    image_width = img.size[0]
     for obj in objects:
         color = tuple(obj["color_rgb"]) + (255,)
         for loop in obj["loops"]:
@@ -380,7 +453,13 @@ def draw_lines_overlay(
             if len(valid) < 2:
                 continue
             closed = valid + [valid[0]]
-            draw.line(closed, fill=color, width=line_width, joint="curve")
+            if break_seams:
+                for p0, p1 in zip(closed, closed[1:]):
+                    if image_width > 0 and abs(p1[0] - p0[0]) > image_width / 2:
+                        continue
+                    draw.line([p0, p1], fill=color, width=line_width, joint="curve")
+            else:
+                draw.line(closed, fill=color, width=line_width, joint="curve")
             r = max(2, line_width)
             for x, y in valid:
                 draw.ellipse((x - r, y - r, x + r, y + r), fill=color)
@@ -406,6 +485,7 @@ def export_planar_faces_for_view(
     include_floor: bool = True,
     include_ceiling: bool = True,
     occlusion_fn: Optional[Callable[[str, str, np.ndarray], int]] = None,
+    panoramic: bool = False,
 ) -> Tuple[str, str]:
     """导出 {basename}_planar_faces.json 与 {basename}_lines.png。"""
     view_dir = os.path.dirname(output_path) or "."
@@ -422,12 +502,23 @@ def export_planar_faces_for_view(
         include_floor=include_floor,
         include_ceiling=include_ceiling,
     )
-    objects = process_planar_objects_for_view(
-        raw_objects, clip_mats, to_pixel, camera_pos, occlusion_fn=occlusion_fn
-    )
+    if panoramic:
+        objects = process_planar_objects_for_pano(
+            raw_objects, to_pixel, camera_pos, occlusion_fn=occlusion_fn
+        )
+    else:
+        objects = process_planar_objects_for_view(
+            raw_objects, clip_mats, to_pixel, camera_pos, occlusion_fn=occlusion_fn
+        )
 
     payload = {
-        "image": {"path": output_path, "width": width, "height": height, "lines_overlay": lines_path},
+        "image": {
+            "path": output_path,
+            "width": width,
+            "height": height,
+            "lines_overlay": lines_path,
+            "projection": "equirectangular" if panoramic else "perspective",
+        },
         "objects": objects,
     }
     os.makedirs(view_dir, exist_ok=True)
@@ -435,5 +526,5 @@ def export_planar_faces_for_view(
         json.dump(payload, f, indent=2, ensure_ascii=False)
     print(f"✅ 平面内表面顶点 JSON: {json_path}")
 
-    draw_lines_overlay(output_path, objects, lines_path)
+    draw_lines_overlay(output_path, objects, lines_path, break_seams=panoramic)
     return json_path, lines_path

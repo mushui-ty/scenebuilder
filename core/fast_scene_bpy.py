@@ -1103,12 +1103,18 @@ class BpySceneCtx:
         export_glb: bool = False,
         export_point_cloud: bool = False,
         transparent_objects: Optional[set] = None,
+        panoramic: bool = False,
     ):
         """导出可见几何：先按遮挡剔除（部分可见则保留），再按渲染视锥裁剪视锥外部分。"""
         bpy.context.view_layer.update()
-        visible_entries = self._visible_geometry_entries(
-            camera_obj, transparent_objects=transparent_objects or set()
-        )
+        if panoramic:
+            visible_entries = self._visible_geometry_entries_pano(
+                camera_obj, transparent_objects=transparent_objects or set()
+            )
+        else:
+            visible_entries = self._visible_geometry_entries(
+                camera_obj, transparent_objects=transparent_objects or set()
+            )
         if not visible_entries:
             print("⚠️ 当前视角没有检测到可见几何")
             return
@@ -1136,6 +1142,24 @@ class BpySceneCtx:
         if export_point_cloud:
             self.export_visible_point_cloud(os.path.join(output_dir, "pointcloud"), visible_entries)
 
+    def export_visible_geometry_pano_multi(
+        self,
+        output_dir: str,
+        camera_states: List[Tuple[Any, set]],
+        export_glb: bool = False,
+        export_point_cloud: bool = False,
+    ):
+        """多全景相机合并导出：任意相机无遮挡可见则保留完整几何，不做视锥裁切。"""
+        bpy.context.view_layer.update()
+        visible_entries = self._visible_geometry_entries_pano_multi(camera_states)
+        if not visible_entries:
+            print("⚠️ 多视角全景没有检测到可见几何")
+            return
+        if export_glb:
+            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), visible_entries)
+        if export_point_cloud:
+            self.export_visible_point_cloud(os.path.join(output_dir, "pointcloud"), visible_entries)
+
     def export_planar_faces_and_lines(
         self,
         output_path: str,
@@ -1149,6 +1173,7 @@ class BpySceneCtx:
         show_window: bool = True,
         show_ceiling: bool = True,
         transparent_objects: Optional[set] = None,
+        panoramic: bool = False,
     ):
         """导出平面内表面顶点 JSON 与连线 overlay（随 --ply 默认启用）。"""
         try:
@@ -1156,7 +1181,10 @@ class BpySceneCtx:
         except ImportError:
             import planar_faces  # type: ignore
 
-        view_ctx = planar_faces.make_bpy_view_context(self.scene, camera_obj, width, height)
+        if panoramic:
+            view_ctx = planar_faces.make_bpy_pano_view_context(self.scene, camera_obj, width, height)
+        else:
+            view_ctx = planar_faces.make_bpy_view_context(self.scene, camera_obj, width, height)
         include_floor = self.mesh_nodes.get("floor") is not None
         include_ceiling = show_ceiling and self.mesh_nodes.get("ceiling") is not None
         occlusion_fn = self.build_planar_vertex_occlusion_fn(
@@ -1177,6 +1205,7 @@ class BpySceneCtx:
             include_floor=include_floor,
             include_ceiling=include_ceiling,
             occlusion_fn=occlusion_fn,
+            panoramic=panoramic,
         )
 
     def _resolve_planar_target_node(self, category: str, obj_id: str):
@@ -1283,6 +1312,8 @@ class BpySceneCtx:
             except TypeError:
                 bpy.ops.export_scene.gltf(filepath=output_path, use_selection=True)
             print(f"✅ 可见 GLB 已导出: {output_path}")
+            ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
+            self._export_glb_opencv_copy(output_path, ref_camera)
         finally:
             bpy.ops.object.select_all(action='DESELECT')
             for obj in temp_objects:
@@ -1316,7 +1347,7 @@ class BpySceneCtx:
             if len(points) == 0:
                 continue
             path = os.path.join(output_dir, entry["visible_ply"])
-            self._write_ply(path, points, colors)
+            self._write_ply_with_opencv_copy(path, points, colors, entry.get("camera_obj"))
             all_points.append(points)
             all_colors.append(colors)
             metadata["objects"].append({
@@ -1333,7 +1364,8 @@ class BpySceneCtx:
             merged_points = np.vstack(all_points)
             merged_colors = np.vstack(all_colors)
             scene_path = os.path.join(output_dir, "scene_visible.ply")
-            self._write_ply(scene_path, merged_points, merged_colors)
+            ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
+            self._write_ply_with_opencv_copy(scene_path, merged_points, merged_colors, ref_camera)
             metadata["scene_visible"] = {
                 "path": "scene_visible.ply",
                 "points": int(len(merged_points)),
@@ -1369,6 +1401,59 @@ class BpySceneCtx:
                 "frustum_cutted": frustum_cutted,
                 "frustum_in_view_ratio": in_view_ratio_value,
                 "camera_obj": camera_obj,
+            })
+        return entries
+
+    def _visible_geometry_entries_pano(self, camera_obj, transparent_objects: Optional[set] = None):
+        """全景可见几何：只做遮挡判断，不做透影视锥裁切，保持原始坐标。"""
+        transparent_objects = transparent_objects or set()
+        entries = []
+        for category, object_id, node, visible_ply in self._iter_point_cloud_nodes(visible_suffix=True):
+            records = self._collect_bpy_mesh_records(node, use_ses=category in ("boxes", "doors", "windows"))
+            if not records:
+                continue
+            target_objects = self._visibility_target_objects(node, records)
+            if self._records_fully_occluded(records, camera_obj, target_objects, transparent_objects):
+                continue
+            entries.append({
+                "category": category,
+                "id": object_id,
+                "node": node,
+                "records": records,
+                "visible_ply": visible_ply,
+                "frustum_cutted": False,
+                "frustum_in_view_ratio": 1.0,
+                "camera_obj": camera_obj,
+            })
+        return entries
+
+    def _visible_geometry_entries_pano_multi(self, camera_states: List[Tuple[Any, set]]):
+        """多全景相机：遮挡任意可见则保留完整 records，不做视锥裁切。"""
+        entries = []
+        for category, object_id, node, visible_ply in self._iter_point_cloud_nodes(visible_suffix=True):
+            records = self._collect_bpy_mesh_records(node, use_ses=category in ("boxes", "doors", "windows"))
+            if not records:
+                continue
+            target_objects = self._visibility_target_objects(node, records)
+            visible_from_any = False
+            for camera_obj, frame_transparent in camera_states:
+                if self._records_visible_from_camera(
+                    records, camera_obj, target_objects, frame_transparent
+                ):
+                    visible_from_any = True
+                    break
+            if not visible_from_any:
+                continue
+            primary_camera = camera_states[0][0] if camera_states else None
+            entries.append({
+                "category": category,
+                "id": object_id,
+                "node": node,
+                "records": records,
+                "visible_ply": visible_ply,
+                "frustum_cutted": False,
+                "frustum_in_view_ratio": 1.0,
+                "camera_obj": primary_camera,
             })
         return entries
 
@@ -2325,6 +2410,37 @@ class BpySceneCtx:
                     f"{int(color[0])} {int(color[1])} {int(color[2])}\n"
                 )
 
+    def _write_ply_with_opencv_copy(
+        self,
+        path: str,
+        points: np.ndarray,
+        colors: np.ndarray,
+        camera_obj,
+    ):
+        """主 PLY 为世界/场景 SSL；并写 *_opencv.ply（OpenCV 相机系）。"""
+        self._write_ply(path, points, colors)
+        if camera_obj is None:
+            return
+        try:
+            from . import geometry_opencv as geo_cv
+        except ImportError:
+            import geometry_opencv as geo_cv  # type: ignore
+        pose = geo_cv.camera_pose_from_matrix(np.array(camera_obj.matrix_world))
+        opencv_path = geo_cv.opencv_duplicate_path(path)
+        pts_o = geo_cv.transform_points_to_opencv(points, pose)
+        self._write_ply(opencv_path, pts_o, colors)
+        print(f"✅ OpenCV 点云副本: {opencv_path}")
+
+    def _export_glb_opencv_copy(self, output_path: str, camera_obj) -> None:
+        if camera_obj is None:
+            return
+        try:
+            from . import geometry_opencv as geo_cv
+        except ImportError:
+            import geometry_opencv as geo_cv  # type: ignore
+        pose = geo_cv.camera_pose_from_matrix(np.array(camera_obj.matrix_world))
+        geo_cv.export_glb_opencv_copy(output_path, pose)
+
     def setup_lighting(self, intensity: float = 250,
                       lighting_type: Literal["area", "array", "none"] = "array",
                       ambient_light_color: list = None,
@@ -2646,6 +2762,183 @@ class BpySceneCtx:
                 vs.view_transform, vs.look, vs.exposure, vs.gamma = view_backup
             render.filepath, render.image_settings.file_format, render.film_transparent = render_backup
 
+    def normalized_topdown_view(
+        self,
+        output_dir: str,
+        width: int = 1000,
+        height: int = 1000,
+        geometry_mode: str = "gltf",
+        show_wall: bool = True,
+        show_window: bool = True,
+        show_door: bool = True,
+        show_ceiling: bool = False,
+        up_vector: list = None,
+        auto_transparent: bool = True,
+        transparent_alpha: float = 0.0,
+        use_HDRI: bool = False,
+        hdri_transparent_background: bool = True,
+        visible_shadow: bool = True,
+        lighting_type: Literal["area", "array", "none"] = "array",
+        align_height: bool = True,
+        round_decimals: int = 2,
+        render_depth: bool = False,
+        render_semantic: bool = False,
+        align: Optional[Dict[str, Any]] = None,
+        write_ssl: bool = True,
+        **kwargs,
+    ):
+        """像素对齐俯视图：平移 SSL 使图像左上角对应地面 (0,0)，输出 topdown.png / camera_para.json。
+
+        align 已提供时跳过二次平移（场景已在 pixel-aligned SSL 下）；write_ssl=False 时不写 ssl.txt。
+        """
+        for key in (
+            "export_glb", "export_point_cloud", "visible_geometry",
+            "rebuild", "auto_fov", "manual_fov", "glb_path",
+        ):
+            kwargs.pop(key, None)
+
+        os.makedirs(output_dir, exist_ok=True)
+        png_path = os.path.join(output_dir, "topdown.png")
+        ssl_path = os.path.join(output_dir, "ssl.txt")
+        camera_para_path = os.path.join(output_dir, "camera_para.json")
+
+        align = util_data.prepare_pixel_aligned_topdown_context(
+            self.context,
+            width=width,
+            height=height,
+            round_decimals=round_decimals,
+        ) if align is None else align
+        if write_ssl:
+            util_data.write_standard_ssl_to_path(self.context, ssl_path)
+
+        self.clear_scene()
+        self.construct_scene(
+            geometry_mode=geometry_mode,
+            show_wall=show_wall,
+            show_window=show_window,
+            show_door=show_door,
+            show_ceiling=show_ceiling,
+            align_height=align_height,
+            rebuild=True,
+        )
+
+        for wall_info in self.mesh_nodes["walls"].values():
+            wall_obj = wall_info.get("node")
+            if wall_obj:
+                wall_obj.visible_shadow = visible_shadow
+        ceiling_info = self.mesh_nodes.get("ceiling")
+        if ceiling_info and ceiling_info.get("node"):
+            ceiling_info["node"].visible_shadow = visible_shadow
+
+        if not self.if_set_lights:
+            self.setup_lighting(lighting_type=lighting_type, ambient_light_color=[1.0, 1.0, 1.0], ambient_strength=3.0)
+
+        self.scene.render.film_transparent = hdri_transparent_background
+        if use_HDRI:
+            hdri_path = self.config.get("hdri_path")
+            if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
+                print(f"🌇 使用 HDRI 环境光: {hdri_path}")
+
+        camera_position = np.array(align["camera_position_ssl"], dtype=float)
+        look_at_target = np.array(align["look_at_target_ssl"], dtype=float)
+        up_vector = np.array(up_vector if up_vector else [0.0, 1.0, 0.0], dtype=float)
+        up_norm = np.linalg.norm(up_vector)
+        up_vector = up_vector / up_norm if up_norm > 1e-6 else np.array([0.0, 1.0, 0.0], dtype=float)
+        fov_y = float(align["fov_y"])
+
+        forward = look_at_target - camera_position
+        forward = forward / np.linalg.norm(forward) if np.linalg.norm(forward) > 1e-6 else np.array([0.0, 0.0, -1.0], dtype=float)
+        right = np.cross(forward, up_vector)
+        right_norm = np.linalg.norm(right)
+        if right_norm < 1e-6:
+            fallback_up = np.array([0.0, 0.0, 1.0], dtype=float)
+            right = np.cross(forward, fallback_up)
+            right_norm = np.linalg.norm(right)
+            if right_norm < 1e-6:
+                right = np.array([1.0, 0.0, 0.0], dtype=float)
+                right_norm = 1.0
+        right = right / right_norm
+        up = np.cross(right, forward)
+
+        camera_data = bpy.data.cameras.new(name=f"NormTopdownCam_{id(self)}")
+        camera_obj = bpy.data.objects.new(f"NormTopdownCam_{id(self)}", camera_data)
+        self.scene_collection.objects.link(camera_obj)
+        self.scene.camera = camera_obj
+        camera_obj.matrix_world = Matrix((
+            (float(right[0]), float(up[0]), float(-forward[0]), float(camera_position[0])),
+            (float(right[1]), float(up[1]), float(-forward[1]), float(camera_position[1])),
+            (float(right[2]), float(up[2]), float(-forward[2]), float(camera_position[2])),
+            (0.0, 0.0, 0.0, 1.0),
+        ))
+        camera_data.type = "PERSP"
+        camera_data.lens_unit = "FOV"
+        camera_data.angle = fov_y
+
+        z_max = self.context["meta"]["z_max"]
+        wall_transparency_records = {}
+        object_transparency_records = []
+        if auto_transparent:
+            transparent_wall_ids = util.find_walls_to_make_transparent(
+                camera_position.tolist()[:2],
+                look_at_target.tolist()[:2],
+                self.context["meta"]["vertices"],
+                self.context["walls"],
+            )
+            for wall_id in transparent_wall_ids:
+                wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
+                replacements = util_bpy.apply_wall_transparency(wall_obj, transparent_alpha)
+                if replacements:
+                    wall_transparency_records[wall_id] = replacements
+            camera_z = camera_position[2]
+            if camera_z > z_max:
+                ceiling_info = self.mesh_nodes.get("ceiling") or {}
+                ceiling_node = ceiling_info.get("node")
+                if ceiling_node:
+                    record = util_bpy.apply_object_transparency(ceiling_node, transparent_alpha)
+                    if record:
+                        object_transparency_records.append(record)
+
+        self.scene.render.resolution_x = width
+        self.scene.render.resolution_y = height
+        self.scene.render.filepath = png_path
+        self.scene.render.image_settings.color_mode = "RGBA"
+
+        transparent_objects = {
+            self.mesh_nodes["walls"].get(wid, {}).get("node") for wid in wall_transparency_records
+        }
+        transparent_objects.update(record.get("object") for record in object_transparency_records)
+        transparent_objects = {obj for obj in transparent_objects if obj is not None}
+
+        depth_scale = None
+        try:
+            print(f"🎬 像素对齐俯视图渲染 ({width}x{height})...")
+            if render_depth:
+                depth_path = os.path.join(output_dir, "topdown_depth.png")
+                depth_scale = util_bpy.render_color_and_depth_png(
+                    self.scene, png_path, depth_path, skip_objects=transparent_objects
+                )
+            else:
+                bpy.ops.render.render(write_still=True)
+            if render_semantic:
+                self.render_semantic_png(png_path)
+        finally:
+            for wall_id, slots in wall_transparency_records.items():
+                wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
+                util_bpy.restore_wall_transparency(wall_obj, slots)
+            for record in object_transparency_records:
+                util_bpy.restore_object_transparency(record)
+            if camera_obj and self.scene.camera == camera_obj:
+                self.scene.camera = None
+            self._remove_camera_blocks(camera_obj, camera_data)
+            util_bpy.cleanup_bpy_render_memory(self.scene)
+
+        camera_para = dict(align["camera_para"])
+        if depth_scale is not None:
+            camera_para["depth_scale"] = float(depth_scale)
+        with open(camera_para_path, "w", encoding="utf-8") as f:
+            json.dump(camera_para, f, indent=4)
+        print(f"✅ 像素对齐俯视图完成: {output_dir}")
+
     def topdown_view(self, output_path: str, width: int = 1024, height: int = 1024,
                      geometry_mode: str = "gltf", show_wall: bool = True, 
                      show_window: bool = True, show_door: bool = True, show_ceiling: bool = True,
@@ -2662,8 +2955,7 @@ class BpySceneCtx:
                      glb_path: Optional[str] = None,
                      export_point_cloud: bool = False,
                      visible_geometry: bool = False,
-                     render_semantic: bool = False,
-                     view_transform: bool = False):
+                     render_semantic: bool = False):
         """俯视图渲染：output_path 为目录时在 {output}/topdown/topdown.png 输出单帧及附属产物。"""
         output_path = self._resolve_topdown_output_path(output_path)
         view_dir = os.path.dirname(output_path) or "."
@@ -2678,12 +2970,11 @@ class BpySceneCtx:
         world_look_w = [meta_w["center"][0], meta_w["center"][1], 0.0]
         world_up_raw = up_vector if up_vector else [0.0, 1.0, 0.0]
 
-        with util_data.ViewSslSession(self, view_transform) as vss:
+        with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam_w, world_look_w, world_up_raw)
-            vss.write_ssl(view_dir)
 
             construct_time = 0
-            if view_transform or rebuild or self.mesh_nodes["floor"] is None:
+            if rebuild or self.mesh_nodes["floor"] is None:
                 construct_start = time.perf_counter()
                 self.construct_scene(
                     geometry_mode=geometry_mode,
@@ -2692,7 +2983,7 @@ class BpySceneCtx:
                     show_door=show_door,
                     show_ceiling=show_ceiling,
                     align_height=align_height,
-                    rebuild=view_transform or rebuild,
+                    rebuild=rebuild,
                 )
                 construct_time = time.perf_counter() - construct_start
 
@@ -2727,18 +3018,10 @@ class BpySceneCtx:
             z_max = self.context["meta"]["z_max"]
             bounds = self.context["meta"]["bounds"]
 
-            if view_transform:
-                render_cam, render_look = vss.render_camera_pose(
-                    world_cam_w, world_look_w, reference_frame=True
-                )
-                camera_position = np.array(render_cam, dtype=float)
-                look_at_target = np.array(render_look, dtype=float)
-                up_vector = np.array(vss.render_world_up(world_up_raw), dtype=float)
-            else:
-                camera_height = z_max + max(span) * 1.5
-                camera_position = np.array([center[0], center[1], camera_height], dtype=float)
-                look_at_target = np.array([center[0], center[1], 0.0], dtype=float)
-                up_vector = np.array(world_up_raw, dtype=float)
+            camera_height = z_max + max(span) * 1.5
+            camera_position = np.array([center[0], center[1], camera_height], dtype=float)
+            look_at_target = np.array([center[0], center[1], 0.0], dtype=float)
+            up_vector = np.array(world_up_raw, dtype=float)
 
             up_norm = np.linalg.norm(up_vector)
             up_vector = up_vector / up_norm if up_norm > 1e-6 else np.array([0.0, 1.0, 0.0], dtype=float)
@@ -2932,11 +3215,11 @@ class BpySceneCtx:
     def _is_image_output_path(path: str) -> bool:
         return path.lower().endswith((".png", ".jpg", ".jpeg", ".exr", ".webp"))
 
-    def _resolve_view_output_path(self, output_path: str) -> str:
-        """单相机：output_path 为目录时自动分配 {dir_stamp}/{image_stamp}.png。"""
+    def _resolve_view_output_path(self, output_path: str, view_dir_name: Optional[str] = None) -> str:
+        """单相机：output_path 为目录时分配 {view_dir_name 或 dir_stamp}/{image_stamp}.png。"""
         if self._is_image_output_path(output_path):
             return output_path
-        return util.resolve_view_image_path(output_path)
+        return util.resolve_view_image_path(output_path, view_dir_name=view_dir_name)
 
     def _resolve_topdown_output_path(self, output_path: str) -> str:
         """俯视图：output_path 为目录时在 {output}/topdown/topdown.png 输出单帧。"""
@@ -3071,19 +3354,164 @@ class BpySceneCtx:
             fov_y = np.radians(70.0)
         return camera_position, look_at_target, camera_matrix, float(fov_y)
 
-    def _create_render_camera(self, camera_matrix, fov_y: float, width: int, height: int):
+    def _create_render_camera(self, camera_matrix, fov_y: float, width: int, height: int, panoramic: bool = False):
         camera_data = bpy.data.cameras.new(name="Camera")
         camera_obj = bpy.data.objects.new("Camera", camera_data)
         self.scene_collection.objects.link(camera_obj)
         prev_camera = self.scene.camera
         self.scene.camera = camera_obj
         camera_obj.matrix_world = camera_matrix
-        camera_data.type = 'PERSP'
-        camera_data.lens_unit = 'FOV'
-        camera_data.angle = float(fov_y)
+        if panoramic:
+            camera_data.type = 'PANO'
+            pano_settings = camera_data if hasattr(camera_data, "panorama_type") else getattr(camera_data, "cycles", None)
+            if pano_settings is None:
+                raise RuntimeError("当前 Blender 相机不支持全景设置，无法导出 equirectangular 全景图")
+            pano_settings.panorama_type = 'EQUIRECTANGULAR'
+            if getattr(pano_settings, "panorama_type", None) != 'EQUIRECTANGULAR':
+                raise RuntimeError("无法将 Blender 全景相机设置为 EQUIRECTANGULAR")
+            if hasattr(pano_settings, "longitude_min"):
+                pano_settings.longitude_min = -np.pi
+            if hasattr(pano_settings, "longitude_max"):
+                pano_settings.longitude_max = np.pi
+            if hasattr(pano_settings, "latitude_min"):
+                pano_settings.latitude_min = -np.pi / 2.0
+            if hasattr(pano_settings, "latitude_max"):
+                pano_settings.latitude_max = np.pi / 2.0
+        else:
+            camera_data.type = 'PERSP'
+            camera_data.lens_unit = 'FOV'
+            camera_data.angle = float(fov_y)
         self.scene.render.resolution_x = width
         self.scene.render.resolution_y = height
         return camera_obj, camera_data, prev_camera
+
+    @staticmethod
+    def _pano_output_path(output_path: str) -> str:
+        view_dir = os.path.dirname(output_path) or "."
+        base = os.path.basename(output_path)
+        parent = os.path.dirname(view_dir)
+        pano_dir = os.path.join(parent, f"{os.path.basename(view_dir)}_pano")
+        return os.path.join(pano_dir, base)
+
+    @staticmethod
+    def _mark_camera_para_pano(camera_para: Dict[str, Any]) -> Dict[str, Any]:
+        camera_para["projection"] = "equirectangular"
+        camera_para["pano"] = True
+        camera_para["panorama_type"] = "EQUIRECTANGULAR"
+        camera_para["horizontal_fov"] = float(2.0 * np.pi)
+        camera_para["vertical_fov"] = float(np.pi)
+        return camera_para
+
+    @staticmethod
+    def _pano_dimensions(pano_resolution: int) -> Tuple[int, int]:
+        pano_width = max(1, int(pano_resolution))
+        return pano_width, max(1, pano_width // 2)
+
+    def _render_pano_view_pass(
+        self,
+        output_path: str,
+        camera_matrix,
+        *,
+        pano_resolution: int,
+        render_depth: bool,
+        render_semantic: bool,
+        visible_geometry: bool,
+        export_glb: bool,
+        export_point_cloud: bool,
+        transparent_objects: set,
+        vss,
+        world_cam_w,
+        world_look_w,
+        world_up_w,
+        align_height: bool,
+        show_wall: bool,
+        show_door: bool,
+        show_window: bool,
+        show_ceiling: bool,
+        hdri_transparent_background: bool,
+        reference_frame: bool = True,
+    ) -> str:
+        pano_output_path = self._pano_output_path(output_path)
+        pano_dir = os.path.dirname(pano_output_path) or "."
+        os.makedirs(pano_dir, exist_ok=True)
+        width, height = self._pano_dimensions(pano_resolution)
+        prev_engine = self.scene.render.engine
+        if prev_engine != 'CYCLES':
+            print(f"🔄 全景渲染切换到 Cycles equirectangular (原引擎: {prev_engine})")
+            self.scene.render.engine = 'CYCLES'
+            if hasattr(self.scene, "cycles"):
+                self.scene.cycles.samples = self.config.get("blender_samples", 32)
+
+        camera_obj = None
+        camera_data = None
+        prev_camera = None
+        depth_scale = None
+        try:
+            camera_obj, camera_data, prev_camera = self._create_render_camera(
+                camera_matrix, float(np.pi), width, height, panoramic=True
+            )
+            print(f"🎬 全景渲染中 ({width}x{height}, EQUIRECTANGULAR 360x180)...")
+            self.scene.render.filepath = pano_output_path
+            render = self.scene.render
+            render.image_settings.color_mode = 'RGBA'
+            render.film_transparent = hdri_transparent_background
+
+            if render_depth:
+                depth_path = os.path.join(
+                    pano_dir,
+                    f"{os.path.splitext(os.path.basename(pano_output_path))[0]}_depth.png",
+                )
+                depth_scale = util_bpy.render_color_and_depth_png(
+                    self.scene, pano_output_path, depth_path, skip_objects=transparent_objects
+                )
+            else:
+                bpy.ops.render.render(write_still=True)
+
+            if visible_geometry and (export_glb or export_point_cloud):
+                self.export_visible_geometry(
+                    pano_dir,
+                    camera_obj,
+                    export_glb=export_glb,
+                    export_point_cloud=export_point_cloud,
+                    transparent_objects=transparent_objects,
+                    panoramic=True,
+                )
+            if export_point_cloud:
+                self.export_planar_faces_and_lines(
+                    pano_output_path,
+                    camera_obj,
+                    width,
+                    height,
+                    align_height=align_height,
+                    show_wall=show_wall,
+                    show_door=show_door,
+                    show_window=show_window,
+                    show_ceiling=show_ceiling,
+                    transparent_objects=transparent_objects,
+                    panoramic=True,
+                )
+            if render_semantic:
+                self.render_semantic_png(pano_output_path)
+
+            para_path = self._camera_para_path(pano_output_path)
+            camera_para = vss.build_camera_para(
+                world_cam_w,
+                world_look_w,
+                world_up_w,
+                float(np.pi),
+                float(width) / float(height),
+                reference_frame=reference_frame,
+                depth_scale=depth_scale,
+                include_normal_fields=depth_scale is not None,
+            )
+            with open(para_path, 'w') as f:
+                json.dump(self._mark_camera_para_pano(camera_para), f, indent=4)
+            print(f"✅ 全景渲染完成! 保存至: {pano_output_path}")
+            return pano_output_path
+        finally:
+            self._destroy_render_camera(camera_obj, camera_data, prev_camera, self.scene)
+            self.scene.render.engine = prev_engine
+            util_bpy.cleanup_bpy_render_memory(self.scene)
 
     @staticmethod
     def _remove_camera_blocks(camera_obj, camera_data):
@@ -3183,25 +3611,26 @@ class BpySceneCtx:
         export_point_cloud: bool = False,
         visible_geometry: bool = False,
         render_semantic: bool = False,
-        view_transform: bool = False,
+        pano: bool = False,
+        pano_resolution: int = 4096,
+        view_dir_name: Optional[str] = None,
     ):
         """多相机序列：所有帧写入同一序列目录；可见几何在该目录合并导出一份（多相机并集）。
 
-        目录名时间戳 = 本次 render_view 调用；各帧 png/depth 等文件名时间戳 = 该帧渲染时刻（与目录名不同）。
+        目录名默认为 ``{timestamp}_seq``；``view_dir_name`` 可指定固定名（如 ``auto_path_0008_seq``）。
         """
         total_start = time.perf_counter()
-        seq_dir, dir_stamp = util.allocate_view_output_dir(output_root)
+        seq_dir, dir_stamp = util.allocate_sequence_view_output_dir(output_root, view_dir_name)
         used_frame_stamps = {dir_stamp}
 
         world_cam0 = list(camera_positions[0])
         world_look0 = list(look_at_targets[0])
         world_up0 = list(up_vectors[0])
 
-        with util_data.ViewSslSession(self, view_transform) as vss:
+        with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam0, world_look0, world_up0)
-            vss.write_ssl(seq_dir)
 
-            if view_transform or rebuild or self.mesh_nodes["floor"] is None:
+            if rebuild or self.mesh_nodes["floor"] is None:
                 self.construct_scene(
                     geometry_mode=geometry_mode,
                     show_wall=show_wall,
@@ -3209,7 +3638,7 @@ class BpySceneCtx:
                     show_door=show_door,
                     show_ceiling=show_ceiling,
                     align_height=align_height,
-                    rebuild=view_transform or rebuild,
+                    rebuild=rebuild,
                 )
 
             for wall_info in self.mesh_nodes["walls"].values():
@@ -3234,6 +3663,7 @@ class BpySceneCtx:
 
             z_max = self.context["meta"]["z_max"]
             frame_states = []
+            pano_frame_states = []
             n_frames = len(camera_positions)
 
             for frame_idx, (cam_pos, look_at, up_vec) in enumerate(
@@ -3243,11 +3673,6 @@ class BpySceneCtx:
                 world_look = list(look_at)
                 world_up = list(up_vec)
                 render_cam, render_look, render_up = cam_pos, look_at, up_vec
-                if view_transform:
-                    render_cam, render_look = vss.render_camera_pose(
-                        world_cam, world_look, reference_frame=(frame_idx == 0)
-                    )
-                    render_up = vss.render_world_up(world_up)
 
                 image_stamp = util.allocate_millis_stamp(exclude=used_frame_stamps)
                 used_frame_stamps.add(image_stamp)
@@ -3325,6 +3750,33 @@ class BpySceneCtx:
                     )
                     with open(para_path, 'w') as f:
                         json.dump(camera_para, f, indent=4)
+                    if pano:
+                        self._render_pano_view_pass(
+                            output_path,
+                            camera_matrix,
+                            pano_resolution=pano_resolution,
+                            render_depth=render_depth,
+                            render_semantic=render_semantic,
+                            visible_geometry=False,
+                            export_glb=False,
+                            export_point_cloud=export_point_cloud,
+                            transparent_objects=transparent_objects,
+                            vss=vss,
+                            world_cam_w=world_cam,
+                            world_look_w=world_look,
+                            world_up_w=world_up,
+                            align_height=align_height,
+                            show_wall=show_wall,
+                            show_door=show_door,
+                            show_window=show_window,
+                            show_ceiling=show_ceiling,
+                            hdri_transparent_background=hdri_transparent_background,
+                            reference_frame=(frame_idx == 0),
+                        )
+                        pano_frame_states.append({
+                            "camera_matrix": camera_matrix.copy(),
+                            "transparent_objects": transparent_objects,
+                        })
                 finally:
                     self._restore_view_transparency(wall_transparency_records, object_transparency_records)
                     self._destroy_render_camera(camera_obj, camera_data, prev_camera, self.scene)
@@ -3343,6 +3795,34 @@ class BpySceneCtx:
                 try:
                     self.export_visible_geometry_multi(
                         seq_dir,
+                        camera_states,
+                        export_glb=export_glb,
+                        export_point_cloud=export_point_cloud,
+                    )
+                finally:
+                    for cam_obj, cam_data in reversed(temp_cameras):
+                        if cam_obj and self.scene.camera == cam_obj:
+                            if original_camera is not None and getattr(original_camera, "name", None) in bpy.data.objects:
+                                self.scene.camera = original_camera
+                            else:
+                                self.scene.camera = None
+                        self._remove_camera_blocks(cam_obj, cam_data)
+
+            if pano and visible_geometry and (export_glb or export_point_cloud) and pano_frame_states:
+                pano_dir = f"{seq_dir}_pano"
+                original_camera = self.scene.camera
+                camera_states = []
+                temp_cameras = []
+                pano_width, pano_height = self._pano_dimensions(pano_resolution)
+                for state in pano_frame_states:
+                    cam_obj, cam_data, _prev = self._create_render_camera(
+                        state["camera_matrix"], float(np.pi), pano_width, pano_height, panoramic=True
+                    )
+                    temp_cameras.append((cam_obj, cam_data))
+                    camera_states.append((cam_obj, state["transparent_objects"]))
+                try:
+                    self.export_visible_geometry_pano_multi(
+                        pano_dir,
                         camera_states,
                         export_glb=export_glb,
                         export_point_cloud=export_point_cloud,
@@ -3375,7 +3855,9 @@ class BpySceneCtx:
                     export_point_cloud: bool = False,
                     visible_geometry: bool = False,
                     render_semantic: bool = False,
-                    view_transform: bool = False):
+                    pano: bool = False,
+                    pano_resolution: int = 4096,
+                    view_dir_name: Optional[str] = None):
         if self._is_view_sequence(camera_position, look_at_target, up_vector):
             cam_positions, look_ats, ups = self._expand_camera_sequence_args(
                 camera_position, look_at_target, up_vector
@@ -3407,10 +3889,12 @@ class BpySceneCtx:
                 export_point_cloud=export_point_cloud,
                 visible_geometry=visible_geometry,
                 render_semantic=render_semantic,
-                view_transform=view_transform,
+                pano=pano,
+                pano_resolution=pano_resolution,
+                view_dir_name=view_dir_name,
             )
 
-        output_path = self._resolve_view_output_path(output_path)
+        output_path = self._resolve_view_output_path(output_path, view_dir_name=view_dir_name)
         view_dir = os.path.dirname(output_path) or "."
         center = self.context["meta"]["center"]
         z_max = self.context["meta"]["z_max"]
@@ -3423,12 +3907,11 @@ class BpySceneCtx:
 
         total_start = time.perf_counter()
 
-        with util_data.ViewSslSession(self, view_transform) as vss:
+        with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam_w, world_look_w, world_up_raw)
-            vss.write_ssl(view_dir)
 
             construct_time = 0.0
-            if view_transform or rebuild or self.mesh_nodes["floor"] is None:
+            if rebuild or self.mesh_nodes["floor"] is None:
                 construct_start = time.perf_counter()
                 self.construct_scene(
                     geometry_mode=geometry_mode,
@@ -3437,7 +3920,7 @@ class BpySceneCtx:
                     show_door=show_door,
                     show_ceiling=show_ceiling,
                     align_height=align_height,
-                    rebuild=view_transform or rebuild,
+                    rebuild=rebuild,
                 )
                 construct_time = time.perf_counter() - construct_start
 
@@ -3466,21 +3949,13 @@ class BpySceneCtx:
 
             bounds = self.context["meta"]["bounds"]
 
-            if view_transform:
-                render_cam, render_look = vss.render_camera_pose(
-                    world_cam_w, world_look_w, reference_frame=True
-                )
-                camera_position = np.array(render_cam, dtype=float)
-                look_at_target = np.array(render_look, dtype=float)
-                up_vector = np.array(vss.render_world_up(world_up_raw), dtype=float)
-            else:
-                if look_at_target is None:
-                    look_at_target = [center[0], center[1], z_max / 2]
-                if up_vector is None:
-                    up_vector = [0.0, 0.0, 1.0]
-                camera_position = np.array(camera_position, dtype=float)
-                look_at_target = np.array(look_at_target, dtype=float)
-                up_vector = np.array(up_vector, dtype=float)
+            if look_at_target is None:
+                look_at_target = [center[0], center[1], z_max / 2]
+            if up_vector is None:
+                up_vector = [0.0, 0.0, 1.0]
+            camera_position = np.array(camera_position, dtype=float)
+            look_at_target = np.array(look_at_target, dtype=float)
+            up_vector = np.array(up_vector, dtype=float)
             if np.linalg.norm(up_vector) < 1e-6:
                 up_vector = np.array([0.0, 0.0, 1.0], dtype=float)
             else:
@@ -3527,7 +4002,7 @@ class BpySceneCtx:
                 fov_y = np.radians(70.0)
 
             wall_transparency_records = {}
-            object_transparency_records = {}
+            object_transparency_records = []
             if auto_transparent:
                 transparent_wall_ids = util.find_walls_to_make_transparent(
                     camera_position.tolist()[:2],
@@ -3557,19 +4032,9 @@ class BpySceneCtx:
                         if floor_record:
                             object_transparency_records.append(floor_record)
 
-            camera_data = bpy.data.cameras.new(name="Camera")
-            camera_obj = bpy.data.objects.new("Camera", camera_data)
-            self.scene_collection.objects.link(camera_obj)
-            prev_camera = self.scene.camera
-            self.scene.camera = camera_obj
-            camera_obj.matrix_world = camera_matrix
-
-            camera_data.type = 'PERSP'
-            camera_data.lens_unit = 'FOV'
-            camera_data.angle = float(fov_y)
-
-            self.scene.render.resolution_x = width
-            self.scene.render.resolution_y = height
+            camera_obj, camera_data, prev_camera = self._create_render_camera(
+                camera_matrix, fov_y, width, height
+            )
             self.scene.render.filepath = output_path
 
             render = self.scene.render
@@ -3620,6 +4085,29 @@ class BpySceneCtx:
                     )
                 if render_semantic:
                     self.render_semantic_png(output_path)
+                if pano:
+                    self._render_pano_view_pass(
+                        output_path,
+                        camera_matrix,
+                        pano_resolution=pano_resolution,
+                        render_depth=render_depth,
+                        render_semantic=render_semantic,
+                        visible_geometry=visible_geometry,
+                        export_glb=export_glb,
+                        export_point_cloud=export_point_cloud,
+                        transparent_objects=transparent_objects,
+                        vss=vss,
+                        world_cam_w=world_cam_w,
+                        world_look_w=world_look_w,
+                        world_up_w=vss.world_up,
+                        align_height=align_height,
+                        show_wall=show_wall,
+                        show_door=show_door,
+                        show_window=show_window,
+                        show_ceiling=show_ceiling,
+                        hdri_transparent_background=hdri_transparent_background,
+                        reference_frame=True,
+                    )
                 total_time = time.perf_counter() - total_start
                 print(f"✅ 渲染完成! 保存至: {output_path}")
                 print(f"   构建: {construct_time:.2f}s, 设置: {setup_time:.2f}s, 渲染: {render_time:.2f}s, 总耗时: {total_time:.2f}s")
