@@ -315,7 +315,37 @@ def write_ply(
         print(f"✅ OpenCV 点云副本: {opencv_path}")
 
 
+def gltf_yup_to_blender_zup_matrix() -> np.ndarray:
+    """glTF Y-up（Blender 导出 GLB）→ Blender Z-up / SSL 世界坐标。
+
+    与 ``view_ssl_to_blender_gltf_vertices`` 互逆：
+    Blender (bx, by, bz) 导出 glTF 为 (gx, gy, gz) = (bx, bz, -by)。
+    """
+    return np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=float,
+    )
+
+
+def gltf_yup_to_blender_zup(points: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=float)
+    if pts.size == 0:
+        return pts.reshape(0, 3)
+    return np.column_stack([pts[..., 0], -pts[..., 2], pts[..., 1]])
+
+
+def opencv_transform_matrix_for_gltf_vertices(camera_pose: CameraPose) -> np.ndarray:
+    """对已导出的 glTF Y-up GLB 顶点做 OpenCV 变换（先还原为 Blender 世界坐标）。"""
+    return opencv_transform_matrix(camera_pose) @ gltf_yup_to_blender_zup_matrix()
+
+
 def export_glb_opencv_copy(src_path: str, camera_pose: CameraPose) -> Optional[str]:
+    """从主 GLB 生成 OpenCV 副本（fallback：需先把 glTF Y-up 还原为 Blender 世界坐标）。"""
     if not os.path.isfile(src_path):
         return None
     try:
@@ -325,7 +355,7 @@ def export_glb_opencv_copy(src_path: str, camera_pose: CameraPose) -> Optional[s
 
     dst_path = opencv_duplicate_path(src_path)
     loaded = trimesh.load(src_path, force="scene")
-    transform = opencv_transform_matrix(camera_pose)
+    transform = opencv_transform_matrix_for_gltf_vertices(camera_pose)
     if isinstance(loaded, trimesh.Scene):
         loaded.apply_transform(transform)
     elif isinstance(loaded, trimesh.Trimesh):
@@ -347,6 +377,27 @@ def opencv_rotation_from_blender_matrix(camera_matrix: np.ndarray) -> np.ndarray
     down = -mat[:3, 1]
     forward = -mat[:3, 2]
     return np.stack([right, down, forward], axis=0)
+
+
+def build_opencv_c2w_matrix(
+    camera_position,
+    look_at_target,
+    world_up=(0.0, 0.0, 1.0),
+) -> np.ndarray:
+    """OpenCV 相机系 → SSL/Blender 世界系 的 4×4 c2w（ScanNet / OpenSpatial 风格）。
+
+    列向量分别为相机 +X(右)、+Y(下)、+Z(前/深度) 在世界系下的方向；平移 t 为光心世界坐标（米）。
+    """
+    mat = build_blender_camera_matrix(camera_position, look_at_target, world_up)
+    right = mat[:3, 0]
+    down = -mat[:3, 1]
+    forward = -mat[:3, 2]
+    c2w = np.eye(4, dtype=float)
+    c2w[:3, 0] = right
+    c2w[:3, 1] = down
+    c2w[:3, 2] = forward
+    c2w[:3, 3] = np.asarray(camera_position, dtype=float)
+    return c2w
 
 
 def camera_pose_from_matrix(camera_matrix: np.ndarray) -> CameraPose:

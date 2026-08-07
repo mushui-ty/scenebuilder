@@ -262,55 +262,9 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
 
 
 def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict[str, Any]:
-    """
-    预计算所有外墙的斜接（Miter Joint）偏移点。
-    """
-    # 过滤：斜接只适用于外墙
-    boundary_walls = {wid: w for wid, w in walls.items() if not w.get("is_partition", False)}
-    
-    # 1. 建立顶点到墙体的映射
-    pt_to_walls = {}
-    for wall_id, wall in boundary_walls.items():
-        s = tuple(wall["s"])
-        e = tuple(wall["e"])
-        for pt in [s, e]:
-            if pt not in pt_to_walls:
-                pt_to_walls[pt] = []
-            pt_to_walls[pt].append(wall_id)
-
-    # 2. 预计算每面墙的外侧法线
-    wall_out_normals = {}
-    for wall_id, wall in boundary_walls.items():
-        wall_out_normals[wall_id] = -np.array(wall["orientation"])
-
-    def _get_miter_point(pt, wid1, wid2):
-        n1 = wall_out_normals[wid1]
-        n2 = wall_out_normals[wid2]
-        n_avg = n1 + n2
-        n_avg_norm = np.linalg.norm(n_avg)
-        if n_avg_norm < 1e-4:
-            return np.array(pt) + n1 * wall_thickness
-        n_avg /= n_avg_norm
-        cos_half_theta = np.dot(n_avg, n1)
-        if abs(cos_half_theta) < 1e-4:
-            return np.array(pt) + n1 * wall_thickness
-        length = wall_thickness / cos_half_theta
-        length = min(length, wall_thickness * 10)
-        return np.array(pt) + n_avg * length
-
-    wall_outer_points = {}
-    for wall_id, wall in boundary_walls.items():
-        s = tuple(wall["s"])
-        e = tuple(wall["e"])
-        outer_s, outer_e = None, None
-        neighbors_s = [wid for wid in pt_to_walls.get(s, []) if wid != wall_id]
-        if neighbors_s:
-            outer_s = _get_miter_point(s, wall_id, neighbors_s[0])
-        neighbors_e = [wid for wid in pt_to_walls.get(e, []) if wid != wall_id]
-        if neighbors_e:
-            outer_e = _get_miter_point(e, wall_id, neighbors_e[0])
-        wall_outer_points[wall_id] = (outer_s, outer_e)
-    return wall_outer_points
+    """预计算所有外墙的斜接（Miter Joint）偏移点。"""
+    from . import util
+    return util.calculate_miter_joints(walls, wall_thickness)
 
 
 def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_height, wall_thickness=0.1, opening_type="window", is_partition=False):
@@ -350,8 +304,7 @@ def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_heigh
     
     final_z = (z_bottom + z_top) / 2
     if opening_type == "door":
-        final_z += 0.01 # 门底部稍微抬高
-        
+        final_z -= 0.01  # 门洞略下移，保证墙底切透
     box_obj.location = (final_center_2d[0], final_center_2d[1], final_z)
     angle = np.arctan2(wall_dir[1], wall_dir[0])
     box_obj.rotation_euler = (0, 0, angle)
@@ -1328,6 +1281,30 @@ def _cycles_depth_to_metric(depth_raw: np.ndarray, clip_end: float) -> np.ndarra
     return depth_m
 
 
+def _encode_opencv_normal_png_from_cycles_exr(normal_exr: np.ndarray, scene) -> np.ndarray:
+    """Cycles Normal pass（世界系）→ OpenCV 相机系 → uint8 RGB PNG。"""
+    try:
+        from . import util
+        from . import geometry_opencv as geo_cv
+    except ImportError:
+        import util  # type: ignore
+        import geometry_opencv as geo_cv  # type: ignore
+
+    arr = np.asarray(normal_exr, dtype=np.float64)
+    if scene is not None and getattr(scene, "camera", None) is not None:
+        pose = geo_cv.camera_pose_from_matrix(np.array(scene.camera.matrix_world))
+        flat = arr.reshape(-1, 3)
+        norms = np.linalg.norm(flat, axis=1)
+        valid = norms > 1e-6
+        flat_cam = flat.copy()
+        if np.any(valid):
+            flat_cam[valid] = geo_cv.transform_normals_to_opencv(flat[valid], pose)
+        arr = flat_cam.reshape(arr.shape[0], arr.shape[1], 3)
+    else:
+        print("⚠️ 场景无相机，法线图仍按世界系导出")
+    return util.encode_normal_directions_uint8_png(arr)
+
+
 def render_color_and_depth_png(
     scene,
     color_path: str,
@@ -1335,7 +1312,7 @@ def render_color_and_depth_png(
     skip_objects=None,
     normal_path: Optional[str] = None,
 ):
-    """Single Cycles render: RGB PNG + metric depth PNG + world normal PNG (Z/Normal pass)."""
+    """Single Cycles render: RGB PNG + metric depth PNG + OpenCV-camera normal PNG."""
     if bpy is None or scene is None or imageio is None:
         return None
 
@@ -1412,10 +1389,13 @@ def render_color_and_depth_png(
             print("⚠️ 未找到 Cycles normal EXR，跳过法线导出")
         else:
             try:
-                normal_01 = _load_rgb_exr(normal_files[-1])
-                normal_u8 = util.encode_normal_world_png(normal_01)
+                normal_raw = _load_rgb_exr(normal_files[-1])
+                normal_u8 = _encode_opencv_normal_png_from_cycles_exr(normal_raw, scene)
                 imageio.imwrite(normal_path, normal_u8)
-                print(f"✅ 法线图已导出: {normal_path} (uint8 RGB, world normal, Cycles Normal pass)")
+                print(
+                    f"✅ 法线图已导出: {normal_path} "
+                    f"(uint8 RGB, OpenCV camera normal, Cycles Normal pass)"
+                )
             except Exception as normal_exc:
                 print(f"⚠️ 法线 EXR 读取/写入失败，已跳过法线导出: {normal_exc}")
 

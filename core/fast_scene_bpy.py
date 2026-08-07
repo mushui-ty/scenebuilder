@@ -655,12 +655,21 @@ class BpySceneCtx:
         bounds = self.context["meta"]["bounds"]
         z_max = self.context["meta"]["z_max"]
         wall_thickness = self.config.get("wall_thickness", 0.1)
+        floor_vertices = util.calculate_floor_polygon_with_wall_thickness(
+            vertices, self.context["walls"], wall_thickness
+        )
+        floor_bounds = [
+            min(p[0] for p in floor_vertices),
+            min(p[1] for p in floor_vertices),
+            max(p[0] for p in floor_vertices),
+            max(p[1] for p in floor_vertices),
+        ]
         
         f_scale = self.config.get("floor_texture_scale", 1.0)
         w_scale = self.config.get("wall_texture_scale", 1.0)
         c_scale = self.config.get("ceiling_texture_scale", 1.0)
 
-        floor_obj = util_bpy.create_floor_mesh_bpy(self.scene_collection, vertices, texture_scale=f_scale)
+        floor_obj = util_bpy.create_floor_mesh_bpy(self.scene_collection, floor_vertices, texture_scale=f_scale)
         if floor_obj is None:
             print("⚠️ 地板几何体创建失败，跳过后续处理")
             return
@@ -835,7 +844,7 @@ class BpySceneCtx:
                                 self.mesh_nodes[f"{item_type}s"][item_id] = {
                                     "node": instance_obj,
                                     "mesh": instance_obj,
-                                    f"{item_type}_data": {"wall_id": wall_id}
+                                    f"{item_type}_data": dict(item),
                                 }
                                 # print(f"  ✅ {item_type} {item_id[:4]} (asset_id={asset_id}) 实例化成功")
                             else:
@@ -852,7 +861,9 @@ class BpySceneCtx:
         wall_max_height = max((w["height"] for w in self.context["walls"].values()), default=0)
         if show_ceiling and wall_max_height > 0:
             z_max = self.context["meta"]["z_max"]
-            ceiling_obj = util_bpy.create_ceiling_mesh_bpy(self.scene_collection, vertices, z_max, texture_scale=c_scale)
+            ceiling_obj = util_bpy.create_ceiling_mesh_bpy(
+                self.scene_collection, floor_vertices, z_max, texture_scale=c_scale
+            )
             if ceiling_obj:
                 ceiling_texture_path = self.config["ceiling_blender_texture_path"]
                 if ceiling_texture_path and os.path.exists(ceiling_texture_path):
@@ -1028,13 +1039,14 @@ class BpySceneCtx:
         }
         all_points = []
         all_colors = []
+        all_normals = []
 
         def export_one(category: str, object_id: str, node, filename: str, sample_count: int,
                        extra: Optional[Dict[str, Any]] = None):
             if node is None:
                 return
             use_ses = category in ("boxes", "doors", "windows")
-            points, colors = self._sample_bpy_node_surface(
+            points, colors, normals = self._sample_bpy_node_surface(
                 node,
                 sample_count,
                 use_ses=use_ses,
@@ -1044,9 +1056,10 @@ class BpySceneCtx:
                 return
 
             path = os.path.join(output_dir, filename)
-            self._write_ply(path, points, colors)
+            self._write_ply(path, points, colors, normals)
             all_points.append(points)
             all_colors.append(colors)
+            all_normals.append(normals)
 
             record = {
                 "category": category,
@@ -1082,8 +1095,9 @@ class BpySceneCtx:
         if all_points:
             merged_points = np.vstack(all_points)
             merged_colors = np.vstack(all_colors)
+            merged_normals = np.vstack(all_normals)
             scene_path = os.path.join(output_dir, "scene_all.ply")
-            self._write_ply(scene_path, merged_points, merged_colors)
+            self._write_ply(scene_path, merged_points, merged_colors, merged_normals)
             metadata["scene_all"] = {
                 "path": "scene_all.ply",
                 "points": int(len(merged_points)),
@@ -1313,7 +1327,7 @@ class BpySceneCtx:
                 bpy.ops.export_scene.gltf(filepath=output_path, use_selection=True)
             print(f"✅ 可见 GLB 已导出: {output_path}")
             ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
-            self._export_glb_opencv_copy(output_path, ref_camera)
+            self._export_glb_opencv_copy(output_path, ref_camera, temp_objects)
         finally:
             bpy.ops.object.select_all(action='DESELECT')
             for obj in temp_objects:
@@ -1334,6 +1348,7 @@ class BpySceneCtx:
         box_samples = 5000
         all_points = []
         all_colors = []
+        all_normals = []
         metadata = {
             "samples_per_object": default_samples,
             "box_samples_per_object": box_samples,
@@ -1343,13 +1358,14 @@ class BpySceneCtx:
 
         for entry in visible_entries:
             sample_count = box_samples if entry["category"] == "boxes" else default_samples
-            points, colors = self._sample_visible_records(entry["records"], entry["camera_obj"], sample_count)
+            points, colors, normals = self._sample_visible_records(entry["records"], entry["camera_obj"], sample_count)
             if len(points) == 0:
                 continue
             path = os.path.join(output_dir, entry["visible_ply"])
-            self._write_ply_with_opencv_copy(path, points, colors, entry.get("camera_obj"))
+            self._write_ply_with_opencv_copy(path, points, colors, normals, entry.get("camera_obj"))
             all_points.append(points)
             all_colors.append(colors)
+            all_normals.append(normals)
             metadata["objects"].append({
                 "category": entry["category"],
                 "id": entry["id"],
@@ -1363,9 +1379,10 @@ class BpySceneCtx:
         if all_points:
             merged_points = np.vstack(all_points)
             merged_colors = np.vstack(all_colors)
+            merged_normals = np.vstack(all_normals)
             scene_path = os.path.join(output_dir, "scene_visible.ply")
             ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
-            self._write_ply_with_opencv_copy(scene_path, merged_points, merged_colors, ref_camera)
+            self._write_ply_with_opencv_copy(scene_path, merged_points, merged_colors, merged_normals, ref_camera)
             metadata["scene_visible"] = {
                 "path": "scene_visible.ply",
                 "points": int(len(merged_points)),
@@ -1713,7 +1730,11 @@ class BpySceneCtx:
         areas = np.array([record["area"] for record in records], dtype=float)
         total_area = float(np.sum(areas))
         if total_area <= 1e-12:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
         counts = np.floor(areas / total_area * sample_count).astype(int)
         remainder = sample_count - int(np.sum(counts))
         if remainder > 0:
@@ -1721,10 +1742,11 @@ class BpySceneCtx:
             counts[order[:remainder]] += 1
         sampled_points = []
         sampled_colors = []
+        sampled_normals = []
         for record, count in zip(records, counts):
             if count <= 0:
                 continue
-            pts, cols = self._sample_triangles(
+            pts, cols, nrms = self._sample_triangles(
                 record["triangles"],
                 record["color_sources"],
                 count,
@@ -1733,9 +1755,14 @@ class BpySceneCtx:
             if len(pts) > 0:
                 sampled_points.append(pts)
                 sampled_colors.append(cols)
+                sampled_normals.append(nrms)
         if not sampled_points:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
-        return np.vstack(sampled_points), np.vstack(sampled_colors)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
+        return np.vstack(sampled_points), np.vstack(sampled_colors), np.vstack(sampled_normals)
 
     def _visibility_target_objects(self, node, records: List[Dict[str, Any]]):
         targets = set()
@@ -1848,12 +1875,20 @@ class BpySceneCtx:
     def _sample_bpy_node_surface(self, node, sample_count: int, use_ses: bool = False):
         mesh_records = self._collect_bpy_mesh_records(node, use_ses=use_ses)
         if not mesh_records:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
 
         areas = np.array([record["area"] for record in mesh_records], dtype=float)
         total_area = float(np.sum(areas))
         if total_area <= 1e-12:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
 
         sharp_lengths = np.array([record.get("sharp_edge_length", 0.0) for record in mesh_records], dtype=float)
         has_sharp_edges = use_ses and float(np.sum(sharp_lengths)) > 1e-12
@@ -1868,10 +1903,11 @@ class BpySceneCtx:
 
         sampled_points = []
         sampled_colors = []
+        sampled_normals = []
         for record, count in zip(mesh_records, counts):
             if count <= 0:
                 continue
-            pts, cols = self._sample_triangles(
+            pts, cols, nrms = self._sample_triangles(
                 record["triangles"],
                 record["color_sources"],
                 count,
@@ -1880,6 +1916,7 @@ class BpySceneCtx:
             if len(pts) > 0:
                 sampled_points.append(pts)
                 sampled_colors.append(cols)
+                sampled_normals.append(nrms)
 
         if sharp_sample_count > 0:
             total_sharp_length = float(np.sum(sharp_lengths))
@@ -1892,14 +1929,19 @@ class BpySceneCtx:
             for record, count in zip(mesh_records, sharp_counts):
                 if count <= 0:
                     continue
-                pts, cols = self._sample_sharp_edges(record.get("sharp_edges", []), count)
+                pts, cols, nrms = self._sample_sharp_edges(record.get("sharp_edges", []), count)
                 if len(pts) > 0:
                     sampled_points.append(pts)
                     sampled_colors.append(cols)
+                    sampled_normals.append(nrms)
 
         if not sampled_points:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
-        return np.vstack(sampled_points), np.vstack(sampled_colors)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
+        return np.vstack(sampled_points), np.vstack(sampled_colors), np.vstack(sampled_normals)
 
     def _collect_bpy_mesh_records(self, node, use_ses: bool = False):
         depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -2096,6 +2138,7 @@ class BpySceneCtx:
                 "uv1": uv1,
                 "color_source": color_sources[tri_idx],
                 "length": length,
+                "normal": np.asarray(triangle_normals[tri_idx], dtype=float),
             })
         return sharp_edges
 
@@ -2126,6 +2169,15 @@ class BpySceneCtx:
             length = float(np.linalg.norm(p1 - p0))
             if length <= 1e-12:
                 continue
+            nrm = np.zeros(3, dtype=float)
+            for e in entries:
+                n = np.asarray(e.get("normal", [0.0, 0.0, 0.0]), dtype=float)
+                nrm = nrm + n
+            nrm_norm = float(np.linalg.norm(nrm))
+            if nrm_norm > 1e-12:
+                nrm = nrm / nrm_norm
+            else:
+                nrm = np.asarray(entry.get("normal", [0.0, 0.0, 1.0]), dtype=float)
             sharp_edges.append({
                 "p0": p0,
                 "p1": p1,
@@ -2133,6 +2185,7 @@ class BpySceneCtx:
                 "uv1": entry.get("uv1"),
                 "color_source": entry.get("color_source", {"base_color": np.array([160, 160, 160], dtype=np.uint8)}),
                 "length": length,
+                "normal": nrm,
             })
         return sharp_edges
 
@@ -2156,22 +2209,34 @@ class BpySceneCtx:
 
     def _sample_sharp_edges(self, sharp_edges: List[Dict[str, Any]], sample_count: int):
         if not sharp_edges or sample_count <= 0:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
         lengths = np.array([edge["length"] for edge in sharp_edges], dtype=float)
         total_length = float(np.sum(lengths))
         if total_length <= 1e-12:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
 
         edge_indices = np.random.choice(len(sharp_edges), size=sample_count, p=lengths / total_length)
         ts = np.random.random(sample_count)
         points = np.empty((sample_count, 3), dtype=float)
         colors = np.empty((sample_count, 3), dtype=np.uint8)
+        normals = np.empty((sample_count, 3), dtype=float)
         for sample_idx, edge_idx in enumerate(edge_indices):
             edge = sharp_edges[edge_idx]
             t = ts[sample_idx]
             points[sample_idx] = (1.0 - t) * edge["p0"] + t * edge["p1"]
             colors[sample_idx] = self._edge_color(edge, t)
-        return points, colors
+            nrm = np.asarray(edge.get("normal", [0.0, 0.0, 1.0]), dtype=float)
+            nrm_norm = float(np.linalg.norm(nrm))
+            normals[sample_idx] = nrm / nrm_norm if nrm_norm > 1e-12 else np.array([0.0, 0.0, 1.0])
+        return points, colors, normals
 
     def _edge_color(self, edge: Dict[str, Any], t: float):
         source = edge.get("color_source", {})
@@ -2313,13 +2378,18 @@ class BpySceneCtx:
         areas = self._triangle_areas(triangles)
         total_area = float(np.sum(areas))
         if total_area <= 1e-12:
-            return np.empty((0, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+            return (
+                np.empty((0, 3), dtype=float),
+                np.empty((0, 3), dtype=np.uint8),
+                np.empty((0, 3), dtype=float),
+            )
 
         tri_indices = np.random.choice(len(triangles), size=sample_count, p=areas / total_area)
         chosen = triangles[tri_indices]
         r1 = np.sqrt(np.random.random(sample_count))[:, None]
         r2 = np.random.random(sample_count)[:, None]
         points = (1.0 - r1) * chosen[:, 0] + r1 * (1.0 - r2) * chosen[:, 1] + r1 * r2 * chosen[:, 2]
+        normals = self._triangle_normals(chosen)
         colors = np.empty((sample_count, 3), dtype=np.uint8)
         for sample_idx, tri_idx in enumerate(tri_indices):
             source = color_sources[tri_idx]
@@ -2339,7 +2409,7 @@ class BpySceneCtx:
                 colors[sample_idx] = self._sample_image_color(image, uv, base_color, base_factor)
             else:
                 colors[sample_idx] = base_color
-        return points, colors
+        return points, colors, normals
 
     @staticmethod
     def _apply_mapping_to_uv(uv: np.ndarray, mapping: Dict[str, np.ndarray]):
@@ -2390,23 +2460,35 @@ class BpySceneCtx:
         return safe or "object"
 
     @staticmethod
-    def _write_ply(path: str, points: np.ndarray, colors: np.ndarray):
+    def _write_ply(path: str, points: np.ndarray, colors: np.ndarray, normals: Optional[np.ndarray] = None):
+        """写 ASCII PLY：xyz + nx/ny/nz（世界/规范化 SSL）+ rgb。"""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         colors = np.clip(colors, 0, 255).astype(np.uint8)
+        pts = np.asarray(points, dtype=float)
+        if normals is None:
+            nrm = np.zeros((len(pts), 3), dtype=float)
+        else:
+            nrm = np.asarray(normals, dtype=float)
+            norms = np.linalg.norm(nrm, axis=1, keepdims=True)
+            nrm = np.divide(nrm, norms, out=np.zeros_like(nrm), where=norms > 1e-12)
         with open(path, "w", encoding="utf-8") as f:
             f.write("ply\n")
             f.write("format ascii 1.0\n")
-            f.write(f"element vertex {len(points)}\n")
+            f.write(f"element vertex {len(pts)}\n")
             f.write("property float x\n")
             f.write("property float y\n")
             f.write("property float z\n")
+            f.write("property float nx\n")
+            f.write("property float ny\n")
+            f.write("property float nz\n")
             f.write("property uchar red\n")
             f.write("property uchar green\n")
             f.write("property uchar blue\n")
             f.write("end_header\n")
-            for point, color in zip(points, colors):
+            for point, normal, color in zip(pts, nrm, colors):
                 f.write(
                     f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} "
+                    f"{normal[0]:.6f} {normal[1]:.6f} {normal[2]:.6f} "
                     f"{int(color[0])} {int(color[1])} {int(color[2])}\n"
                 )
 
@@ -2415,10 +2497,11 @@ class BpySceneCtx:
         path: str,
         points: np.ndarray,
         colors: np.ndarray,
+        normals: np.ndarray,
         camera_obj,
     ):
-        """主 PLY 为世界/场景 SSL；并写 *_opencv.ply（OpenCV 相机系）。"""
-        self._write_ply(path, points, colors)
+        """主 PLY：世界/规范化 SSL 的 xyz+法线；*_opencv.ply：OpenCV 相机系 xyz+法线。"""
+        self._write_ply(path, points, colors, normals)
         if camera_obj is None:
             return
         try:
@@ -2428,18 +2511,49 @@ class BpySceneCtx:
         pose = geo_cv.camera_pose_from_matrix(np.array(camera_obj.matrix_world))
         opencv_path = geo_cv.opencv_duplicate_path(path)
         pts_o = geo_cv.transform_points_to_opencv(points, pose)
-        self._write_ply(opencv_path, pts_o, colors)
+        nrm_o = geo_cv.transform_normals_to_opencv(normals, pose)
+        self._write_ply(opencv_path, pts_o, colors, nrm_o)
         print(f"✅ OpenCV 点云副本: {opencv_path}")
 
-    def _export_glb_opencv_copy(self, output_path: str, camera_obj) -> None:
-        if camera_obj is None:
+    def _export_glb_opencv_copy(self, output_path: str, camera_obj, bpy_objects=None) -> None:
+        """导出 OpenCV GLB：写盘前将 mesh 顶点变换到 OpenCV 相机系，再 glTF 导出（保留材质/UV）。"""
+        if camera_obj is None or not bpy_objects:
             return
         try:
             from . import geometry_opencv as geo_cv
         except ImportError:
             import geometry_opencv as geo_cv  # type: ignore
+
+        opencv_path = geo_cv.opencv_duplicate_path(output_path)
         pose = geo_cv.camera_pose_from_matrix(np.array(camera_obj.matrix_world))
-        geo_cv.export_glb_opencv_copy(output_path, pose)
+
+        for obj in bpy_objects:
+            mesh = obj.data
+            if mesh is None or not len(mesh.vertices):
+                continue
+            matrix = np.array(obj.matrix_world, dtype=float)
+            world_pts = np.array(
+                [(matrix @ np.array([v.co.x, v.co.y, v.co.z, 1.0]))[:3] for v in mesh.vertices],
+                dtype=float,
+            )
+            opencv_pts = geo_cv.transform_points_to_opencv(world_pts, pose)
+            for vert, p_o in zip(mesh.vertices, opencv_pts):
+                vert.co.x = float(p_o[0])
+                vert.co.y = float(p_o[1])
+                vert.co.z = float(p_o[2])
+            mesh.update()
+            obj.matrix_world = Matrix.Identity(4)
+
+        bpy.context.view_layer.update()
+        try:
+            bpy.ops.export_scene.gltf(
+                filepath=opencv_path,
+                export_format="GLB",
+                use_selection=True,
+            )
+        except TypeError:
+            bpy.ops.export_scene.gltf(filepath=opencv_path, use_selection=True)
+        print(f"✅ OpenCV GLB 副本: {opencv_path}")
 
     def setup_lighting(self, intensity: float = 250,
                       lighting_type: Literal["area", "array", "none"] = "array",
@@ -2551,10 +2665,10 @@ class BpySceneCtx:
             os.path.join(out_dir, f"{base}_semantic.json"),
         )
 
-    def _semantic_color(self, color_key: str):
-        return util.semantic_entity_color(color_key)
+    def _semantic_color(self, color_key: str, used=None):
+        return util.semantic_entity_color(color_key, used=used)
 
-    def _semantic_material(self, color_key: str):
+    def _semantic_material(self, color_key: str, color_rgb=None):
         mat_name = f"Semantic_{color_key.replace(':', '_').replace(' ', '_')}"
         mat = bpy.data.materials.get(mat_name)
         if mat is None:
@@ -2572,7 +2686,7 @@ class BpySceneCtx:
                     if node.type == "EMISSION":
                         emission = node
                         break
-        color = self._semantic_color(color_key)
+        color = color_rgb if color_rgb is not None else self._semantic_color(color_key)
         if emission is not None:
             emission.inputs["Color"].default_value = [c / 255.0 for c in color] + [1.0]
             emission.inputs["Strength"].default_value = 1.0
@@ -2585,52 +2699,61 @@ class BpySceneCtx:
             if node is not None:
                 yield color_key, node, object_meta
 
+        used_colors = set()
         for category in ("floor", "ceiling"):
             info = self.mesh_nodes.get(category)
             if info:
                 object_id = category
                 color_key = f"entity:{category}:{object_id}"
+                color = list(util.semantic_entity_color(color_key, used=used_colors))
                 yield from emit(
                     category,
                     color_key,
                     info.get("node"),
                     {
                         "category": category,
-                        "id": object_id,
-                        "color_key": color_key,
-                        "color": list(util.semantic_entity_color(color_key)),
+                        "label": object_id,
+                        "color": color,
                     },
                 )
         for category in ("walls", "doors", "windows"):
             for object_id, info in self.mesh_nodes.get(category, {}).items():
                 color_key = f"entity:{category}:{object_id}"
+                color = list(util.semantic_entity_color(color_key, used=used_colors))
+                detail_key = {"walls": "wall_data", "doors": "door_data", "windows": "window_data"}[category]
+                data = info.get(detail_key, {})
+                caption = data.get("caption")
+                object_meta = {
+                    "category": category,
+                    "label": object_id,
+                    "color": color,
+                }
+                if caption:
+                    object_meta["caption"] = caption
                 yield from emit(
                     category,
                     color_key,
                     info.get("node"),
-                    {
-                        "category": category,
-                        "id": object_id,
-                        "color_key": color_key,
-                        "color": list(util.semantic_entity_color(color_key)),
-                    },
+                    object_meta,
                 )
         for object_id, info in self.mesh_nodes.get("boxes", {}).items():
             data = info.get("box_data", {})
-            label = data.get("label", data.get("class", "object"))
+            label = data.get("label", data.get("class", object_id))
             color_key = f"entity:boxes:{object_id}"
+            color = list(util.semantic_entity_color(color_key, used=used_colors))
             object_meta = {
                 "category": "boxes",
-                "id": object_id,
                 "label": label,
-                "color_key": color_key,
-                "color": list(util.semantic_entity_color(color_key)),
+                "color": color,
             }
+            caption = data.get("caption")
+            if caption:
+                object_meta["caption"] = caption
             yield from emit("boxes", color_key, info.get("node"), object_meta)
 
-    def _create_semantic_proxies(self, node, color_key: str):
+    def _create_semantic_proxies(self, node, color_key: str, color_rgb=None):
         """Create render-only mesh copies with semantic materials; originals stay untouched."""
-        semantic_mat = self._semantic_material(color_key)
+        semantic_mat = self._semantic_material(color_key, color_rgb=color_rgb)
         proxies = []
 
         def add_proxy(source_obj, matrix_world):
@@ -2669,7 +2792,7 @@ class BpySceneCtx:
         deduped_objects = []
         seen = set()
         for obj in objects:
-            obj_key = (obj.get("category"), obj.get("id"))
+            obj_key = (obj.get("category"), obj.get("label"))
             if obj_key not in seen:
                 deduped_objects.append(obj)
                 seen.add(obj_key)
@@ -2681,7 +2804,7 @@ class BpySceneCtx:
         }
 
     def _begin_semantic_render_env(self):
-        backup = {"lights": [], "world_bg": None}
+        backup = {"lights": [], "world_bg": None, "cycles": None, "eevee_taa": None}
         for obj in bpy.data.objects:
             if getattr(obj, "type", None) == "LIGHT":
                 backup["lights"].append((obj, obj.hide_render))
@@ -2696,6 +2819,24 @@ class BpySceneCtx:
                 )
                 bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
                 bg.inputs["Strength"].default_value = 0.0
+
+        # 关闭抗锯齿/降噪，保证语义 PNG 像素与 JSON color 精确一致
+        cycles = getattr(self.scene, "cycles", None)
+        if cycles is not None:
+            backup["cycles"] = {
+                "samples": int(cycles.samples),
+                "filter_width": float(getattr(cycles, "filter_width", 1.5)),
+                "use_denoising": bool(getattr(cycles, "use_denoising", False)),
+            }
+            cycles.samples = 1
+            if hasattr(cycles, "filter_width"):
+                cycles.filter_width = 0.01
+            if hasattr(cycles, "use_denoising"):
+                cycles.use_denoising = False
+        eevee = getattr(self.scene, "eevee", None)
+        if eevee is not None and hasattr(eevee, "taa_render_samples"):
+            backup["eevee_taa"] = int(eevee.taa_render_samples)
+            eevee.taa_render_samples = 1
         return backup
 
     def _restore_semantic_render_env(self, backup):
@@ -2713,6 +2854,18 @@ class BpySceneCtx:
             if bg:
                 bg.inputs["Color"].default_value = world_bg[0]
                 bg.inputs["Strength"].default_value = world_bg[1]
+        cycles_bak = backup.get("cycles")
+        cycles = getattr(self.scene, "cycles", None)
+        if cycles is not None and cycles_bak:
+            cycles.samples = cycles_bak["samples"]
+            if hasattr(cycles, "filter_width"):
+                cycles.filter_width = cycles_bak["filter_width"]
+            if hasattr(cycles, "use_denoising"):
+                cycles.use_denoising = cycles_bak["use_denoising"]
+        if backup.get("eevee_taa") is not None:
+            eevee = getattr(self.scene, "eevee", None)
+            if eevee is not None and hasattr(eevee, "taa_render_samples"):
+                eevee.taa_render_samples = backup["eevee_taa"]
 
     def render_semantic_png(self, output_path: str):
         semantic_path, metadata_path = self._semantic_outputs(output_path)
@@ -2735,7 +2888,9 @@ class BpySceneCtx:
 
             for color_key, node, object_meta in self._iter_semantic_scene_nodes():
                 objects.append(object_meta)
-                temp_proxies.extend(self._create_semantic_proxies(node, color_key))
+                temp_proxies.extend(
+                    self._create_semantic_proxies(node, color_key, color_rgb=object_meta.get("color"))
+                )
                 node.hide_render = True
                 hidden_nodes.append(node)
 
@@ -2744,8 +2899,15 @@ class BpySceneCtx:
             render.film_transparent = False
             bpy.ops.render.render(write_still=True)
 
+            import imageio
+
+            semantic_rgb = imageio.imread(semantic_path)
+            util.attach_semantic_bbox_2d(objects, semantic_rgb)
             with open(metadata_path, "w", encoding="utf-8") as f:
                 json.dump(self._semantic_metadata(objects), f, indent=2, ensure_ascii=False)
+            bbox_overlay_path = util.save_bbox_2d_overlay_png(output_path, objects)
+            if bbox_overlay_path:
+                print(f"✅ 检测框可视化: {bbox_overlay_path}")
             print(f"✅ 语义图已导出: {semantic_path}")
         finally:
             for proxy in temp_proxies:
@@ -2935,8 +3097,28 @@ class BpySceneCtx:
         camera_para = dict(align["camera_para"])
         if depth_scale is not None:
             camera_para["depth_scale"] = float(depth_scale)
+            camera_para["depth_unit"] = "meter"
+            camera_para["is_metric_depth"] = True
+            camera_para.update(util.normal_map_camera_para_fields())
+        camera_para.update(
+            util.camera_calibration_matrix_fields(
+                align["camera_position_ssl"],
+                align["look_at_target_ssl"],
+                [0.0, 0.0, 1.0],
+                align["fov_y"],
+                width,
+                height,
+                aspect_ratio=float(width) / float(height),
+            )
+        )
         with open(camera_para_path, "w", encoding="utf-8") as f:
             json.dump(camera_para, f, indent=4)
+        self.write_opencv_ssl_for_view(
+            output_dir,
+            align["camera_position_ssl"],
+            align["look_at_target_ssl"],
+            [0.0, 0.0, 1.0],
+        )
         print(f"✅ 像素对齐俯视图完成: {output_dir}")
 
     def topdown_view(self, output_path: str, width: int = 1024, height: int = 1024,
@@ -3179,9 +3361,12 @@ class BpySceneCtx:
                 reference_frame=True,
                 depth_scale=depth_scale,
                 include_normal_fields=depth_scale is not None,
+                width=width,
+                height=height,
             )
             with open(para_path, 'w') as f:
                 json.dump(camera_para, f, indent=4)
+            self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
             save_time = time.perf_counter() - save_start
 
             total_time = time.perf_counter() - total_start
@@ -3233,6 +3418,24 @@ class BpySceneCtx:
         view_dir = os.path.dirname(output_path) or "."
         base = os.path.splitext(os.path.basename(output_path))[0]
         return os.path.join(view_dir, f"{base}_camera_para.json")
+
+    def write_opencv_ssl_for_view(
+        self,
+        output_dir: str,
+        ref_camera,
+        ref_look_at,
+        ref_world_up=None,
+    ) -> str:
+        """导出 ``ssl_opencv.txt``（OpenCV 相机系，参考相机为 ref_*）。"""
+        from . import ssl_opencv
+
+        return ssl_opencv.write_opencv_ssl(
+            self.context,
+            output_dir,
+            ref_camera,
+            ref_look_at,
+            ref_world_up if ref_world_up is not None else [0.0, 0.0, 1.0],
+        )
 
     def _expand_camera_sequence_args(
         self,
@@ -3430,6 +3633,9 @@ class BpySceneCtx:
         show_ceiling: bool,
         hdri_transparent_background: bool,
         reference_frame: bool = True,
+        opencv_ref_camera=None,
+        opencv_ref_look=None,
+        opencv_ref_up=None,
     ) -> str:
         pano_output_path = self._pano_output_path(output_path)
         pano_dir = os.path.dirname(pano_output_path) or "."
@@ -3503,9 +3709,18 @@ class BpySceneCtx:
                 reference_frame=reference_frame,
                 depth_scale=depth_scale,
                 include_normal_fields=depth_scale is not None,
+                width=width,
+                height=height,
+                include_intrinsic=False,
             )
             with open(para_path, 'w') as f:
                 json.dump(self._mark_camera_para_pano(camera_para), f, indent=4)
+            self.write_opencv_ssl_for_view(
+                pano_dir,
+                opencv_ref_camera if opencv_ref_camera is not None else world_cam_w,
+                opencv_ref_look if opencv_ref_look is not None else world_look_w,
+                opencv_ref_up if opencv_ref_up is not None else world_up_w,
+            )
             print(f"✅ 全景渲染完成! 保存至: {pano_output_path}")
             return pano_output_path
         finally:
@@ -3747,6 +3962,8 @@ class BpySceneCtx:
                         reference_frame=(frame_idx == 0),
                         depth_scale=depth_scale,
                         include_normal_fields=depth_scale is not None,
+                        width=width,
+                        height=height,
                     )
                     with open(para_path, 'w') as f:
                         json.dump(camera_para, f, indent=4)
@@ -3772,6 +3989,9 @@ class BpySceneCtx:
                             show_ceiling=show_ceiling,
                             hdri_transparent_background=hdri_transparent_background,
                             reference_frame=(frame_idx == 0),
+                            opencv_ref_camera=world_cam0,
+                            opencv_ref_look=world_look0,
+                            opencv_ref_up=world_up0,
                         )
                         pano_frame_states.append({
                             "camera_matrix": camera_matrix.copy(),
@@ -3835,6 +4055,11 @@ class BpySceneCtx:
                             else:
                                 self.scene.camera = None
                         self._remove_camera_blocks(cam_obj, cam_data)
+
+            self.write_opencv_ssl_for_view(seq_dir, world_cam0, world_look0, world_up0)
+            pano_ssl_dir = f"{seq_dir}_pano"
+            if os.path.isdir(pano_ssl_dir):
+                self.write_opencv_ssl_for_view(pano_ssl_dir, world_cam0, world_look0, world_up0)
 
         total_time = time.perf_counter() - total_start
         print(f"✅ 序列渲染完成 ({n_frames} 帧), 序列目录: {seq_dir}, 总耗时: {total_time:.2f}s")
@@ -4136,9 +4361,12 @@ class BpySceneCtx:
                 reference_frame=True,
                 depth_scale=depth_scale,
                 include_normal_fields=depth_scale is not None,
+                width=width,
+                height=height,
             )
             with open(para_path, 'w') as f:
                 json.dump(camera_para, f, indent=4)
+            self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
     
 # ==================== 测试代码 ====================
 

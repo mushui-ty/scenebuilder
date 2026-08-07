@@ -9,9 +9,10 @@
 """
 
 import numpy as np
+import math
 import trimesh
 from shapely.geometry import Polygon
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 from scipy.spatial import ConvexHull
 import uuid
 import os
@@ -1081,6 +1082,125 @@ def snap_to_wall(center: List[float], wall: Dict) -> List[float]:
     # 这里的 clamp 设置为 False，以便在投影落在线段外时，取其在直线上的投影点
     _, closest_point = point_to_line_distance(point, tuple(wall["s"]), tuple(wall["e"]), clamp=False)
     return [closest_point[0], closest_point[1], center[2]]
+
+
+def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict[str, Any]:
+    """预计算所有外墙的斜接（Miter Joint）外侧底点。"""
+    boundary_walls = {wid: w for wid, w in walls.items() if not w.get("is_partition", False)}
+
+    pt_to_walls: Dict[Tuple[float, float], List[str]] = {}
+    for wall_id, wall in boundary_walls.items():
+        s = tuple(wall["s"])
+        e = tuple(wall["e"])
+        for pt in (s, e):
+            pt_to_walls.setdefault(pt, []).append(wall_id)
+
+    wall_out_normals = {
+        wall_id: -np.array(wall["orientation"], dtype=float)[:2]
+        for wall_id, wall in boundary_walls.items()
+    }
+
+    def _get_miter_point(pt, wid1, wid2):
+        n1 = wall_out_normals[wid1]
+        n2 = wall_out_normals[wid2]
+        n_avg = n1 + n2
+        n_avg_norm = np.linalg.norm(n_avg)
+        if n_avg_norm < 1e-4:
+            return np.array(pt, dtype=float)[:2] + n1 * wall_thickness
+        n_avg /= n_avg_norm
+        cos_half_theta = np.dot(n_avg, n1)
+        if abs(cos_half_theta) < 1e-4:
+            return np.array(pt, dtype=float)[:2] + n1 * wall_thickness
+        length = wall_thickness / cos_half_theta
+        length = min(length, wall_thickness * 10)
+        return np.array(pt, dtype=float)[:2] + n_avg * length
+
+    wall_outer_points = {}
+    for wall_id, wall in boundary_walls.items():
+        s = tuple(wall["s"])
+        e = tuple(wall["e"])
+        outer_s, outer_e = None, None
+        neighbors_s = [wid for wid in pt_to_walls.get(s, []) if wid != wall_id]
+        if neighbors_s:
+            outer_s = _get_miter_point(s, wall_id, neighbors_s[0])
+        neighbors_e = [wid for wid in pt_to_walls.get(e, []) if wid != wall_id]
+        if neighbors_e:
+            outer_e = _get_miter_point(e, wall_id, neighbors_e[0])
+        wall_outer_points[wall_id] = (outer_s, outer_e)
+    return wall_outer_points
+
+
+def _walls_at_vertex(vertex, boundary_walls: Dict[str, Any], tol: float = 1e-5) -> List[str]:
+    """返回在 vertex 处相接的外墙 id 列表。"""
+    v = np.array(vertex[:2], dtype=float)
+    matched = []
+    for wall_id, wall in boundary_walls.items():
+        for pt in (wall["s"], wall["e"]):
+            if np.linalg.norm(v - np.array(pt[:2], dtype=float)) < tol:
+                matched.append(wall_id)
+                break
+    return matched
+
+
+def calculate_floor_polygon_with_wall_thickness(
+    vertices: List[Tuple[float, float]],
+    walls: Dict[str, Any],
+    wall_thickness: float,
+) -> List[Tuple[float, float]]:
+    """
+    根据外墙底边（含墙厚与斜接）计算地板/天花板水平轮廓。
+
+    房间 meta.vertices 为墙体内线环；地板/天花板 slab 应覆盖到外墙底边，
+    使墙体完全落在 slab 之内。
+    """
+    if len(vertices) < 3:
+        return [(float(v[0]), float(v[1])) for v in vertices]
+
+    boundary_walls = {wid: w for wid, w in walls.items() if not w.get("is_partition", False)}
+    if not boundary_walls:
+        return [(float(v[0]), float(v[1])) for v in vertices]
+
+    wall_outer_points = calculate_miter_joints(boundary_walls, wall_thickness)
+    wall_out_normals = {
+        wall_id: -np.array(wall["orientation"], dtype=float)[:2]
+        for wall_id, wall in boundary_walls.items()
+    }
+
+    def _miter_at_corner(pt, wid1: str, wid2: str) -> np.ndarray:
+        n1 = wall_out_normals[wid1]
+        n2 = wall_out_normals[wid2]
+        n_avg = n1 + n2
+        n_avg_norm = np.linalg.norm(n_avg)
+        base = np.array(pt[:2], dtype=float)
+        if n_avg_norm < 1e-4:
+            return base + n1 * wall_thickness
+        n_avg /= n_avg_norm
+        cos_half_theta = np.dot(n_avg, n1)
+        if abs(cos_half_theta) < 1e-4:
+            return base + n1 * wall_thickness
+        length = min(wall_thickness / cos_half_theta, wall_thickness * 10)
+        return base + n_avg * length
+
+    floor_vertices: List[Tuple[float, float]] = []
+    for vertex in vertices:
+        meeting = _walls_at_vertex(vertex, boundary_walls)
+        if len(meeting) >= 2:
+            outer_pt = _miter_at_corner(vertex, meeting[0], meeting[1])
+        elif len(meeting) == 1:
+            wid = meeting[0]
+            outer_pt = np.array(vertex[:2], dtype=float) + wall_out_normals[wid] * wall_thickness
+            outer_s, outer_e = wall_outer_points.get(wid, (None, None))
+            v_arr = np.array(vertex[:2], dtype=float)
+            if outer_s is not None and np.linalg.norm(v_arr - np.array(boundary_walls[wid]["s"][:2])) < 1e-5:
+                outer_pt = np.array(outer_s, dtype=float)
+            elif outer_e is not None and np.linalg.norm(v_arr - np.array(boundary_walls[wid]["e"][:2])) < 1e-5:
+                outer_pt = np.array(outer_e, dtype=float)
+        else:
+            outer_pt = np.array(vertex[:2], dtype=float)
+
+        floor_vertices.append((float(outer_pt[0]), float(outer_pt[1])))
+
+    return floor_vertices
 
 
 def create_floor_mesh(vertices: List[Tuple[float, float]], bounds: List[float], 
@@ -2547,10 +2667,171 @@ def create_wall_edge_lines(start: List[float], end: List[float], height: float,
     return pyrender.Mesh(primitives=[primitive])
 
 
-def semantic_entity_color(entity_key: str) -> Tuple[int, int, int]:
-    """为单个实体生成语义色，保证与 SEMANTIC_BACKGROUND 不同且足够亮。"""
+def bbox_2d_from_binary_mask(mask: np.ndarray) -> Optional[List[int]]:
+    """从二值 mask 计算目标检测框 [x1, y1, x2, y2]（像素坐标，左上角为原点，含边界）。"""
+    ys, xs = np.nonzero(mask)
+    if xs.size == 0:
+        return None
+    return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
+
+
+def _largest_connected_component_mask(mask: np.ndarray) -> np.ndarray:
+    """保留 mask 中最大连通域；无前景则返回原 mask。"""
+    from scipy import ndimage
+
+    labeled, n = ndimage.label(mask)
+    if n <= 1:
+        return mask
+    counts = np.bincount(labeled.ravel())
+    counts[0] = 0
+    return labeled == int(np.argmax(counts))
+
+
+# 语义图以无抗锯齿方式渲染，索引使用精确 RGB 匹配（不再依赖最近邻）。
+SEMANTIC_COLOR_MAX_DIST_SQ = 0  # 保留常量名兼容；0 表示仅精确匹配
+
+
+def attach_semantic_bbox_2d(
+    objects: List[Dict[str, Any]],
+    rgb: np.ndarray,
+    background: Tuple[int, int, int] = SEMANTIC_BACKGROUND,
+    max_dist_sq: float = SEMANTIC_COLOR_MAX_DIST_SQ,
+) -> None:
+    """为 semantic.json 各 object 写入 pixel_num 与 bbox_2d。
+
+    默认精确匹配 JSON 中的 color（需配合语义渲染关闭抗锯齿）。
+    max_dist_sq>0 时回退为带阈值最近邻（兼容旧语义图）。
+    bbox_2d 取最大连通域外接矩形；pixel_num==0 时不写 bbox_2d。
+    """
+    for obj in objects:
+        obj["pixel_num"] = 0
+        obj.pop("bbox_2d", None)
+
+    if rgb.ndim == 2:
+        rgb = np.stack([rgb] * 3, axis=-1)
+    rgb_u8 = np.asarray(rgb[..., :3], dtype=np.uint8)
+    h, w = rgb_u8.shape[:2]
+
+    indexed_objects: List[Dict[str, Any]] = []
+    colors: List[Tuple[int, int, int]] = []
+    for obj in objects:
+        color = obj.get("color")
+        if not color or len(color) != 3:
+            continue
+        colors.append((int(color[0]), int(color[1]), int(color[2])))
+        indexed_objects.append(obj)
+
+    if not indexed_objects:
+        return
+
+    if float(max_dist_sq) <= 0:
+        for obj, color in zip(indexed_objects, colors):
+            mask = np.all(rgb_u8 == np.asarray(color, dtype=np.uint8), axis=-1)
+            pixel_num = int(np.count_nonzero(mask))
+            obj["pixel_num"] = pixel_num
+            if pixel_num == 0:
+                continue
+            bbox = bbox_2d_from_binary_mask(_largest_connected_component_mask(mask))
+            if bbox is not None:
+                obj["bbox_2d"] = bbox
+        return
+
+    # 兼容旧图：带阈值最近邻
+    palette: List[Tuple[int, int, int]] = [background] + colors
+    palette_arr = np.asarray(palette, dtype=np.float32)
+    pixels = rgb_u8.reshape(-1, 3).astype(np.float32)
+    dist_sq = np.sum((pixels[:, None, :] - palette_arr[None, :, :]) ** 2, axis=2)
+    nearest = np.argmin(dist_sq, axis=1)
+    min_dist_sq = dist_sq[np.arange(pixels.shape[0]), nearest]
+    nearest[min_dist_sq > float(max_dist_sq)] = 0
+    nearest = nearest.reshape(h, w)
+
+    for idx, obj in enumerate(indexed_objects):
+        mask = nearest == (idx + 1)
+        pixel_num = int(np.count_nonzero(mask))
+        obj["pixel_num"] = pixel_num
+        if pixel_num == 0:
+            continue
+        bbox = bbox_2d_from_binary_mask(_largest_connected_component_mask(mask))
+        if bbox is not None:
+            obj["bbox_2d"] = bbox
+
+
+def bbox_2d_overlay_path(render_path: str) -> str:
+    """与渲染图并列的检测框可视化路径，如 topdown.png -> topdown_bbox_2d.png。"""
+    base, _ = os.path.splitext(render_path)
+    return f"{base}_bbox_2d.png"
+
+
+def save_bbox_2d_overlay_png(
+    render_path: str,
+    objects: List[Dict[str, Any]],
+    output_path: Optional[str] = None,
+    line_width: int = 2,
+) -> Optional[str]:
+    """在原渲染图上绘制 semantic bbox_2d 与 label，保存为 *_bbox_2d.png。"""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        print("⚠️ PIL 不可用，跳过 bbox_2d 可视化")
+        return None
+
+    if not os.path.isfile(render_path):
+        print(f"⚠️ 渲染图不存在，跳过 bbox_2d 可视化: {render_path}")
+        return None
+
+    if output_path is None:
+        output_path = bbox_2d_overlay_path(render_path)
+
+    img = Image.open(render_path).convert("RGBA")
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    img_w, img_h = img.size
+
+    for obj in objects:
+        bbox = obj.get("bbox_2d")
+        if not bbox or len(bbox) != 4:
+            continue
+        x1, y1, x2, y2 = (int(v) for v in bbox)
+        x1 = max(0, min(x1, img_w - 1))
+        x2 = max(0, min(x2, img_w - 1))
+        y1 = max(0, min(y1, img_h - 1))
+        y2 = max(0, min(y2, img_h - 1))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
+        color = obj.get("color") or [0, 220, 80]
+        rgb = tuple(int(c) for c in color[:3])
+        label = str(obj.get("label") or "")
+
+        draw.rectangle((x1, y1, x2, y2), outline=rgb + (255,), width=line_width)
+
+        if not label:
+            continue
+        text_x = x1 + 2
+        text_y = y1 + 2 if (y2 - y1) >= 16 else max(0, y1 - 14)
+        if hasattr(draw, "textbbox"):
+            text_box = draw.textbbox((text_x, text_y), label)
+            pad = 2
+            draw.rectangle(
+                (text_box[0] - pad, text_box[1] - pad, text_box[2] + pad, text_box[3] + pad),
+                fill=rgb + (210,),
+            )
+        draw.text((text_x, text_y), label, fill=(255, 255, 255, 255))
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    Image.alpha_composite(img, overlay).convert("RGB").save(output_path)
+    return output_path
+
+
+def semantic_entity_color(
+    entity_key: str,
+    used: Optional[Set[Tuple[int, int, int]]] = None,
+) -> Tuple[int, int, int]:
+    """为单个实体生成语义色；可选 used 集合保证同场景内颜色唯一，便于精确索引。"""
+    used_set = used if used is not None else set()
     salt = 0
-    while salt < 256:
+    while salt < 4096:
         key = f"{entity_key}\0{salt}" if salt else entity_key
         digest = hashlib.sha256(key.encode("utf-8")).digest()
         hue = digest[0] / 255.0
@@ -2558,10 +2839,18 @@ def semantic_entity_color(entity_key: str) -> Tuple[int, int, int]:
         val = 0.65 + (digest[2] / 255.0) * 0.30
         r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
         color = (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)))
-        if color != SEMANTIC_BACKGROUND and min(color) >= 64 and max(color) >= 120:
+        if (
+            color != SEMANTIC_BACKGROUND
+            and min(color) >= 64
+            and max(color) >= 120
+            and color not in used_set
+        ):
+            used_set.add(color)
             return color
         salt += 1
-    return (255, 96, 96)
+    fallback = (255, 96, 96)
+    used_set.add(fallback)
+    return fallback
 
 
 def compute_depth_encode_scale(depth_m: np.ndarray) -> float:
@@ -2599,7 +2888,7 @@ def decode_depth_uint16(depth_png: np.ndarray, depth_scale: float) -> np.ndarray
 
 
 def encode_normal_world_png(normal_01: np.ndarray) -> np.ndarray:
-    """Cycles Normal pass (每通道 0..1) -> uint8 RGB PNG。"""
+    """已映射到 [0, 1] 的世界法线 → uint8 RGB PNG（每通道 round(c * 255)）。"""
     arr = np.asarray(normal_01, dtype=np.float64)
     if arr.ndim == 2:
         arr = np.stack([arr, arr, arr], axis=-1)
@@ -2607,8 +2896,20 @@ def encode_normal_world_png(normal_01: np.ndarray) -> np.ndarray:
     return np.clip(np.rint(arr * 255.0), 0, 255).astype(np.uint8)
 
 
+def encode_normal_directions_uint8_png(normal_vectors: np.ndarray) -> np.ndarray:
+    """法向量分量 ∈ [-1, 1]（任意坐标系）→ uint8 RGB PNG。"""
+    arr = np.asarray(normal_vectors, dtype=np.float64)
+    normal_01 = np.clip((arr + 1.0) * 0.5, 0.0, 1.0)
+    return encode_normal_world_png(normal_01)
+
+
+def encode_normal_world_png_from_cycles_exr(normal_exr: np.ndarray) -> np.ndarray:
+    """Cycles Normal pass EXR（世界空间，每分量 [-1, 1]）→ uint8 RGB PNG。"""
+    return encode_normal_directions_uint8_png(normal_exr)
+
+
 def decode_normal_world_uint8(normal_png: np.ndarray) -> np.ndarray:
-    """uint8 法线 PNG -> 世界空间单位法向量 (H,W,3)。"""
+    """uint8 法线 PNG → 单位法向量 (H,W,3)，分量范围 [-1, 1]（坐标系见 camera_para.normal_space）。"""
     rgb = np.asarray(normal_png, dtype=np.float64)
     if rgb.ndim == 2:
         rgb = np.stack([rgb, rgb, rgb], axis=-1)
@@ -2616,11 +2917,91 @@ def decode_normal_world_uint8(normal_png: np.ndarray) -> np.ndarray:
     return rgb * 2.0 - 1.0
 
 
+def matrix4x4_to_nested_list(matrix: np.ndarray, *, decimals: int = 6) -> List[List[float]]:
+    return np.round(np.asarray(matrix, dtype=float), decimals).tolist()
+
+
+def build_opencv_intrinsic_4x4(
+    fov_angle_rad: float,
+    width: int,
+    height: int,
+    *,
+    aspect_ratio: Optional[float] = None,
+) -> np.ndarray:
+    """Pinhole 内参 4×4 K（无畸变），与 util_bpy 视锥 / Blender sensor_fit=AUTO 一致。"""
+    w = int(width)
+    h = int(height)
+    aspect = float(aspect_ratio) if aspect_ratio is not None else w / max(h, 1)
+    angle = float(fov_angle_rad)
+    if aspect >= 1.0:
+        tan_x = math.tan(angle * 0.5)
+        tan_y = tan_x / max(aspect, 1e-6)
+    else:
+        tan_y = math.tan(angle * 0.5)
+        tan_x = tan_y * aspect
+    fx = w / (2.0 * max(tan_x, 1e-6))
+    fy = h / (2.0 * max(tan_y, 1e-6))
+    cx = w / 2.0
+    cy = h / 2.0
+    intrinsic = np.eye(4, dtype=float)
+    intrinsic[0, 0] = fx
+    intrinsic[1, 1] = fy
+    intrinsic[0, 2] = cx
+    intrinsic[1, 2] = cy
+    return intrinsic
+
+
+def camera_calibration_matrix_fields(
+    camera_position,
+    look_at_target,
+    world_up,
+    fov_y_rad: float,
+    width: int,
+    height: int,
+    *,
+    aspect_ratio: Optional[float] = None,
+    include_intrinsic: bool = True,
+) -> Dict[str, Any]:
+    """ScanNet / OpenSpatial 风格的 c2w + intrinsic，写入 camera_para.json。"""
+    try:
+        from . import geometry_opencv as geo_cv
+    except ImportError:
+        import geometry_opencv as geo_cv  # type: ignore
+
+    c2w = geo_cv.build_opencv_c2w_matrix(camera_position, look_at_target, world_up)
+    fields: Dict[str, Any] = {
+        "camera_convention": "opencv",
+        "world_convention": "ssl_z_up",
+        "c2w": matrix4x4_to_nested_list(c2w),
+    }
+    if include_intrinsic:
+        intrinsic = build_opencv_intrinsic_4x4(
+            fov_y_rad,
+            width,
+            height,
+            aspect_ratio=aspect_ratio,
+        )
+        fields["intrinsic"] = matrix4x4_to_nested_list(intrinsic)
+        fields["intrinsic_model"] = "pinhole_no_distortion"
+    return fields
+
+
+def decode_normal_opencv_uint8(normal_png: np.ndarray) -> np.ndarray:
+    """uint8 法线 PNG → OpenCV 相机系单位法向量 (H,W,3)。"""
+    return decode_normal_world_uint8(normal_png)
+
+
 def normal_map_camera_para_fields() -> Dict[str, Any]:
     """写入 {basename}_camera_para.json 的法线图元数据（与 --depth 一并导出）。"""
     return {
-        "normal_space": "world",
+        "normal_space": "opencv_camera",
+        "normal_axes": {
+            "x": "+X image right",
+            "y": "+Y image down",
+            "z": "+Z along view into scene",
+        },
         "normal_encoding": "uint8_rgb",
-        "normal_decode": "normal_world = (pixel_rgb / 255.0) * 2.0 - 1.0",
+        "normal_encode": "uint8 = round(((normal_opencv + 1) / 2) * 255)",
+        "normal_decode": "normal_opencv = (pixel_rgb / 255.0) * 2.0 - 1.0",
         "normal_invalid_mask": "depth_pixel == 0",
     }

@@ -84,8 +84,20 @@ def _run_auto_views_from_path(
     y_dir: str,
     floor_result: Optional[Dict[str, Any]],
     context: Dict[str, Any],
+    *,
+    resume: bool = True,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """根据地板路径生成 auto 视角 spec，并写入 auto_views.json。"""
+    if resume:
+        try:
+            from .core.render_resume import load_auto_views_manifest
+        except (ImportError, ValueError):
+            from core.render_resume import load_auto_views_manifest  # type: ignore
+        specs, names = load_auto_views_manifest(y_dir)
+        if specs:
+            print(f"📂 从已有 auto_views.json 加载 {len(names)} 个 auto 视角")
+            return specs, names
+
     try:
         from .core.auto_views import build_auto_views_from_path, write_auto_views_manifest
     except (ImportError, ValueError):
@@ -252,9 +264,40 @@ def worker_render_view(job_path: str, view_name: str) -> None:
     output_dir = job["output_dir"]
     extra = _job_render_kwargs(job)
 
+    try:
+        from .core.render_resume import (
+            is_view_complete,
+            list_primary_frames,
+            record_view_complete,
+            view_dir_for,
+            view_dir_name_for,
+        )
+    except (ImportError, ValueError):
+        from core.render_resume import (  # type: ignore
+            is_view_complete,
+            list_primary_frames,
+            record_view_complete,
+            view_dir_for,
+            view_dir_name_for,
+        )
+
     auto_specs = job.get("auto_view_specs") or {}
+    auto_spec = auto_specs.get(view_name)
+    if job.get("resume", True) and is_view_complete(
+        output_dir, view_name, job, auto_spec=auto_spec
+    ):
+        print(f"⏭️  跳过已完成视角: {view_name}")
+        return
+
     if view_name in auto_specs:
         _render_auto_view_spec(ctx, output_dir, auto_specs[view_name], extra, view_dir_name=view_name)
+        view_dir = view_dir_for(output_dir, view_name)
+        record_view_complete(
+            output_dir,
+            view_name,
+            view_dir=view_dir,
+            main_pngs=list_primary_frames(view_dir),
+        )
         return
 
     if view_name == "topdown":
@@ -266,6 +309,13 @@ def worker_render_view(job_path: str, view_name: str) -> None:
             rebuild=True,
             use_HDRI=False,
             **extra,
+        )
+        view_dir = view_dir_for(output_dir, "topdown")
+        record_view_complete(
+            output_dir,
+            "topdown",
+            view_dir=view_dir,
+            main_pngs=list_primary_frames(view_dir),
         )
         return
 
@@ -280,15 +330,33 @@ def worker_render_view(job_path: str, view_name: str) -> None:
         look_at_target=look_at,
         rebuild=True,
         use_HDRI=False,
+        view_dir_name=view_dir_name_for(view_name),
         **extra,
+    )
+    view_dir = view_dir_for(output_dir, view_name)
+    record_view_complete(
+        output_dir,
+        view_name,
+        view_dir=view_dir,
+        main_pngs=list_primary_frames(view_dir),
     )
 
 
 def worker_render_post(job_path: str) -> None:
     job = _load_job(job_path)
+    output_dir = job["output_dir"]
+
+    try:
+        from .core.render_resume import is_post_export_complete, record_post_complete
+    except (ImportError, ValueError):
+        from core.render_resume import is_post_export_complete, record_post_complete  # type: ignore
+
+    if job.get("resume", True) and is_post_export_complete(output_dir, job):
+        print("⏭️  跳过全场景 GLB/点云导出（已完成）")
+        return
+
     ctx = _create_render_ctx(job)
     scene_json = job["scene_json"]
-    output_dir = job["output_dir"]
 
     if job.get("export_glb"):
         glb_path = os.path.join(output_dir, "scene.glb")
@@ -306,6 +374,8 @@ def worker_render_post(job_path: str) -> None:
 
     with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(scene_json, f, indent=2, ensure_ascii=False)
+
+    record_post_complete(output_dir)
 
 
 def _spawn_worker_view(job_path: str, view_name: str) -> None:
@@ -464,6 +534,7 @@ def render_ssl(
     normalized_topdown_width: int = 1000,
     normalized_topdown_height: int = 1000,
     normalized_topdown_show_ceiling: bool = False,
+    resume: bool = True,
 ):
     """渲染场景。``input_text`` 可为标准 SSL 文本，或 JSON 字符串。
 
@@ -534,18 +605,44 @@ def render_ssl(
     with open(os.path.join(y_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(scene_json, f, indent=2, ensure_ascii=False)
 
+    try:
+        from .core.render_resume import (
+            filter_views_to_run,
+            is_normalized_topdown_complete,
+            load_floor_result_from_disk,
+        )
+    except (ImportError, ValueError):
+        from core.render_resume import (  # type: ignore
+            filter_views_to_run,
+            is_normalized_topdown_complete,
+            load_floor_result_from_disk,
+        )
+
     floor_result: Optional[Dict[str, Any]] = None
     if normalized_topdown and pixel_align is not None:
-        print(f"📐 Step 2: topdown_normalized + 地板路径 → {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
-        floor_result = _run_normalized_topdown_phase(
-            ctx,
-            y_dir,
-            align=pixel_align,
-            floor_path=floor_path,
-            width=normalized_topdown_width,
-            height=normalized_topdown_height,
-            show_ceiling=normalized_topdown_show_ceiling,
+        skip_norm = (
+            resume
+            and is_normalized_topdown_complete(
+                y_dir,
+                floor_path=floor_path,
+                semantic=semantic,
+                depth=depth,
+            )
         )
+        if skip_norm:
+            print(f"⏭️  跳过 pixel-aligned topdown_normalized（已完成）→ {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
+            floor_result = load_floor_result_from_disk(y_dir) if floor_path else None
+        else:
+            print(f"📐 Step 2: topdown_normalized + 地板路径 → {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
+            floor_result = _run_normalized_topdown_phase(
+                ctx,
+                y_dir,
+                align=pixel_align,
+                floor_path=floor_path,
+                width=normalized_topdown_width,
+                height=normalized_topdown_height,
+                show_ceiling=normalized_topdown_show_ceiling,
+            )
 
     center = ctx.context["meta"]["center"]
     span = ctx.context["meta"]["span"]
@@ -576,7 +673,7 @@ def render_ssl(
             print("⚠️  views=auto 目前仅支持 backend=bpy，已跳过 auto 视角")
         else:
             auto_view_specs, auto_view_names = _run_auto_views_from_path(
-                y_dir, floor_result, ctx.context
+                y_dir, floor_result, ctx.context, resume=resume
             )
 
     job = {
@@ -599,6 +696,7 @@ def render_ssl(
         "look_at": look_at,
         "view_cameras": view_cameras,
         "auto_view_specs": auto_view_specs,
+        "resume": resume,
     }
     with open(job_path, "w", encoding="utf-8") as f:
         json.dump(job, f, indent=2, ensure_ascii=False)
@@ -611,6 +709,12 @@ def render_ssl(
         else:
             views_to_run = []
 
+    if views_to_run:
+        views_to_run, skipped_views = filter_views_to_run(
+            y_dir, views_to_run, job, resume=resume
+        )
+        if skipped_views:
+            print(f"⏭️  已跳过 {len(skipped_views)} 个已完成视角: {', '.join(skipped_views)}")
     if views_to_run:
         step = "Step 3: " if normalized_topdown else ""
         print(f"🎨 {step}多视角渲染 → {y_dir} ({len(views_to_run)} 个子进程)")
@@ -724,6 +828,11 @@ def main() -> None:
     parser.add_argument("--no_floor_path", action="store_true",
                         help="配合 --normalized_topdown：跳过 topdown_normalized 下的地板路径采样")
     parser.add_argument("--samples", type=int, default=None, help="Blender 采样数")
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="禁用断点续跑，强制重新渲染所有视角与导出",
+    )
 
     args = parser.parse_args()
     input_text, output_dir, asset_dir, texture_dir = _prepare_ssl_and_dirs(args)
@@ -761,6 +870,7 @@ def main() -> None:
         pano_resolution=args.pano_resolution,
         normalized_topdown=normalized_topdown,
         floor_path=floor_path,
+        resume=not args.no_resume,
     )
     if args.samples is not None:
         render_kwargs["samples"] = args.samples
@@ -794,6 +904,5 @@ if __name__ == "__main__":
     main()
 
 '''
-python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py     --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt     --views auto     --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out11     -
--glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified     --ply --visible_geometry --semantic --depth --pano
+python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Office/325148303_0/render_output/ssl.txt --views auto --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Office/325148303_0/out0     --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified --ply --visible_geometry --semantic --depth --pano
 '''

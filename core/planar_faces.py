@@ -346,8 +346,8 @@ def process_planar_objects_for_view(
     """视锥裁剪 + 保持边界顺序 + CCW + 像素坐标。"""
     result: List[Dict[str, Any]] = []
     for obj in objects:
-        color_key = f"{obj['category']}:{obj['id']}"
-        color_rgb = list(util.semantic_entity_color(color_key))
+        color_key = f"line:{obj['category']}:{obj['id']}"
+        line_color = list(util.semantic_entity_color(color_key))
         processed_loops = []
         for loop in obj["loops"]:
             clipped = clip_polygon_to_render_frustum(loop["vertices_3d"], clip_mats)
@@ -373,7 +373,7 @@ def process_planar_objects_for_view(
         out = {
             "category": obj["category"],
             "id": obj["id"],
-            "color_rgb": color_rgb,
+            "line_color": line_color,
             "loops": processed_loops,
         }
         if obj.get("wall_id"):
@@ -391,8 +391,8 @@ def process_planar_objects_for_pano(
     """不做视锥裁剪，直接将完整平面环投影到 equirectangular 全景图。"""
     result: List[Dict[str, Any]] = []
     for obj in objects:
-        color_key = f"{obj['category']}:{obj['id']}"
-        color_rgb = list(util.semantic_entity_color(color_key))
+        color_key = f"line:{obj['category']}:{obj['id']}"
+        line_color = list(util.semantic_entity_color(color_key))
         processed_loops = []
         for loop in obj["loops"]:
             vertices = np.asarray(loop["vertices_3d"], dtype=float)
@@ -418,7 +418,7 @@ def process_planar_objects_for_pano(
         out = {
             "category": obj["category"],
             "id": obj["id"],
-            "color_rgb": color_rgb,
+            "line_color": line_color,
             "loops": processed_loops,
         }
         if obj.get("wall_id"):
@@ -446,7 +446,7 @@ def draw_lines_overlay(
     draw = ImageDraw.Draw(img)
     image_width = img.size[0]
     for obj in objects:
-        color = tuple(obj["color_rgb"]) + (255,)
+        color = tuple(obj["line_color"]) + (255,)
         for loop in obj["loops"]:
             pts = loop.get("vertices_2d_px") or []
             valid = [(p[0], p[1]) for p in pts if len(p) >= 2 and np.isfinite(p[0]) and np.isfinite(p[1])]

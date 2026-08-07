@@ -428,7 +428,16 @@ class SceneCtx:
         bounds = self.context["meta"]["bounds"]
         texture_scale = self.config.get("texture_scale", None)
         wall_thickness = self.config.get("wall_thickness", 0.1)
-        floor_mesh = util.create_floor_mesh(vertices, bounds, texture_scale=texture_scale)
+        floor_vertices = util.calculate_floor_polygon_with_wall_thickness(
+            vertices, self.context["walls"], wall_thickness
+        )
+        floor_bounds = [
+            min(p[0] for p in floor_vertices),
+            min(p[1] for p in floor_vertices),
+            max(p[0] for p in floor_vertices),
+            max(p[1] for p in floor_vertices),
+        ]
+        floor_mesh = util.create_floor_mesh(floor_vertices, floor_bounds, texture_scale=texture_scale)
 
         # 加载纹理
         texture_path = self.config.get("floor_texture_path")
@@ -557,15 +566,15 @@ class SceneCtx:
                             self.mesh_nodes[f"{item_type}s"][item_id] = {
                                 "nodes": nodes,
                                 "mesh": loaded,
-                                f"{item_type}_data": {"wall_id": wall_id, "asset_id": asset_id},
+                                f"{item_type}_data": dict(item),
                             }
                         else:
                             print(f"  ❌ {item_type} {item_id} (asset_id={asset_id}) 添加到场景失败")
         
         if show_ceiling:
-            # 创建天花板
+            # 创建天花板（与地板相同的外轮廓，含墙厚）
             z_max = self.context["meta"]["z_max"]
-            ceiling_mesh = util.create_ceiling_mesh(vertices, bounds, z_max)
+            ceiling_mesh = util.create_ceiling_mesh(floor_vertices, floor_bounds, z_max)
             ceiling_color = [0.9, 0.9, 0.9, 1.0]
             ceiling_texture_path = self.config.get("ceiling_texture_path")
             
@@ -1466,44 +1475,52 @@ class SceneCtx:
         return depth_scale
 
     def _semantic_entries(self):
+        used_colors = set()
         floor_info = self.mesh_nodes.get("floor")
         if floor_info:
             color_key = "entity:floor:floor"
             yield "floor", color_key, floor_info.get("mesh"), {
                 "category": "floor",
-                "id": "floor",
-                "color_key": color_key,
-                "color": list(util.semantic_entity_color(color_key)),
+                "label": "floor",
+                "color": list(util.semantic_entity_color(color_key, used=used_colors)),
             }
         ceiling_info = self.mesh_nodes.get("ceiling")
         if ceiling_info:
             color_key = "entity:ceiling:ceiling"
             yield "ceiling", color_key, ceiling_info.get("mesh"), {
                 "category": "ceiling",
-                "id": "ceiling",
-                "color_key": color_key,
-                "color": list(util.semantic_entity_color(color_key)),
+                "label": "ceiling",
+                "color": list(util.semantic_entity_color(color_key, used=used_colors)),
             }
         for category in ("walls", "doors", "windows"):
             for object_id, info in self.mesh_nodes.get(category, {}).items():
                 color_key = f"entity:{category}:{object_id}"
-                yield category, color_key, info.get("mesh"), {
+                detail_key = {"walls": "wall_data", "doors": "door_data", "windows": "window_data"}[category]
+                data = info.get(detail_key, {})
+                caption = data.get("caption")
+                object_meta = {
                     "category": category,
-                    "id": object_id,
-                    "color_key": color_key,
-                    "color": list(util.semantic_entity_color(color_key)),
+                    "label": object_id,
+                    "color": list(util.semantic_entity_color(color_key, used=used_colors)),
+                }
+                if caption:
+                    object_meta["caption"] = caption
+                yield category, color_key, info.get("mesh"), {
+                    **object_meta,
                 }
         for object_id, info in self.mesh_nodes.get("boxes", {}).items():
             data = info.get("box_data", {})
-            label = data.get("label", data.get("class", "object"))
+            label = data.get("label", data.get("class", object_id))
             color_key = f"entity:boxes:{object_id}"
-            yield "boxes", color_key, info.get("mesh"), {
+            object_meta = {
                 "category": "boxes",
-                "id": object_id,
                 "label": label,
-                "color_key": color_key,
-                "color": list(util.semantic_entity_color(color_key)),
+                "color": list(util.semantic_entity_color(color_key, used=used_colors)),
             }
+            caption = data.get("caption")
+            if caption:
+                object_meta["caption"] = caption
+            yield "boxes", color_key, info.get("mesh"), object_meta
 
     def _semantic_metadata(self, objects: List[Dict[str, Any]]):
         return {
@@ -1526,7 +1543,7 @@ class SceneCtx:
         mesh_count = 0
         objects = []
         for _, color_key, mesh_obj, object_meta in self._semantic_entries():
-            color = np.array(self._semantic_color(color_key) + (255,), dtype=np.uint8)
+            color = np.array(list(object_meta["color"]) + [255], dtype=np.uint8)
             objects.append(object_meta)
             for mesh in self._flatten_trimesh_meshes(mesh_obj):
                 if mesh is None or len(mesh.vertices) == 0 or len(mesh.faces) == 0:
@@ -1551,11 +1568,15 @@ class SceneCtx:
         try:
             color, _ = renderer.render(semantic_scene, flags=pyrender.RenderFlags.FLAT)
             imageio.imwrite(semantic_path, color)
+            util.attach_semantic_bbox_2d(objects, color)
         finally:
             if own_renderer:
                 renderer.delete()
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(self._semantic_metadata(objects), f, indent=2, ensure_ascii=False)
+        bbox_overlay_path = util.save_bbox_2d_overlay_png(output_path, objects)
+        if bbox_overlay_path:
+            print(f"✅ 检测框可视化: {bbox_overlay_path}")
         print(f"✅ 语义图已导出: {semantic_path}")
 
     def _get_class_color(self, class_name: Optional[str]):
@@ -1602,6 +1623,23 @@ class SceneCtx:
         for pos in corners:
             self.scene.add(pyrender.PointLight(color=[1,1,1], intensity=intensity), pose=trimesh.transformations.translation_matrix(pos))
         self.if_set_lights = True
+
+    def write_opencv_ssl_for_view(
+        self,
+        output_dir: str,
+        ref_camera,
+        ref_look_at,
+        ref_world_up=None,
+    ) -> str:
+        from . import ssl_opencv
+
+        return ssl_opencv.write_opencv_ssl(
+            self.context,
+            output_dir,
+            ref_camera,
+            ref_look_at,
+            ref_world_up if ref_world_up is not None else [0.0, 0.0, 1.0],
+        )
 
     def normalized_topdown_view(
         self,
@@ -1683,8 +1721,27 @@ class SceneCtx:
         camera_para = dict(align["camera_para"])
         if depth_scale is not None:
             camera_para["depth_scale"] = float(depth_scale)
+            camera_para["depth_unit"] = "meter"
+            camera_para["is_metric_depth"] = True
+        camera_para.update(
+            util.camera_calibration_matrix_fields(
+                align["camera_position_ssl"],
+                align["look_at_target_ssl"],
+                [0.0, 0.0, 1.0],
+                align["fov_y"],
+                width,
+                height,
+                aspect_ratio=float(width) / float(height),
+            )
+        )
         with open(camera_para_path, "w", encoding="utf-8") as f:
             json.dump(camera_para, f, indent=4)
+        self.write_opencv_ssl_for_view(
+            output_dir,
+            align["camera_position_ssl"],
+            align["look_at_target_ssl"],
+            [0.0, 0.0, 1.0],
+        )
         print(f"✅ 像素对齐俯视图完成: {output_dir}")
 
     def topdown_view(self, output_path: str, width: int = 1024, height: int = 1024, **kwargs):
@@ -1793,9 +1850,12 @@ class SceneCtx:
                 float(width) / float(height),
                 reference_frame=True,
                 depth_scale=depth_scale,
+                width=width,
+                height=height,
             )
             with open(para_path, 'w') as f:
                 json.dump(camera_para, f, indent=4)
+            self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
             if export_glb and not visible_geometry:
                 self.export_glb(glb_path or os.path.splitext(output_path)[0] + ".glb")
         print(f"✅ 俯视图保存至: {output_path}")
@@ -1964,9 +2024,13 @@ class SceneCtx:
                 float(width) / float(height),
                 reference_frame=True,
                 depth_scale=depth_scale if render_depth else None,
+                width=width,
+                height=height,
             )
             with open(para_path, 'w') as f:
                 json.dump(camera_para, f, indent=4)
+            view_dir = os.path.dirname(output_path) or "."
+            self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
 
             if export_glb and not visible_geometry:
                 self.export_glb(glb_path or os.path.splitext(output_path)[0] + ".glb")

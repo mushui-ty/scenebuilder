@@ -810,6 +810,7 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
             }
             add_if_present(wall_item, "id", get_attr(r'id="([^"]+)"', line))
             add_if_present(wall_item, "room_id", get_attr(r'room_id="([^"]+)"', line))
+            add_if_present(wall_item, "caption", get_attr(r'caption="([^"]+)"', line))
             data["wall"].append(wall_item)
 
         # Door(id="...", wall_id="...", center=[...], width=..., height=..., asset_id="...", category="...", label="...", caption="...", bbox_2d=[...], mesh_id="...")
@@ -1850,6 +1851,9 @@ def build_camera_para_dict(
     reference_frame: bool = False,
     depth_scale: Optional[float] = None,
     include_normal_fields: bool = False,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    include_intrinsic: bool = True,
 ) -> Dict[str, Any]:
     """构建 camera_para.json 内容（含世界坐标与视角 SSL 坐标）。"""
     if view_origin_xy is None or view_theta is None:
@@ -1867,9 +1871,28 @@ def build_camera_para_dict(
         "aspectRatio": float(aspect_ratio),
         "fov_y": float(fov_y),
     }
+    if width is not None and height is not None:
+        try:
+            from . import util
+        except ImportError:
+            import util  # type: ignore
+        para.update(
+            util.camera_calibration_matrix_fields(
+                camera_position,
+                look_at_target,
+                world_up,
+                fov_y,
+                width,
+                height,
+                aspect_ratio=aspect_ratio,
+                include_intrinsic=include_intrinsic,
+            )
+        )
+        para["image_size"] = [int(width), int(height)]
     if depth_scale is not None:
         para["depth_unit"] = "meter"
         para["depth_scale"] = float(depth_scale)
+        para["is_metric_depth"] = True
         if include_normal_fields:
             try:
                 from . import util
@@ -2077,6 +2100,9 @@ class ViewSslSession:
         reference_frame: bool = False,
         depth_scale: Optional[float] = None,
         include_normal_fields: bool = False,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        include_intrinsic: bool = True,
     ) -> Dict[str, Any]:
         if not self.enabled:
             para: Dict[str, Any] = {
@@ -2086,9 +2112,28 @@ class ViewSslSession:
                 "aspectRatio": float(aspect_ratio),
                 "fov_y": float(fov_y),
             }
+            if width is not None and height is not None:
+                try:
+                    from . import util
+                except ImportError:
+                    import util  # type: ignore
+                para.update(
+                    util.camera_calibration_matrix_fields(
+                        world_camera,
+                        world_look_at,
+                        world_up,
+                        fov_y,
+                        width,
+                        height,
+                        aspect_ratio=aspect_ratio,
+                        include_intrinsic=include_intrinsic,
+                    )
+                )
+                para["image_size"] = [int(width), int(height)]
             if depth_scale is not None:
                 para["depth_unit"] = "meter"
                 para["depth_scale"] = float(depth_scale)
+                para["is_metric_depth"] = True
                 if include_normal_fields:
                     try:
                         from . import util
@@ -2107,6 +2152,9 @@ class ViewSslSession:
             reference_frame=reference_frame,
             depth_scale=depth_scale,
             include_normal_fields=include_normal_fields,
+            width=width,
+            height=height,
+            include_intrinsic=include_intrinsic,
         )
 
 
@@ -2149,10 +2197,16 @@ def format_standard_ssl(context: Dict[str, Any]) -> str:
         wall_label = wall.get("label", wall_id)
         p = list(wall["s"]) + [0.0]
         q = list(wall["e"]) + [0.0]
-        lines.append(
-            f'Wall(label="{wall_label}", p={_ssl_fmt_list(p)}, q={_ssl_fmt_list(q)}, '
-            f'height={_ssl_fmt_num(wall["height"])})'
-        )
+        parts = [
+            f'label="{wall_label}"',
+            f'p={_ssl_fmt_list(p)}',
+            f'q={_ssl_fmt_list(q)}',
+            f'height={_ssl_fmt_num(wall["height"])}',
+        ]
+        wall_caption = wall.get("caption")
+        if wall_caption:
+            parts.append(f'caption="{wall_caption}"')
+        lines.append(f'Wall({", ".join(parts)})')
 
     for wall in context.get("walls", {}).values():
         for door in wall.get("doors", {}).values():
@@ -2162,6 +2216,9 @@ def format_standard_ssl(context: Dict[str, Any]) -> str:
                 f'width={_ssl_fmt_num(door["width"])}',
                 f'height={_ssl_fmt_num(door["height"])}',
             ]
+            caption = door.get("caption")
+            if caption:
+                parts.append(f'caption="{caption}"')
             wall_label = door.get("wall")
             if wall_label:
                 parts.append(f'wall="{wall_label}"')
@@ -2177,6 +2234,9 @@ def format_standard_ssl(context: Dict[str, Any]) -> str:
                 f'width={_ssl_fmt_num(window["width"])}',
                 f'height={_ssl_fmt_num(window["height"])}',
             ]
+            caption = window.get("caption")
+            if caption:
+                parts.append(f'caption="{caption}"')
             wall_label = window.get("wall")
             if wall_label:
                 parts.append(f'wall="{wall_label}"')
@@ -2192,6 +2252,9 @@ def format_standard_ssl(context: Dict[str, Any]) -> str:
             f'angle_z={_ssl_fmt_num(box["angle_z"])}',
             f'scale={_ssl_fmt_list(box["scale"])}',
         ]
+        caption = box.get("caption")
+        if caption:
+            parts.append(f'caption="{caption}"')
         if box.get("asset_id") is not None:
             parts.append(f'asset_id="{box["asset_id"]}"')
         lines.append(f'Bbox({", ".join(parts)})')
