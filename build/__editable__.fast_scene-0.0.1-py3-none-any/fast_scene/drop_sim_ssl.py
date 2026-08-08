@@ -1,1 +1,0 @@
-/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/drop_sim_ssl.py
