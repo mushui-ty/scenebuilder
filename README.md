@@ -1,6 +1,6 @@
 # Fast Scene 场景渲染工具库
 
-从 SSL / JSON 描述（墙体、门窗、家具）构建 3D 场景，支持 **Blender (bpy)** 与 **Pyrender** 双后端渲染、多视角导出、语义图、深度图、路径规划, 全景图, 点云, mesh 导出
+从 SSL / JSON 描述（墙体、门窗、家具）构建 3D 场景，支持 **Blender (bpy)** 与 **Pyrender** 双后端渲染、多视角导出、语义图、深度图、路径规划、全景图、点云、可见体素、mesh 导出
 
 ## 目录
 
@@ -13,7 +13,7 @@
 | **§4** | API 参考（含 `normalized_topdown_view` / `render_normalized_topdown`） |
 | **§5** | 高级工作流（自动视角、像素对齐、地板路径）                                             |
 | **§6** | 输出目录与坐标系（c2w、ssl_opencv）                                          |
-| **§7** | 导出产物详解（可见几何、PLY、语义、深度）                                            |
+| **§7** | 导出产物详解（可见几何、PLY、体素、语义、深度）                                            |
 | **§8** | 配置与后端对比                                                           |
 | **§9** | 资产处理（`get_mesh`）                                                  |
 | **附录** | 更多示例、实现备忘                                                         |
@@ -247,7 +247,7 @@ python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/re
   --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Office/325148303_0/out2 \
   --glb \
   --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified \
-  --ply --visible_geometry --semantic --depth --pano
+  --ply --visible_geometry --voxel --semantic --depth --pano
 ```
 
 等价 Python 调用：
@@ -265,6 +265,7 @@ y_dir, standard_ssl, floor_result = render_ssl(
     asset_dir="/data-nas/data/dataset/qunhe/Manycore-Future/simplified",
     export_glb=True,
     export_point_cloud=True,
+    export_voxel=True,
     visible_geometry=True,
     semantic=True,
     depth=True,
@@ -368,7 +369,8 @@ ctx.topdown_view(
     export_glb: bool = False,
     glb_path: Optional[str] = None,
     export_point_cloud: bool = False,
-    visible_geometry: bool = False,# 需配合 export_glb 或 export_point_cloud
+    export_voxel: bool = False,
+    visible_geometry: bool = False,# 需配合 export_glb / export_point_cloud / export_voxel
     render_semantic: bool = False, # {basename}_semantic.png/json + bbox_2d
 )
 ```
@@ -382,7 +384,7 @@ ctx.topdown_view(
 | `auto_fov` / `manual_fov`           | 相机在场景正上方，FOV 决定可见范围                                                                   |
 | `render_depth`                      | bpy：Cycles 同 pass 输出深度；`camera_para.json` 含 `depth_scale`                             |
 | `render_semantic`                   | 语义图 + JSON + bbox_2d 叠加图（见 §7.3）                                                      |
-| `export_glb` / `export_point_cloud` | 在视角目录或指定路径导出几何；`visible_geometry=True` 时只导出当前视锥可见部分                                   |
+| `export_glb` / `export_point_cloud` / `export_voxel` | 几何类型开关；`visible_geometry=True` 时导出**当前视角**视锥内部分；根目录全场景须 `render_ssl(..., holo_geometry=True)` |
 | `rebuild`                           | 首次调用或场景变更后建议 `True`                                                                   |
 
 
@@ -405,8 +407,9 @@ ctx.topdown_view(
 | `rebuild`                           | `False`     | 场景变更后建议 `True`                       |
 | `render_depth`                      | `False`     | `{basename}_depth.png` + normal（bpy） |
 | `render_semantic`                   | `False`     | 语义图（§7.3）                            |
-| `export_glb` / `export_point_cloud` | `False`     | 需 `visible_geometry=True` 时导出视锥内几何   |
-| `visible_geometry`                  | `False`     | 可见 GLB/PLY（§7.1）                     |
+| `export_glb` / `export_point_cloud` / `export_voxel` | `False`     | 几何类型开关；各视角须 `visible_geometry=True`，根目录须 `holo_geometry=True` |
+| `visible_geometry`                  | `False`     | 各视角可见 GLB/PLY/体素（§7.1 / §7.5）                     |
+| `holo_geometry`                     | `False`     | 根目录全场景 GLB/点云/体素（§7.1.1）                         |
 
 
 
@@ -434,7 +437,7 @@ ctx.render_view(
     lighting_type: Literal["area", "array", "none"] = "array",
     align_height: bool = True,
     rebuild: bool = False,
-    export_glb / glb_path / export_point_cloud / visible_geometry: 同 topdown_view,
+    export_glb / glb_path / export_point_cloud / export_voxel / visible_geometry: 同 topdown_view,
     render_semantic: bool = False,
     pano: bool = False,             # 额外输出兄弟目录 {basename}_pano/
     pano_resolution: int = 4096,     # 全景宽；高 = 宽/2
@@ -493,7 +496,9 @@ def render_ssl(
     views: ViewsSpec = None,            # None=不渲染；list=指定视角；"auto"=路径驱动
     export_glb: bool = False,
     export_point_cloud: bool = False,
+    export_voxel: bool = False,
     visible_geometry: bool = False,
+    holo_geometry: bool = False,
     semantic: bool = False,
     depth: bool = False,
     pano: bool = False,
@@ -504,6 +509,7 @@ def render_ssl(
     normalized_topdown_width: int = 1000,
     normalized_topdown_height: int = 1000,
     normalized_topdown_show_ceiling: bool = False,
+    resume: bool = True,               # 断点续跑；CLI 用 --no-resume 关闭
 ) -> Tuple[str, str, Optional[dict]]
 ```
 
@@ -518,9 +524,11 @@ def render_ssl(
 | `--backend bpy         | pyrender`                 | `backend`                            |
 | `--assets DIR`         | `asset_dir`               | 省略时尝试 ssl 旁 `assets/` 等              |
 | `--texture DIR`        | `texture_dir`             | 含 `floor/wall/ceiling_texture.png`   |
-| `--glb`                | `export_glb=True`         | 根目录 `scene.glb`（全场景）                 |
-| `--ply`                | `export_point_cloud=True` | 根目录 `pointcloud/` + 各视角平面顶点          |
-| `--visible_geometry`   | `visible_geometry=True`   | 各视角视锥裁剪 GLB/PLY（需 `--glb` 或 `--ply`） |
+| `--glb`                | `export_glb=True`         | 几何开关（须配合 `--visible_geometry` 或 `--holo_geometry`） |
+| `--ply`                | `export_point_cloud=True` | 几何开关 + 各视角 `planar_faces`（后者与 `--visible_geometry` 无关） |
+| `--visible_geometry`   | `visible_geometry=True`   | **各视角**视锥内 GLB/PLY/体素（需 `--glb` / `--ply` / `--voxel` 至少其一） |
+| `--holo_geometry`      | `holo_geometry=True`      | **根目录**全场景 GLB/点云/体素（需 `--glb` / `--ply` / `--voxel` 至少其一） |
+| `--voxel`              | `export_voxel=True`       | 256³ 彩色占用场：各视角需 `--visible_geometry`，根目录需 `--holo_geometry` |
 | `--semantic`           | `semantic=True`           | 各视角语义图 + JSON + bbox_2d              |
 | `--depth`              | `depth=True`              | 各视角 depth + normal（bpy）              |
 | `--pano`               | `pano=True`               | 各 `render_view` 视角额外全景（topdown 跳过）   |
@@ -528,6 +536,7 @@ def render_ssl(
 | `--normalized_topdown` | `normalized_topdown=True` | 输出 Y=`{output}_normalized`           |
 | `--no_floor_path`      | `floor_path=False`        | 跳过 `topdown_normalized/` 路径采样        |
 | `--samples N`          | `samples`                 | Blender 采样数                          |
+| `--no-resume`          | `resume=False`            | 禁用断点续跑，强制重渲染已完成视角                 |
 
 
 **预设视角名**（`views` 列表元素）：`topdown`, `front`, `behind`, `left`, `right`, `leftfront`, `rightfront`, `leftbehind`, `rightbehind`, `left_seq`。相机位置由场景 `meta` 自动推算（与 §3.2 类似规则），`look_at` 为 `[center_x, center_y, z_max/2]`。
@@ -535,26 +544,28 @@ def render_ssl(
 
 | 参数                                  | 说明                                                                             |
 | ----------------------------------- | ------------------------------------------------------------------------------ |
-| `views=None`                        | 只写 `data.json` / 可选 GLB·点云，**不渲染任何视角**                                         |
+| `views=None`                        | 只写 `data.json` / 可选全场景几何（需 `holo_geometry`），**不渲染任何视角**                                         |
 | `views="auto"`                      | 强制 `normalized_topdown=True` + `floor_path=True`；渲染 `topdown` + 路径自动生成视角       |
 | `normalized_topdown`                | 唯一输出根 `Y={output_root}_normalized`；先 pixel-align SSL，再 `Y/topdown_normalized/` |
-| `export_glb` / `export_point_cloud` | 全场景导出在 Y 根目录；与视角无关                                                             |
-| `visible_geometry`                  | 每个视角子目录内额外导出**该视角可见**几何 + `*_opencv` 副本                                        |
+| `export_glb` / `export_point_cloud` / `export_voxel` | 几何类型开关；**不单独写盘**，须配合 `visible_geometry`（各视角）或 `holo_geometry`（根目录） |
+| `visible_geometry`                  | 各视角视锥内 GLB/PLY/体素（§7.1 / §7.5）                     |
+| `holo_geometry`                     | 根目录全场景 GLB/点云/体素（§7.1.1）                           |
 | `semantic` / `depth`                | 映射到各视角 `topdown_view` / `render_view` 的 `render_semantic` / `render_depth`     |
 | `asset_mode`                        | `"none"` 仅用 SSL 已有 `asset_id`；`retrieve`/`generate` 需配合 `image` 等              |
 | `gen_texture`                       | 无外部贴图时内部生成 floor/wall/ceiling 纹理                                               |
 
 
-**bpy + depth 行为：** 每个视角在独立子进程（`worker_render_view`）渲染，避免 Cycles 内存泄漏；GLB/点云由 `worker_render_post` 统一导出。
+**bpy + depth 行为：** 每个视角在独立子进程（`worker_render_view`）渲染，避免 Cycles 内存泄漏；根目录全场景几何由 `worker_render_post` 导出（仅 `--holo_geometry` 时）。
 
 **返回值：** `(y_dir, standard_ssl_text, floor_result)`。`floor_result` 在 `normalized_topdown` 且 `floor_path=True` 时含 `path_points_ssl` 等。
 
 
 | 导出开关                 | 说明                                |
 | -------------------- | --------------------------------- |
-| `export_glb`         | 根目录 `scene.glb`（全场景）              |
-| `export_point_cloud` | 根目录 `pointcloud/` + 各视角平面顶点（§7.2） |
-| `visible_geometry`   | 各视角视锥裁剪 GLB/PLY（§7.1）             |
+| `export_glb` / `export_point_cloud` / `export_voxel` | 几何类型开关；须配合 `visible_geometry` 或 `holo_geometry` |
+| `visible_geometry`   | 各视角视锥裁剪 GLB/PLY/体素（§7.1）             |
+| `holo_geometry`      | 根目录全场景 GLB/点云/体素（§7.1.1，`worker_render_post`） |
+| `export_point_cloud` | 另：各视角 `planar_faces`（§7.2，与 `visible_geometry` 无关） |
 | `semantic` / `depth` | §7.3 / §7.4                       |
 
 
@@ -657,7 +668,7 @@ ctx.normalized_topdown_view(
 ```bash
 python fast_scene/render_ssl.py --ssl scene.txt \
   --views auto --output out \
-  --glb --ply --visible_geometry --semantic --depth --pano \
+  --glb --ply --visible_geometry --voxel --semantic --depth --pano \
   --assets path/to/assets
 # → Y = out_normalized/
 ```
@@ -678,7 +689,10 @@ python fast_scene/render_ssl.py --ssl scene.txt \
 
 **类型 A — 单帧（多次** `render_view`**）**
 
-- 从路径点索引 `0, 4, 8, …` 每隔 4 点采样（stride=4）
+- 路径点采样（`sample_path_indices`）：
+  - **n < 40**：索引 `0, 4, 8, …`（stride=4）
+  - **40 ≤ n ≤ 100**：在闭环上**均匀取 15 个**路点（如 n=100 约每隔 7 点）
+  - **n > 100**：**均匀取 20 个**路点
 - 相机位置：`(x, y, z)`，`x,y` 为路点；`z ∈ [0.5, 2.5]` 随机，且 `<` 墙高最大值
 - `world_up = (0, 0, 1)`；初始 `look_at` = 场景 3D bbox 中心
 - 俯仰：在射线 AB 上调整，随机 **−40° ~ 5°**
@@ -710,10 +724,11 @@ auto 模式下 Step 3 的 `**topdown/**`、`**auto_path_***`、`**auto_path_*_se
 | `--pano`                       | ✅              | ✅ 每帧    | ❌                 |
 | `--glb` + `--visible_geometry` | ✅              | ✅ 多帧并集  | ✅                 |
 | `--ply` + `--visible_geometry` | ✅              | ✅ 多帧并集  | ✅                 |
+| `--voxel` + `--visible_geometry` | ✅            | ✅ 多帧并集  | ✅                 |
 | `--ply`（无 visible_geometry）    | ✅ planar_faces | ✅ 每帧    | ✅                 |
 
 
-根目录 `**scene.glb` / `pointcloud/scene_all.ply**` 仍由 `worker_render_post` 导出（全场景）。
+根目录 `**scene.glb` / `pointcloud/scene_all.ply` / `voxel/**` 由 `worker_render_post` 导出（全场景，需 `--holo_geometry`）。
 
 #### 输出示例
 
@@ -824,14 +839,15 @@ nav_mask = (depth_mask \ structure_mask) ∪ floor_mask
 1. 确定 Y = `{output}_normalized`，写入规范化 `ssl.txt` + `data.json`
 2. `Y/topdown_normalized/`：1000² 像素对齐俯视图 + 地板路径（自动）
 3. `Y/topdown/`、`Y/{时间戳}/`、`Y/{时间戳}_seq/` …：按 `--views` 或 `auto` 渲染
-4. `Y/scene.glb`、`Y/pointcloud/`：全场景导出
+4. `Y/scene.glb`、`Y/pointcloud/`、`Y/voxel/`：全场景导出（需 `--holo_geometry`）
 
 ```
 Y/                                    # {output} 或 {output}_normalized
 ├── ssl.txt
 ├── data.json
-├── scene.glb                         # [--glb]
-├── pointcloud/                       # [--ply]
+├── scene.glb                         # [--holo_geometry + --glb]
+├── pointcloud/                       # [--holo_geometry + --ply]
+├── voxel/                            # [--holo_geometry + --voxel]
 ├── topdown_normalized/               # [--normalized_topdown] 像素对齐 + 路径规划
 │   ├── topdown.png                   # 1000×1000
 │   ├── camera_para.json              # 图像坐标 + pixel2real_ratio
@@ -849,8 +865,20 @@ Y/                                    # {output} 或 {output}_normalized
 │   ├── topdown_depth.png             # [--depth]
 │   ├── topdown_semantic.*            # [--semantic]
 │   ├── planar_faces.json             # [--ply]
-│   └── pointcloud/                   # [--visible_geometry + --ply]
+│   ├── pointcloud/                   # [--visible_geometry + --ply]
+│   └── voxel/                        # [--visible_geometry + --voxel]
 └── {毫秒时间戳}/                      # 单相机视角
+    ├── …
+    ├── scene_visible.glb             # [--visible_geometry + --glb]
+    ├── pointcloud/                   # [--visible_geometry + --ply]
+    ├── voxel/                        # [--visible_geometry + --voxel]
+    │   ├── occupancy_world.npz
+    │   ├── occupancy_world_meta.json
+    │   ├── occupancy_world_preview.ply
+    │   ├── occupancy_opencv.npz
+    │   ├── occupancy_opencv_meta.json
+    │   ├── occupancy_opencv_preview.ply
+    │   └── metadata_voxel.json
     └── …
 ```
 
@@ -873,12 +901,12 @@ python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
 
 ### 6.2 几何导出坐标系（世界 SSL 与 OpenCV）
 
-各视角在世界（或规范化）SSL 下 construct / 渲染。开启 `--glb` / `--ply` 且 `--visible_geometry` 时，**每个视角目录**下的可见 GLB/PLY **主文件为世界 SSL**；同时写出 `*_opencv.ply` / `*_opencv.glb`（OpenCV 相机系，见 `core/geometry_opencv.py`）。
+各视角在世界（或规范化）SSL 下 construct / 渲染。开启 `--visible_geometry` 且 `--glb` / `--ply` / `--voxel` 时，**每个视角目录**下的可见 GLB/PLY/体素 **主文件为世界 SSL**（体素为 `occupancy_world.npz`）；同时写出 `*_opencv.*` 副本（OpenCV 相机系，见 `core/geometry_opencv.py`）。根目录全场景几何（`scene.glb`、`pointcloud/scene_all.ply`、`voxel/`）须 `--holo_geometry`，不做视锥裁剪。
 
 
 | 坐标系            | 适用文件                                                                                                                                                                 | 原点与轴向                                   |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| **世界 SSL**     | 根目录 `ssl.txt`、`data.json`；`worker_render_post` 的 `scene.glb`、`pointcloud/scene_all.ply`；`{视角}/pointcloud/*.ply`（无 `_opencv`）、`scene_visible.ply`、`scene_visible.glb` | 与 §2 一致：+X 右、+Y 上、+Z 高                  |
+| **世界 SSL**     | 根目录 `ssl.txt`、`data.json`；`worker_render_post`（`--holo_geometry`）的 `scene.glb`、`pointcloud/scene_all.ply`、`voxel/occupancy_world.npz`；`{视角}/pointcloud/*.ply`（无 `_opencv`）、`scene_visible.ply`、`scene_visible.glb` | 与 §2 一致：+X 右、+Y 上、+Z 高                  |
 | **OpenCV 相机系** | 上述每个几何文件的 `*_opencv.ply` / `*_opencv.glb`                                                                                                                            | 原点：相机光心；+X：图像右；+Y：图像下；+Z：沿视线向场景深处（深度为正） |
 
 
@@ -1217,14 +1245,17 @@ Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.42, -0.15, 0.02], s
 
 | 路径                             | 坐标系              | 内容                                  |
 | ------------------------------ | ---------------- | ----------------------------------- |
-| `output_root/pointcloud/`      | 世界 SSL           | 场景内**所有**物体（post 阶段，与视角无关）          |
-| `{视角}/pointcloud/*.ply`        | 世界 SSL           | 该视角**可见**物体（需 `--visible_geometry`） |
+| `output_root/pointcloud/`      | 世界 SSL           | 场景内**所有**物体（`--holo_geometry --ply`，post 阶段）          |
+| `{视角}/pointcloud/*.ply`        | 世界 SSL           | 该视角**可见**物体（需 `--visible_geometry --ply`） |
 | `{视角}/pointcloud/*_opencv.ply` | OpenCV（该视角/首帧相机） | 与上一行相同几何，换到 OpenCV 相机系              |
+| `output_root/voxel/`           | 世界 SSL           | 全场景 256³ 占用场（`--holo_geometry --voxel`） |
+| `{视角}/voxel/occupancy_*.npz`   | 世界 SSL / OpenCV 相机系 | 该视角可见 256³ 占用场（`--visible_geometry --voxel`） |
 | `{视角}/planar_faces.json`       | 世界 SSL（3D 顶点）    | 墙/门/窗/地板/天花内表面（需 `--ply`）           |
 
 
 **命名与 context 规范（**`ssl.txt`**、context 键、点云文件名一致）：**
 
+- 地板 / 天花：`floor/floor.ply`、`ceiling/ceiling.ply`（可见几何时为 `floor/floor_visible.ply`、`floor/floor_visible_cutted.ply` 等，规则同墙/家具）
 - 墙：`wall0`, `wall1`, … → `walls/wall0.ply`（无 `asset_id`）
 - 门/窗：`door0`, `window0`, … → `doors/door0_{asset_id}.ply`；若 `asset_id` 在资产目录不存在则**保留空洞**、去掉 `asset_id`，文件名与 SSL 均不含 `asset_id`
 - 家具：`sidetable0`, `armchair0`, … → `boxes/sidetable0_{asset_id}.ply`；若 `asset_id` 不存在则**删除该 bbox**
@@ -1251,6 +1282,9 @@ Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.42, -0.15, 0.02], s
 示例：
 
 ```
+floor/floor_visible_cutted.ply       # 地板被视锥裁切
+floor/floor_visible_cutted_opencv.ply
+ceiling/ceiling_visible.ply          # 天花可见时（如相机朝上）
 walls/wall0_visible.ply          # 整面墙基本都在画面内
 walls/wall2_visible_cutted.ply   # 墙的一部分在画面外，被视锥切掉
 walls/wall2_visible_cutted_opencv.ply  # 同上，OpenCV 坐标副本
@@ -1270,7 +1304,9 @@ walls/wall2_visible_cutted_opencv.ply  # 同上，OpenCV 坐标副本
 
 ### 7.1 可见几何 (`visible_geometry`)
 
-开启 `--visible_geometry` 且同时开启 `--glb` 或 `--ply` 时，每个视角目录下导出 `scene_visible.glb` / `pointcloud/`；每个几何文件另有 `_opencv` 副本（见 §6.2）。
+开启 `--visible_geometry` 且同时开启 `--glb`、`--ply` 或 `--voxel` 之一时，每个视角目录下导出可见 GLB / 点云 / 体素；几何文件另有 `_opencv` 副本（见 §6.2）。体素详见 **§7.5**。
+
+**注意：** 体素**不是**从 GLB 读回，而是与 GLB 共用同一套内存中的可见三角形；`--voxel` 可单独使用（不必 `--glb`）。
 
 ### 处理流程（按顺序）
 
@@ -1296,7 +1332,30 @@ floor、ceiling、walls、doors、windows、boxes 均参与可见性判定与视
 
 ---
 
+### 7.1.1 全场景几何 (`holo_geometry`)
 
+开启 `--holo_geometry` 且同时开启 `--glb`、`--ply` 或 `--voxel` 之一时，在输出根目录 `Y/` 导出**完整场景**几何（不做遮挡/视锥裁剪），由 `worker_render_post` 在全部视角渲染完成后统一写出：
+
+| 开关组合 | 根目录产物 |
+| -------- | ---------- |
+| `--holo_geometry --glb` | `scene.glb` |
+| `--holo_geometry --ply` | `pointcloud/scene_all.ply` + 分物体 PLY |
+| `--holo_geometry --voxel` | `voxel/occupancy_world.npz` 等（仅世界 SSL，无 OpenCV 副本） |
+
+与 `--visible_geometry` **独立**：可只开其一，也可同时开启（各视角可见 + 根目录全场景）。
+
+```bash
+# 仅各视角可见几何
+--glb --ply --visible_geometry --voxel
+
+# 仅根目录全场景
+--glb --ply --holo_geometry --voxel
+
+# 两者都要
+--glb --ply --visible_geometry --holo_geometry --voxel
+```
+
+---
 
 ### 7.2 平面内表面顶点 (`export_point_cloud` / `--ply`)
 
@@ -1453,7 +1512,7 @@ floor、ceiling、walls、doors、windows、boxes 均参与可见性判定与视
 | `label`     | 规范化实体名，与 SSL `label` 一致                                                                          |
 | `color`     | 该实体在 `*_semantic.png` 中的 RGB，用于反查 mask                                                           |
 | `pixel_num` | 当前视角语义 mask 的像素个数。默认按 JSON `color` **精确 RGB 匹配**（配合语义渲染关闭抗锯齿）；`max_dist_sq>0` 时可回退带阈值最近邻以兼容旧图    |
-| `bbox_2d`   | `[x1, y1, x2, y2]`，左上角为 `(0,0)`；由该实体 mask 的**最大连通域**外接矩形得到；**仅当** `pixel_num > 0` **时存在**，否则字段缺省 |
+| `bbox_2d`   | `[x1, y1, x2, y2]`，左上角为 `(0,0)`；由该实体 mask **全部前景像素**（含多个连通域）的外接矩形得到；**仅当** `pixel_num > 0` **时存在**，否则字段缺省 |
 
 
 说明：
@@ -1749,6 +1808,98 @@ normal_cam_valid[~valid] = np.nan
 
 ---
 
+### 7.5 体素 (`export_voxel` / `--voxel`)
+
+体素有两条路径，共用 256³ 彩色占用场格式（详见下文），但数据源不同：
+
+| 路径 | 触发条件 | 输出目录 | 数据源 |
+| ---- | -------- | -------- | ------ |
+| **各视角可见** | `--visible_geometry --voxel` | `{view}/voxel/` | 可见 + 视锥裁剪后的三角形；含 `occupancy_opencv.npz` |
+| **根目录全场景** | `--holo_geometry --voxel` | `Y/voxel/` | 完整场景三角形；仅 `occupancy_world.npz` |
+
+各视角体素**不是**从 GLB 读回，而与 `scene_visible.glb` 共用同一套内存中的可见三角形。根目录体素与 `scene.glb` 同级，由 `worker_render_post` 导出。
+
+#### 各视角可见体素（触发条件）
+
+```text
+--visible_geometry 且 --voxel
+```
+
+可只开体素：`--visible_geometry --voxel`（不必 `--glb` / `--ply`）。
+
+#### 根目录全场景体素（触发条件）
+
+```text
+--holo_geometry 且 --voxel
+```
+
+#### 输出文件
+
+
+| 文件 | 说明 |
+| ---- | ---- |
+| `occupancy_world.npz` | 世界 SSL 系：`occupancy` uint8 `[256,256,256]` + `rgb` uint8 `[256,256,256,3]` |
+| `occupancy_world_meta.json` | 网格几何与索引约定（见下） |
+| `occupancy_world_preview.ply` | 占用格中心彩色点云，便于 MeshLab / CloudCompare / Blender 预览 |
+| `occupancy_opencv.npz` | OpenCV 相机系占用场（同上结构） |
+| `occupancy_opencv_meta.json` | 相机系 meta（含变换后的 `world_up`） |
+| `occupancy_opencv_preview.ply` | 相机系预览点云 |
+| `metadata_voxel.json` | 汇总索引 |
+
+
+#### 网格定义
+
+- **分辨率**：固定 `256³`
+- **立方体跨度**：`span = max(x_extent, y_extent, z_extent)`（该坐标系下可见几何 AABB 最长轴）
+- **格子边长**：`voxel_size = span / 256`
+- **中心**：AABB 几何中心；meta 同时给出 `corner_min`
+- **索引 → 3D 点**（体素中心）：
+
+```text
+p(i,j,k) = corner_min + (i + 0.5, j + 0.5, k + 0.5) * voxel_size    # i,j,k ∈ [0,255]
+```
+
+- **每格数据**：`occupancy` 0=空 / 1=占用；占用格 `rgb` 来自三角形材质/贴图采样色；空格 RGB 可忽略
+
+#### meta 主要字段
+
+`format`, `version`, `coordinate_space`, `center`, `voxel_size`, `span`, `corner_min`, `world_up`, `world_up_space`, `index_origin`, `index_to_point`, `occupied_count`, `voxelization`
+
+#### 读取示例
+
+```python
+import json
+import numpy as np
+
+data = np.load("voxel/occupancy_world.npz")
+occ = data["occupancy"]   # (256, 256, 256)
+rgb = data["rgb"]         # (256, 256, 256, 3)
+
+with open("voxel/occupancy_world_meta.json") as f:
+    meta = json.load(f)
+
+corner = np.array(meta["corner_min"])
+vs = meta["voxel_size"]
+i, j, k = 100, 200, 50
+if occ[i, j, k]:
+    center = corner + (np.array([i, j, k]) + 0.5) * vs
+    color = rgb[i, j, k]
+```
+
+#### 可视化
+
+| 方式 | 说明 |
+| ---- | ---- |
+| `*_preview.ply` | 导出时自动生成，直接打开即可 |
+| Python | `np.load` + Open3D / matplotlib 3D scatter |
+| 体素方块 | 按 meta 在 Blender 中实例化 unit cube |
+
+**体积提示**：单套 npz 未压缩约 **50–65 MB**（256³ dense）；世界 + 相机两套约翻倍。默认 **不 gzip 压缩**（meta 里 `compressed: false`），避免每视角额外等待；仍会导出 `*_preview.ply`。
+
+**耗时提示**（`--voxel` 每视角额外）：体素化约 5–30s + 写盘约 3–10s；日志会打印 `体素化 Xs, 写盘 Ys`。
+
+---
+
 
 
 ## 8. 配置与后端
@@ -1768,6 +1919,7 @@ normal_cam_valid[~valid] = np.nan
 | 转角处理     | 简单重叠                  | 斜接修正 (Miter Joint)                   |
 | 遮挡处理     | 简单裁切                  | 智能半透明材质                              |
 | 可见几何     | 支持（手动 FOV 平面）         | 支持（`calc_matrix_camera` 对齐渲染）        |
+| 可见体素     | -                     | 支持（256³ 彩色占用场，`--voxel`）              |
 | 平面内表面顶点  | -                     | 支持（`--ply` 自动导出 JSON + 连线图）          |
 | 语义图      | 支持                    | 支持（proxy + Raw）                      |
 | 深度图      | Pyrender 深度缓冲         | Cycles Z pass + ray_cast 回退          |
@@ -1832,7 +1984,7 @@ python build_lancedb.py
 ```bash
 # 全量 benchmark（同 §3.3）
 python fast_scene/render_ssl.py --ssl path/to/ssl.txt --views auto --output out \
-  --glb --assets path/to/assets --ply --visible_geometry --semantic --depth --pano
+  --glb --assets path/to/assets --ply --visible_geometry --voxel --semantic --depth --pano
 
 # 仅像素对齐 + 地板路径（§5.2）
 python fast_scene/render_ssl.py --ssl path/to/ssl.txt \

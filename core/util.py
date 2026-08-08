@@ -2675,18 +2675,6 @@ def bbox_2d_from_binary_mask(mask: np.ndarray) -> Optional[List[int]]:
     return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
 
 
-def _largest_connected_component_mask(mask: np.ndarray) -> np.ndarray:
-    """保留 mask 中最大连通域；无前景则返回原 mask。"""
-    from scipy import ndimage
-
-    labeled, n = ndimage.label(mask)
-    if n <= 1:
-        return mask
-    counts = np.bincount(labeled.ravel())
-    counts[0] = 0
-    return labeled == int(np.argmax(counts))
-
-
 # 语义图以无抗锯齿方式渲染，索引使用精确 RGB 匹配（不再依赖最近邻）。
 SEMANTIC_COLOR_MAX_DIST_SQ = 0  # 保留常量名兼容；0 表示仅精确匹配
 
@@ -2701,7 +2689,7 @@ def attach_semantic_bbox_2d(
 
     默认精确匹配 JSON 中的 color（需配合语义渲染关闭抗锯齿）。
     max_dist_sq>0 时回退为带阈值最近邻（兼容旧语义图）。
-    bbox_2d 取最大连通域外接矩形；pixel_num==0 时不写 bbox_2d。
+    bbox_2d 取该实体全部 mask 像素（含多个连通域）的外接矩形；pixel_num==0 时不写 bbox_2d。
     """
     for obj in objects:
         obj["pixel_num"] = 0
@@ -2731,7 +2719,7 @@ def attach_semantic_bbox_2d(
             obj["pixel_num"] = pixel_num
             if pixel_num == 0:
                 continue
-            bbox = bbox_2d_from_binary_mask(_largest_connected_component_mask(mask))
+            bbox = bbox_2d_from_binary_mask(mask)
             if bbox is not None:
                 obj["bbox_2d"] = bbox
         return
@@ -2752,7 +2740,7 @@ def attach_semantic_bbox_2d(
         obj["pixel_num"] = pixel_num
         if pixel_num == 0:
             continue
-        bbox = bbox_2d_from_binary_mask(_largest_connected_component_mask(mask))
+        bbox = bbox_2d_from_binary_mask(mask)
         if bbox is not None:
             obj["bbox_2d"] = bbox
 

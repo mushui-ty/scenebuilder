@@ -366,6 +366,8 @@ def export_glb_opencv_copy(src_path: str, camera_pose: CameraPose) -> Optional[s
         loaded = scene
     else:
         raise RuntimeError(f"无法识别的 GLB 类型: {type(loaded)}")
+
+    os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
     loaded.export(dst_path)
     print(f"✅ OpenCV GLB 副本: {dst_path}")
     return dst_path

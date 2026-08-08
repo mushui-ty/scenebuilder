@@ -861,11 +861,13 @@ class SceneCtx:
 
         floor_info = self.mesh_nodes.get("floor")
         if floor_info:
-            export_one("floor", "floor", floor_info.get("mesh"), "floor.ply", default_samples)
+            os.makedirs(os.path.join(output_dir, "floor"), exist_ok=True)
+            export_one("floor", "floor", floor_info.get("mesh"), "floor/floor.ply", default_samples)
 
         ceiling_info = self.mesh_nodes.get("ceiling")
         if ceiling_info:
-            export_one("ceiling", "ceiling", ceiling_info.get("mesh"), "ceiling.ply", default_samples)
+            os.makedirs(os.path.join(output_dir, "ceiling"), exist_ok=True)
+            export_one("ceiling", "ceiling", ceiling_info.get("mesh"), "ceiling/ceiling.ply", default_samples)
 
         for category in ["walls", "doors", "windows", "boxes"]:
             os.makedirs(os.path.join(output_dir, category), exist_ok=True)
@@ -1098,13 +1100,15 @@ class SceneCtx:
         return planes
 
     def _iter_trimesh_nodes(self, visible_suffix: bool = False):
-        suffix = "_visible" if visible_suffix else ""
+        suffixes = ["visible"] if visible_suffix else []
         floor_info = self.mesh_nodes.get("floor")
         if floor_info:
-            yield "floor", "floor", floor_info.get("mesh"), f"floor{suffix}.ply"
+            filename = util_data.build_pointcloud_ply_relpath("floor", "floor", None, suffixes)
+            yield "floor", "floor", floor_info.get("mesh"), filename
         ceiling_info = self.mesh_nodes.get("ceiling")
         if ceiling_info:
-            yield "ceiling", "ceiling", ceiling_info.get("mesh"), f"ceiling{suffix}.ply"
+            filename = util_data.build_pointcloud_ply_relpath("ceiling", "ceiling", None, suffixes)
+            yield "ceiling", "ceiling", ceiling_info.get("mesh"), filename
         for category in ["walls", "doors", "windows", "boxes"]:
             for object_id, info in self.mesh_nodes[category].items():
                 label, asset_id = self._object_export_identity(category, object_id)

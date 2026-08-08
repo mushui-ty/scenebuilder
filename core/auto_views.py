@@ -15,7 +15,49 @@ import numpy as np
 AUTO_VIEW_WIDTH = 1000
 AUTO_VIEW_HEIGHT = 1000
 PATH_SAMPLE_STRIDE = 4
+PATH_SAMPLE_MID_MIN = 40
+PATH_SAMPLE_MID_MAX = 100
+PATH_SAMPLE_TARGET_MID = 15
+PATH_SAMPLE_TARGET_LARGE = 20
 WORLD_UP = (0.0, 0.0, 1.0)
+
+
+def _evenly_spaced_indices(n_points: int, target_count: int) -> List[int]:
+    """在 [0, n_points-1] 上均匀取 target_count 个索引（含首点，尽量含尾点）。"""
+    if n_points <= 0:
+        return []
+    target_count = max(1, int(target_count))
+    if target_count >= n_points:
+        return list(range(n_points))
+    if target_count == 1:
+        return [0]
+    indices = [
+        int(round(i * (n_points - 1) / (target_count - 1)))
+        for i in range(target_count)
+    ]
+    deduped: List[int] = []
+    seen = set()
+    for idx in indices:
+        if idx not in seen:
+            seen.add(idx)
+            deduped.append(idx)
+    return deduped
+
+
+def sample_path_indices(n_points: int, stride: int = PATH_SAMPLE_STRIDE) -> List[int]:
+    """从闭环路径点采样索引（含 0）。
+
+    - n < 40：每隔 ``stride``（默认 4）取一个
+    - 40 <= n <= 100：均匀取 15 个
+    - n > 100：均匀取 20 个
+    """
+    if n_points <= 0:
+        return []
+    if n_points < PATH_SAMPLE_MID_MIN:
+        return list(range(0, n_points, max(1, int(stride))))
+    if n_points <= PATH_SAMPLE_MID_MAX:
+        return _evenly_spaced_indices(n_points, PATH_SAMPLE_TARGET_MID)
+    return _evenly_spaced_indices(n_points, PATH_SAMPLE_TARGET_LARGE)
 
 
 def _rotate_vector(v: np.ndarray, axis: np.ndarray, angle_rad: float) -> np.ndarray:
@@ -40,13 +82,6 @@ def scene_bbox_center(context: Dict[str, Any]) -> List[float]:
         z_top = float(center[2]) + float(scale[2]) / 2.0
         z_max = max(z_max, z_top)
     return [cx, cy, z_max / 2.0]
-
-
-def sample_path_indices(n_points: int, stride: int = PATH_SAMPLE_STRIDE) -> List[int]:
-    """从闭环路径点中按 stride 采样索引（含 0）。"""
-    if n_points <= 0:
-        return []
-    return list(range(0, n_points, max(1, int(stride))))
 
 
 def random_camera_z(

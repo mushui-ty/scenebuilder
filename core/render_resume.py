@@ -84,10 +84,9 @@ def list_primary_frames(view_dir: str) -> List[str]:
     return frames
 
 
-def _frame_artifacts_ok(
+def _rgb_depth_frame_ok(
     png_path: str,
     *,
-    semantic: bool,
     depth: bool,
 ) -> bool:
     view_dir = os.path.dirname(png_path)
@@ -97,11 +96,44 @@ def _frame_artifacts_ok(
             return False
         if not os.path.isfile(os.path.join(view_dir, f"{base}_normal.png")):
             return False
-    if semantic:
-        if not os.path.isfile(os.path.join(view_dir, f"{base}_semantic.png")):
+    return True
+
+
+def _semantic_frame_ok(png_path: str) -> bool:
+    view_dir = os.path.dirname(png_path)
+    base = os.path.splitext(os.path.basename(png_path))[0]
+    if not os.path.isfile(os.path.join(view_dir, f"{base}_semantic.png")):
+        return False
+    if not os.path.isfile(os.path.join(view_dir, f"{base}_semantic.json")):
+        return False
+    index_path = os.path.join(view_dir, "semantic_masks", "index.json")
+    if not os.path.isfile(index_path):
+        return False
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return False
+    for item in payload.get("objects", []):
+        mask_name = item.get("mask")
+        if not mask_name:
             return False
-        if not os.path.isfile(os.path.join(view_dir, f"{base}_semantic.json")):
+        mask_path = os.path.join(view_dir, "semantic_masks", mask_name)
+        if not os.path.isfile(mask_path):
             return False
+    return True
+
+
+def _frame_artifacts_ok(
+    png_path: str,
+    *,
+    semantic: bool,
+    depth: bool,
+) -> bool:
+    if not _rgb_depth_frame_ok(png_path, depth=depth):
+        return False
+    if semantic and not _semantic_frame_ok(png_path):
+        return False
     return True
 
 
@@ -119,17 +151,205 @@ def _pano_complete(
     return all(_frame_artifacts_ok(p, semantic=semantic, depth=depth) for p in frames)
 
 
-def _visible_geometry_ok(view_dir: str, *, export_glb: bool, export_point_cloud: bool) -> bool:
-    if export_glb and not os.path.isfile(os.path.join(view_dir, "scene_visible.glb")):
+def _visible_glb_ok(view_dir: str) -> bool:
+    return os.path.isfile(os.path.join(view_dir, "scene_visible.glb"))
+
+
+def _visible_ply_ok(view_dir: str) -> bool:
+    pc_dir = os.path.join(view_dir, "pointcloud")
+    if not os.path.isdir(pc_dir):
         return False
-    if export_point_cloud:
-        pc_dir = os.path.join(view_dir, "pointcloud")
-        if not os.path.isdir(pc_dir):
-            return False
-        has_ply = any(name.endswith(".ply") for name in os.listdir(pc_dir))
-        if not has_ply and not os.path.isfile(os.path.join(view_dir, "planar_faces.json")):
-            return False
+    return any(name.endswith(".ply") for name in os.listdir(pc_dir))
+
+
+def _voxel_ok(view_dir: str) -> bool:
+    return os.path.isfile(os.path.join(view_dir, "voxel", "occupancy_world_meta.json"))
+
+
+def _visibility_json_ok(view_dir: str) -> bool:
+    return os.path.isfile(os.path.join(view_dir, "visibility.json"))
+
+
+def _planar_faces_ok(view_dir: str) -> bool:
+    if os.path.isfile(os.path.join(view_dir, "planar_faces.json")):
+        return True
+    return any(n.endswith("_lines.png") for n in os.listdir(view_dir))
+
+
+def _visible_geometry_ok(
+    view_dir: str,
+    *,
+    export_glb: bool,
+    export_point_cloud: bool,
+    export_voxel: bool,
+) -> bool:
+    if export_glb and not _visible_glb_ok(view_dir):
+        return False
+    if export_voxel and not _voxel_ok(view_dir):
+        return False
+    if export_point_cloud and not _visible_ply_ok(view_dir):
+        return False
     return True
+
+
+def _visible_geometry_artifacts_ok(
+    view_dir: str,
+    *,
+    export_glb: bool,
+    export_point_cloud: bool,
+    export_voxel: bool,
+) -> bool:
+    if not _visibility_json_ok(view_dir):
+        return False
+    return _visible_geometry_ok(
+        view_dir,
+        export_glb=export_glb,
+        export_point_cloud=export_point_cloud,
+        export_voxel=export_voxel,
+    )
+
+
+def _render_frames_ok(
+    view_dir: str,
+    view_name: str,
+    *,
+    semantic: bool,
+    depth: bool,
+    n_expected: int = 1,
+) -> bool:
+    if view_name == "topdown":
+        png = os.path.join(view_dir, "topdown.png")
+        if not os.path.isfile(png) or os.path.getsize(png) <= 0:
+            return False
+        return _rgb_depth_frame_ok(png, depth=depth)
+
+    frames = list_primary_frames(view_dir)
+    if len(frames) < n_expected:
+        return False
+    return all(_rgb_depth_frame_ok(p, depth=depth) for p in frames)
+
+
+def _semantic_frames_ok(
+    view_dir: str,
+    view_name: str,
+    *,
+    n_expected: int = 1,
+) -> bool:
+    if view_name == "topdown":
+        png = os.path.join(view_dir, "topdown.png")
+        if not os.path.isfile(png):
+            return False
+        return _semantic_frame_ok(png)
+    frames = list_primary_frames(view_dir)
+    if len(frames) < n_expected:
+        return False
+    return all(_semantic_frame_ok(p) for p in frames)
+
+
+def _camera_para_ok(
+    view_dir: str,
+    view_name: str,
+    *,
+    n_expected: int = 1,
+) -> bool:
+    if view_name == "topdown":
+        return os.path.isfile(os.path.join(view_dir, "topdown_camera_para.json"))
+    return len(list_primary_frames(view_dir)) >= n_expected
+
+
+def missing_view_artifacts(
+    y_dir: str,
+    view_name: str,
+    job: Dict[str, Any],
+    *,
+    auto_spec: Optional[Dict[str, Any]] = None,
+    progress: Optional[Dict[str, Any]] = None,
+) -> set:
+    """返回该视角仍缺失的产物键：render / glb / ply / planar / voxel / ssl / pano。"""
+    missing: set = set()
+    semantic = bool(job.get("semantic"))
+    depth = bool(job.get("depth"))
+    pano = bool(job.get("pano"))
+    export_glb = bool(job.get("export_glb"))
+    export_point_cloud = bool(job.get("export_point_cloud"))
+    export_voxel = bool(job.get("export_voxel"))
+    visible_geometry = bool(job.get("visible_geometry"))
+    view_cameras = job.get("view_cameras") or {}
+
+    view_dir = view_dir_for(y_dir, view_name, progress)
+    n_expected = 1 if view_name == "topdown" else expected_frame_count(
+        view_name, view_cameras, auto_spec
+    )
+
+    if not _render_frames_ok(
+        view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
+    ):
+        missing.add("render")
+
+    if semantic and not _semantic_frames_ok(
+        view_dir, view_name, n_expected=n_expected
+    ):
+        missing.add("semantic")
+
+    if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
+        missing.add("camera_para")
+
+    if not os.path.isfile(os.path.join(view_dir, "ssl_opencv.txt")):
+        missing.add("ssl")
+
+    if visible_geometry and export_glb and not _visible_glb_ok(view_dir):
+        missing.add("glb")
+    if visible_geometry and export_point_cloud and not _visible_ply_ok(view_dir):
+        missing.add("ply")
+    if visible_geometry and (export_glb or export_point_cloud or export_voxel):
+        if not _visibility_json_ok(view_dir):
+            if export_glb:
+                missing.add("glb")
+            if export_point_cloud:
+                missing.add("ply")
+            if export_voxel:
+                missing.add("voxel")
+    if export_point_cloud and not pano and not _planar_faces_ok(view_dir):
+        missing.add("planar")
+    if visible_geometry and export_voxel and not _voxel_ok(view_dir):
+        missing.add("voxel")
+    # topdown 视角 worker 会 pop pano，从不产出 pano 目录
+    if pano and view_name != "topdown" and not _pano_complete(
+        view_dir, semantic=semantic, depth=depth
+    ):
+        missing.add("pano")
+    return missing
+
+
+def apply_partial_resume_to_kwargs(job: Dict[str, Any], missing: set) -> Dict[str, Any]:
+    """按缺失产物生成 partial render kwargs（含 skip_render 等）。"""
+    visible_geometry = bool(job.get("visible_geometry"))
+    want_glb = bool(job.get("export_glb"))
+    want_ply = bool(job.get("export_point_cloud"))
+    want_voxel = bool(job.get("export_voxel"))
+
+    export_glb = want_glb and visible_geometry and ("glb" in missing)
+    export_voxel = want_voxel and visible_geometry and ("voxel" in missing)
+    export_visible_point_cloud = (
+        want_ply and visible_geometry and ("ply" in missing)
+    )
+    export_planar_faces = want_ply and ("planar" in missing)
+
+    return {
+        "export_glb": export_glb,
+        "export_voxel": export_voxel,
+        "export_point_cloud": export_visible_point_cloud or export_planar_faces,
+        "export_visible_point_cloud": export_visible_point_cloud,
+        "export_planar_faces": export_planar_faces,
+        "visible_geometry": visible_geometry,
+        "render_semantic": (bool(job.get("semantic")) or visible_geometry) and ("semantic" in missing),
+        "render_depth": bool(job.get("depth")) and ("render" in missing),
+        "pano": bool(job.get("pano")) and ("pano" in missing),
+        "pano_resolution": int(job.get("pano_resolution", 4096)),
+        "skip_render": "render" not in missing,
+        "write_ssl": "ssl" in missing,
+        "write_camera_para": ("render" in missing) or ("camera_para" in missing),
+    }
 
 
 def view_dir_for(
@@ -155,53 +375,13 @@ def is_view_complete(
     progress: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """检测单个逻辑视角是否已按当前 job 开关完整渲染。"""
-    semantic = bool(job.get("semantic"))
-    depth = bool(job.get("depth"))
-    pano = bool(job.get("pano"))
-    export_glb = bool(job.get("export_glb"))
-    export_point_cloud = bool(job.get("export_point_cloud"))
-    visible_geometry = bool(job.get("visible_geometry"))
-    view_cameras = job.get("view_cameras") or {}
-
-    if view_name == "topdown":
-        view_dir = os.path.join(y_dir, "topdown")
-        png = os.path.join(view_dir, "topdown.png")
-        if not os.path.isfile(png) or os.path.getsize(png) <= 0:
+    if view_name != "topdown":
+        view_dir = view_dir_for(y_dir, view_name, progress)
+        if not os.path.isdir(view_dir):
             return False
-        if not os.path.isfile(os.path.join(view_dir, "topdown_camera_para.json")):
-            return False
-        if not os.path.isfile(os.path.join(view_dir, "ssl_opencv.txt")):
-            return False
-        if not _frame_artifacts_ok(png, semantic=semantic, depth=depth):
-            return False
-        if visible_geometry and (export_glb or export_point_cloud):
-            if not _visible_geometry_ok(view_dir, export_glb=export_glb, export_point_cloud=export_point_cloud):
-                return False
-        return True
-
-    view_dir = view_dir_for(y_dir, view_name, progress)
-    if not os.path.isdir(view_dir):
-        return False
-
-    n_expected = expected_frame_count(view_name, view_cameras, auto_spec)
-    frames = list_primary_frames(view_dir)
-    if len(frames) < n_expected:
-        return False
-    if not all(_frame_artifacts_ok(p, semantic=semantic, depth=depth) for p in frames):
-        return False
-    if not os.path.isfile(os.path.join(view_dir, "ssl_opencv.txt")):
-        return False
-    if export_point_cloud and not pano:
-        if not os.path.isfile(os.path.join(view_dir, "planar_faces.json")):
-            has_lines = any(n.endswith("_lines.png") for n in os.listdir(view_dir))
-            if not has_lines:
-                return False
-    if pano and not _pano_complete(view_dir, semantic=semantic, depth=depth):
-        return False
-    if visible_geometry and (export_glb or export_point_cloud):
-        if not _visible_geometry_ok(view_dir, export_glb=export_glb, export_point_cloud=export_point_cloud):
-            return False
-    return True
+    return len(missing_view_artifacts(
+        y_dir, view_name, job, auto_spec=auto_spec, progress=progress
+    )) == 0
 
 
 def is_normalized_topdown_complete(
@@ -237,6 +417,8 @@ def is_normalized_topdown_complete(
 
 
 def is_post_export_complete(y_dir: str, job: Dict[str, Any]) -> bool:
+    if not job.get("holo_geometry"):
+        return True
     if job.get("export_glb"):
         glb = os.path.join(y_dir, "scene.glb")
         if not os.path.isfile(glb) or os.path.getsize(glb) <= 0:
@@ -245,6 +427,8 @@ def is_post_export_complete(y_dir: str, job: Dict[str, Any]) -> bool:
         scene_ply = os.path.join(y_dir, "pointcloud", "scene_all.ply")
         if not os.path.isfile(scene_ply) or os.path.getsize(scene_ply) <= 0:
             return False
+    if job.get("export_voxel") and not _voxel_ok(y_dir):
+        return False
     if not os.path.isfile(os.path.join(y_dir, "data.json")):
         return False
     return True

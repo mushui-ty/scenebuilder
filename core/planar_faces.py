@@ -197,9 +197,14 @@ def make_bpy_view_context(scene, camera_obj, width: int, height: int) -> Dict[st
         py = (1.0 - float(v)) * height
         return [px, py]
 
+    def world_depth(co: np.ndarray) -> float:
+        _u, _v, z = world_to_camera_view(scene, camera_obj, mathutils.Vector(co.tolist()))
+        return float(z)
+
     return {
         "clip_mats": clip_mats,
         "to_pixel": to_pixel,
+        "world_depth": world_depth,
         "camera_pos": np.array(camera_obj.matrix_world.translation, dtype=float),
     }
 

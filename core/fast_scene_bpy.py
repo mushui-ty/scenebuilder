@@ -21,6 +21,7 @@ import json
 import numpy as np
 import time
 import hashlib
+from contextlib import contextmanager
 from typing import List, Dict, Any, Optional, Literal, Tuple, Union
 
 # 导入 util 的数据处理函数（不使用其 mesh 创建函数）
@@ -65,6 +66,7 @@ class BpySceneCtx:
         self.asset_bounds = {}
         self._point_cloud_material_cache = {}
         self._point_cloud_image_cache = {}
+        self._semantic_view_cache: Dict[str, Tuple[Any, List[Dict[str, Any]], Dict[Tuple[str, str], int]]] = {}
         
         # 保存所有对象引用（与 fast_scene.py 的 mesh_nodes 对应）
         self.mesh_nodes = {
@@ -1074,11 +1076,13 @@ class BpySceneCtx:
 
         floor_info = self.mesh_nodes.get("floor")
         if floor_info:
-            export_one("floor", "floor", floor_info.get("node"), "floor.ply", default_samples)
+            os.makedirs(os.path.join(output_dir, "floor"), exist_ok=True)
+            export_one("floor", "floor", floor_info.get("node"), "floor/floor.ply", default_samples)
 
         ceiling_info = self.mesh_nodes.get("ceiling")
         if ceiling_info:
-            export_one("ceiling", "ceiling", ceiling_info.get("node"), "ceiling.ply", default_samples)
+            os.makedirs(os.path.join(output_dir, "ceiling"), exist_ok=True)
+            export_one("ceiling", "ceiling", ceiling_info.get("node"), "ceiling/ceiling.ply", default_samples)
 
         for category in ["walls", "doors", "windows", "boxes"]:
             category_dir = os.path.join(output_dir, category)
@@ -1110,33 +1114,90 @@ class BpySceneCtx:
         print(f"✅ 点云已导出: {output_dir}")
         return output_dir
 
+    def export_voxel(self, output_dir: str, rebuild: bool = False, **construct_kwargs):
+        """导出全场景 256³ 彩色占用体素（不做视锥裁剪）。"""
+        wall_max_height = max((w["height"] for w in self.context["walls"].values()), default=0)
+        need_ceiling = wall_max_height > 0
+        if rebuild or self.mesh_nodes["floor"] is None or (need_ceiling and self.mesh_nodes["ceiling"] is None):
+            kwargs = {"show_ceiling": True}
+            kwargs.update(construct_kwargs)
+            self.construct_scene(rebuild=True, **kwargs)
+
+        try:
+            from . import voxel_export as ve
+        except ImportError:
+            import voxel_export as ve  # type: ignore
+
+        bpy.context.view_layer.update()
+        triangles, colors = self._collect_scene_triangle_colors()
+        if len(triangles) == 0:
+            print("⚠️ 体素导出跳过：场景没有三角形")
+            return None
+
+        world_up = [0.0, 0.0, 1.0]
+        meta = self.context.get("meta") or {}
+        if meta.get("world_up") is not None:
+            world_up = [float(x) for x in meta["world_up"]]
+
+        return ve.export_colored_voxel_grids(
+            output_dir,
+            triangles,
+            colors,
+            world_up=world_up,
+        )
+
     def export_visible_geometry(
         self,
         output_dir: str,
         camera_obj,
         export_glb: bool = False,
         export_point_cloud: bool = False,
+        export_voxel: bool = False,
         transparent_objects: Optional[set] = None,
         panoramic: bool = False,
+        view_image_path: Optional[str] = None,
     ):
-        """导出可见几何：先按遮挡剔除（部分可见则保留），再按渲染视锥裁剪视锥外部分。"""
+        """导出可见几何：mask 可见比例 + 视锥裁剪；写 visibility.json。"""
         bpy.context.view_layer.update()
+        width, height = self._render_resolution()
+        visibility_records: List[Dict[str, Any]] = []
+
         if panoramic:
             visible_entries = self._visible_geometry_entries_pano(
                 camera_obj, transparent_objects=transparent_objects or set()
             )
+            visibility_records = self._legacy_visibility_records_from_entries(visible_entries)
         else:
-            visible_entries = self._visible_geometry_entries(
-                camera_obj, transparent_objects=transparent_objects or set()
+            if not view_image_path:
+                raise ValueError("export_visible_geometry 需要 view_image_path（用于语义 mask）")
+            semantic_rgb, semantic_objects, overall_pixels_map = self.render_semantic_bundle(
+                view_image_path,
+                save_artifacts=False,
             )
+            visible_entries, visibility_records = self._visible_geometry_entries(
+                camera_obj,
+                transparent_objects=transparent_objects or set(),
+                semantic_rgb=semantic_rgb,
+                semantic_objects=semantic_objects,
+                overall_pixels_map=overall_pixels_map,
+                width=width,
+                height=height,
+            )
+
+        self._write_visibility_json(output_dir, visibility_records, width, height)
+
         if not visible_entries:
             print("⚠️ 当前视角没有检测到可见几何")
             return
 
+        merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
+
         if export_glb:
-            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), visible_entries)
+            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), merge_entries)
         if export_point_cloud:
-            self.export_visible_point_cloud(os.path.join(output_dir, "pointcloud"), visible_entries)
+            self.export_visible_point_cloud(output_dir, visible_entries, merge_entries)
+        if export_voxel:
+            self.export_visible_voxel(output_dir, merge_entries, camera_obj)
 
     def export_visible_geometry_multi(
         self,
@@ -1144,6 +1205,7 @@ class BpySceneCtx:
         camera_states: List[Tuple[Any, set]],
         export_glb: bool = False,
         export_point_cloud: bool = False,
+        export_voxel: bool = False,
     ):
         """多相机合并导出：任意视角可见则保留，视锥裁剪取各视角并集。"""
         bpy.context.view_layer.update()
@@ -1151,10 +1213,14 @@ class BpySceneCtx:
         if not visible_entries:
             print("⚠️ 多视角序列没有检测到可见几何")
             return
+        merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
-            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), visible_entries)
+            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), merge_entries)
         if export_point_cloud:
-            self.export_visible_point_cloud(os.path.join(output_dir, "pointcloud"), visible_entries)
+            self.export_visible_point_cloud(output_dir, visible_entries, merge_entries)
+        if export_voxel:
+            ref_camera = camera_states[0][0] if camera_states else None
+            self.export_visible_voxel(output_dir, merge_entries, ref_camera)
 
     def export_visible_geometry_pano_multi(
         self,
@@ -1162,6 +1228,7 @@ class BpySceneCtx:
         camera_states: List[Tuple[Any, set]],
         export_glb: bool = False,
         export_point_cloud: bool = False,
+        export_voxel: bool = False,
     ):
         """多全景相机合并导出：任意相机无遮挡可见则保留完整几何，不做视锥裁切。"""
         bpy.context.view_layer.update()
@@ -1169,10 +1236,14 @@ class BpySceneCtx:
         if not visible_entries:
             print("⚠️ 多视角全景没有检测到可见几何")
             return
+        merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
-            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), visible_entries)
+            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), merge_entries)
         if export_point_cloud:
-            self.export_visible_point_cloud(os.path.join(output_dir, "pointcloud"), visible_entries)
+            self.export_visible_point_cloud(output_dir, visible_entries, merge_entries)
+        if export_voxel:
+            ref_camera = camera_states[0][0] if camera_states else None
+            self.export_visible_voxel(output_dir, merge_entries, ref_camera)
 
     def export_planar_faces_and_lines(
         self,
@@ -1265,7 +1336,11 @@ class BpySceneCtx:
         try:
             bpy.ops.object.select_all(action='DESELECT')
             for entry in visible_entries:
-                name_suffix = "_visible_cutted" if entry.get("frustum_cutted") else "_visible"
+                name_suffix = "_visible"
+                if entry.get("frustum_cutted"):
+                    name_suffix += "_cutted"
+                if entry.get("mostly_occluded"):
+                    name_suffix += "_mostly_occluded"
                 mesh = bpy.data.meshes.new(f"{entry['category']}_{entry['id']}{name_suffix}_mesh")
                 vertices = []
                 faces = []
@@ -1342,19 +1417,23 @@ class BpySceneCtx:
                     pass
             bpy.context.view_layer.objects.active = prev_active
 
-    def export_visible_point_cloud(self, output_dir: str, visible_entries: List[Dict[str, Any]]):
+    def export_visible_point_cloud(
+        self,
+        output_dir: str,
+        visible_entries: List[Dict[str, Any]],
+        merge_entries: Optional[List[Dict[str, Any]]] = None,
+    ):
         os.makedirs(output_dir, exist_ok=True)
+        merge_entries = merge_entries if merge_entries is not None else visible_entries
         default_samples = 5000
         box_samples = 5000
-        all_points = []
-        all_colors = []
-        all_normals = []
         metadata = {
             "samples_per_object": default_samples,
             "box_samples_per_object": box_samples,
             "objects": [],
             "visible_geometry": True,
         }
+        opencv_ply_count = 0
 
         for entry in visible_entries:
             sample_count = box_samples if entry["category"] == "boxes" else default_samples
@@ -1362,10 +1441,10 @@ class BpySceneCtx:
             if len(points) == 0:
                 continue
             path = os.path.join(output_dir, entry["visible_ply"])
-            self._write_ply_with_opencv_copy(path, points, colors, normals, entry.get("camera_obj"))
-            all_points.append(points)
-            all_colors.append(colors)
-            all_normals.append(normals)
+            self._write_ply_with_opencv_copy(
+                path, points, colors, normals, entry.get("camera_obj"), quiet=True
+            )
+            opencv_ply_count += 1
             metadata["objects"].append({
                 "category": entry["category"],
                 "id": entry["id"],
@@ -1374,15 +1453,33 @@ class BpySceneCtx:
                 "requested_samples": int(sample_count),
                 "frustum_cutted": bool(entry.get("frustum_cutted", False)),
                 "frustum_in_view_ratio": round(float(entry.get("frustum_in_view_ratio", 1.0)), 4),
+                "visibility_ratio": round(float(entry.get("visibility_ratio", 1.0)), 6),
+                "mostly_occluded": bool(entry.get("mostly_occluded", False)),
+                "in_merged_export": bool(entry.get("in_merged_export", True)),
             })
 
-        if all_points:
-            merged_points = np.vstack(all_points)
-            merged_colors = np.vstack(all_colors)
-            merged_normals = np.vstack(all_normals)
+        merge_points = []
+        merge_colors = []
+        merge_normals = []
+        for entry in merge_entries:
+            sample_count = box_samples if entry["category"] == "boxes" else default_samples
+            points, colors, normals = self._sample_visible_records(entry["records"], entry["camera_obj"], sample_count)
+            if len(points) == 0:
+                continue
+            merge_points.append(points)
+            merge_colors.append(colors)
+            merge_normals.append(normals)
+
+        if merge_points:
+            merged_points = np.vstack(merge_points)
+            merged_colors = np.vstack(merge_colors)
+            merged_normals = np.vstack(merge_normals)
             scene_path = os.path.join(output_dir, "scene_visible.ply")
             ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
-            self._write_ply_with_opencv_copy(scene_path, merged_points, merged_colors, merged_normals, ref_camera)
+            self._write_ply_with_opencv_copy(
+                scene_path, merged_points, merged_colors, merged_normals, ref_camera, quiet=True
+            )
+            opencv_ply_count += 1
             metadata["scene_visible"] = {
                 "path": "scene_visible.ply",
                 "points": int(len(merged_points)),
@@ -1390,25 +1487,225 @@ class BpySceneCtx:
 
         with open(os.path.join(output_dir, "metadata_visible.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
+        if opencv_ply_count:
+            print(f"✅ OpenCV 点云副本: {opencv_ply_count} 个文件")
         print(f"✅ 可见点云已导出: {output_dir}")
 
-    def _visible_geometry_entries(self, camera_obj, transparent_objects: Optional[set] = None):
+    def _triangle_rgb_at_centroid(self, tri, color_source, tri_uv=None):
+        base_color = color_source.get("base_color", np.array([160, 160, 160], dtype=np.uint8))
+        image = color_source.get("image")
+        if image is not None and tri_uv is not None:
+            uv = np.mean(np.asarray(tri_uv, dtype=float), axis=0)
+            mapping = color_source.get("mapping")
+            if mapping is not None:
+                uv = self._apply_mapping_to_uv(uv, mapping)
+            return self._sample_image_color(
+                image, uv, base_color, color_source.get("base_factor")
+            )
+        return base_color
+
+    def _collect_scene_triangle_colors(self):
+        triangles = []
+        colors = []
+        for category, _object_id, node, _filename in self._iter_point_cloud_nodes(visible_suffix=False):
+            records = self._collect_bpy_mesh_records(
+                node, use_ses=category in ("boxes", "doors", "windows")
+            )
+            for record in records:
+                uvs = record.get("uvs")
+                for tri_idx, tri in enumerate(record["triangles"]):
+                    tri_uv = uvs[tri_idx] if uvs is not None else None
+                    color = self._triangle_rgb_at_centroid(
+                        tri, record["color_sources"][tri_idx], tri_uv
+                    )
+                    triangles.append(np.asarray(tri, dtype=float))
+                    colors.append(color)
+        if not triangles:
+            return np.empty((0, 3, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+        return np.asarray(triangles, dtype=float), np.asarray(colors, dtype=np.uint8)
+
+    def _collect_visible_triangle_colors(self, visible_entries: List[Dict[str, Any]]):
+        triangles = []
+        colors = []
+        for entry in visible_entries:
+            for record in entry["records"]:
+                uvs = record.get("uvs")
+                for tri_idx, tri in enumerate(record["triangles"]):
+                    tri_uv = uvs[tri_idx] if uvs is not None else None
+                    color = self._triangle_rgb_at_centroid(
+                        tri, record["color_sources"][tri_idx], tri_uv
+                    )
+                    triangles.append(np.asarray(tri, dtype=float))
+                    colors.append(color)
+        if not triangles:
+            return np.empty((0, 3, 3), dtype=float), np.empty((0, 3), dtype=np.uint8)
+        return np.asarray(triangles, dtype=float), np.asarray(colors, dtype=np.uint8)
+
+    def export_visible_voxel(
+        self,
+        output_dir: str,
+        visible_entries: List[Dict[str, Any]],
+        camera_obj,
+    ):
+        try:
+            from . import voxel_export as ve
+        except ImportError:
+            import voxel_export as ve  # type: ignore
+        try:
+            from . import geometry_opencv as geo_cv
+        except ImportError:
+            import geometry_opencv as geo_cv  # type: ignore
+
+        triangles, colors = self._collect_visible_triangle_colors(visible_entries)
+        if len(triangles) == 0:
+            print("⚠️ 体素导出跳过：可见几何没有三角形")
+            return
+
+        world_up = [0.0, 0.0, 1.0]
+        meta = self.context.get("meta") or {}
+        if meta.get("world_up") is not None:
+            world_up = [float(x) for x in meta["world_up"]]
+
+        camera_pose = None
+        if camera_obj is not None:
+            camera_pose = geo_cv.camera_pose_from_matrix(np.array(camera_obj.matrix_world))
+
+        ve.export_colored_voxel_grids(
+            output_dir,
+            triangles,
+            colors,
+            world_up=world_up,
+            camera_pose=camera_pose,
+        )
+
+    def _entity_id_for_category(self, category: str, object_id: str) -> str:
+        if category in ("floor", "ceiling"):
+            return category
+        return str(object_id)
+
+    def _write_visibility_json(
+        self,
+        output_dir: str,
+        records: List[Dict[str, Any]],
+        width: int,
+        height: int,
+    ) -> None:
+        try:
+            from . import visibility_mask as vm
+        except ImportError:
+            import visibility_mask as vm  # type: ignore
+
+        settings = vm.visibility_settings(self.config)
+        payload = {
+            "ratio_if_visible": settings["ratio_if_visible"],
+            "min_overall_pixels": settings["min_overall_pixels"],
+            "image_size": [int(width), int(height)],
+            "objects": records,
+        }
+        path = os.path.join(output_dir, "visibility.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        print(f"✅ 可见性统计: {path} ({len(records)} 个元素)")
+
+    def _legacy_visibility_records_from_entries(
+        self, visible_entries: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        records = []
+        for entry in visible_entries:
+            records.append({
+                "category": entry["category"],
+                "id": entry["id"],
+                "overall_pixels": None,
+                "visible_pixels": None,
+                "visibility_ratio": round(float(entry.get("visibility_ratio", 1.0)), 6),
+                "mostly_occluded": bool(entry.get("mostly_occluded", False)),
+                "in_merged_export": bool(entry.get("in_merged_export", True)),
+                "in_frustum": True,
+                "export_geometry": True,
+            })
+        return records
+
+    def _visible_geometry_entries(
+        self,
+        camera_obj,
+        transparent_objects: Optional[set] = None,
+        *,
+        semantic_rgb: np.ndarray,
+        semantic_objects: List[Dict[str, Any]],
+        overall_pixels_map: Dict[Tuple[str, str], int],
+        width: int,
+        height: int,
+    ):
+        try:
+            from . import planar_faces
+            from . import visibility_mask as vm
+        except ImportError:
+            import planar_faces  # type: ignore
+            import visibility_mask as vm  # type: ignore
+
         transparent_objects = transparent_objects or set()
+        settings = vm.visibility_settings(self.config)
+        color_map = vm.build_entity_color_map(semantic_objects)
+        view_ctx = planar_faces.make_bpy_view_context(self.scene, camera_obj, width, height)
+        clip_mats = view_ctx["clip_mats"]
+
         entries = []
-        clip_mats = self._render_frustum_clip_mats(camera_obj)
+        visibility_records: List[Dict[str, Any]] = []
+
         for category, object_id, node, visible_ply in self._iter_point_cloud_nodes(visible_suffix=True):
+            entity_id = self._entity_id_for_category(category, object_id)
+            label, asset_id = self._object_export_identity(category, object_id)
+            color = color_map.get((category, entity_id))
+
             records = self._collect_bpy_mesh_records(node, use_ses=category in ("boxes", "doors", "windows"))
             if not records:
+                visibility_records.append({
+                    "category": category,
+                    "id": object_id,
+                    "label": label,
+                    **vm.evaluate_visibility(
+                        category=category,
+                        in_frustum=False,
+                        overall_pixels=0,
+                        visible_pixels=0,
+                        ratio_if_visible=settings["ratio_if_visible"],
+                        min_overall_pixels=settings["min_overall_pixels"],
+                    ),
+                })
                 continue
-            target_objects = self._visibility_target_objects(node, records)
-            if self._records_fully_occluded(records, camera_obj, target_objects, transparent_objects):
-                continue
+
             clipped_records = self._clip_records_to_render_frustum(records, camera_obj, clip_mats=clip_mats)
-            if not clipped_records:
+            in_frustum = bool(clipped_records)
+            if in_frustum and color is not None:
+                overall_pixels = int(overall_pixels_map.get((category, entity_id), 0))
+                visible_pixels = vm.count_semantic_color_pixels(semantic_rgb, color)
+            else:
+                overall_pixels = 0
+                visible_pixels = 0
+            vis = vm.evaluate_visibility(
+                category=category,
+                in_frustum=in_frustum,
+                overall_pixels=overall_pixels,
+                visible_pixels=visible_pixels,
+                ratio_if_visible=settings["ratio_if_visible"],
+                min_overall_pixels=settings["min_overall_pixels"],
+            )
+            visibility_records.append({
+                "category": category,
+                "id": object_id,
+                "label": label,
+                **vis,
+            })
+
+            if not vis["export_geometry"] or not clipped_records:
                 continue
-            frustum_cutted = self._records_frustum_cutted(records, camera_obj)
+
             in_view_ratio_value = self._records_frustum_in_view_ratio(records, camera_obj)
+            frustum_cutted = in_view_ratio_value < self.FRUSTUM_IN_VIEW_RATIO
             output_ply = self._append_output_suffix(visible_ply, "_cutted") if frustum_cutted else visible_ply
+            if vis["mostly_occluded"]:
+                output_ply = vm.append_mostly_occluded_suffix(output_ply)
+
             entries.append({
                 "category": category,
                 "id": object_id,
@@ -1417,9 +1714,13 @@ class BpySceneCtx:
                 "visible_ply": output_ply,
                 "frustum_cutted": frustum_cutted,
                 "frustum_in_view_ratio": in_view_ratio_value,
+                "visibility_ratio": vis["visibility_ratio"],
+                "mostly_occluded": vis["mostly_occluded"],
+                "in_merged_export": vis["in_merged_export"],
                 "camera_obj": camera_obj,
             })
-        return entries
+
+        return entries, visibility_records
 
     def _visible_geometry_entries_pano(self, camera_obj, transparent_objects: Optional[set] = None):
         """全景可见几何：只做遮挡判断，不做透影视锥裁切，保持原始坐标。"""
@@ -1440,6 +1741,9 @@ class BpySceneCtx:
                 "visible_ply": visible_ply,
                 "frustum_cutted": False,
                 "frustum_in_view_ratio": 1.0,
+                "visibility_ratio": 1.0,
+                "mostly_occluded": False,
+                "in_merged_export": True,
                 "camera_obj": camera_obj,
             })
         return entries
@@ -1470,6 +1774,9 @@ class BpySceneCtx:
                 "visible_ply": visible_ply,
                 "frustum_cutted": False,
                 "frustum_in_view_ratio": 1.0,
+                "visibility_ratio": 1.0,
+                "mostly_occluded": False,
+                "in_merged_export": True,
                 "camera_obj": primary_camera,
             })
         return entries
@@ -1516,6 +1823,9 @@ class BpySceneCtx:
                 "visible_ply": output_ply,
                 "frustum_cutted": frustum_cutted,
                 "frustum_in_view_ratio": max_ratio,
+                "visibility_ratio": 1.0,
+                "mostly_occluded": False,
+                "in_merged_export": True,
                 "camera_obj": primary_camera,
             })
         return entries
@@ -1526,13 +1836,15 @@ class BpySceneCtx:
         return f"{root}{suffix}{ext}"
 
     def _iter_point_cloud_nodes(self, visible_suffix: bool = False):
-        suffix = "_visible" if visible_suffix else ""
+        suffixes = ["visible"] if visible_suffix else []
         floor_info = self.mesh_nodes.get("floor")
         if floor_info:
-            yield "floor", "floor", floor_info.get("node"), f"floor{suffix}.ply"
+            filename = util_data.build_pointcloud_ply_relpath("floor", "floor", None, suffixes)
+            yield "floor", "floor", floor_info.get("node"), filename
         ceiling_info = self.mesh_nodes.get("ceiling")
         if ceiling_info:
-            yield "ceiling", "ceiling", ceiling_info.get("node"), f"ceiling{suffix}.ply"
+            filename = util_data.build_pointcloud_ply_relpath("ceiling", "ceiling", None, suffixes)
+            yield "ceiling", "ceiling", ceiling_info.get("node"), filename
         for category in ["walls", "doors", "windows", "boxes"]:
             for object_id, info in self.mesh_nodes[category].items():
                 label, asset_id = self._object_export_identity(category, object_id)
@@ -1801,12 +2113,14 @@ class BpySceneCtx:
         return False
 
     def _collect_visibility_sample_points(self, records, max_points: int = 128):
+        """收集遮挡判定采样点。用三角形重心而非顶点：地板/天花板 n-gon 顶点全在外轮廓上，
+        仅用顶点会把图像中可见的内侧区域整片误判为不可见（天花板同理；与 fast_scene.py 一致）。"""
         points = []
         for record in records:
-            tris = record["triangles"]
+            tris = np.asarray(record["triangles"], dtype=float)
             if len(tris) == 0:
                 continue
-            points.extend(tris.reshape(-1, 3))
+            points.extend(tris.mean(axis=1))
         if not points:
             return np.empty((0, 3), dtype=float)
         points = np.asarray(points, dtype=float)
@@ -1943,16 +2257,22 @@ class BpySceneCtx:
             )
         return np.vstack(sampled_points), np.vstack(sampled_colors), np.vstack(sampled_normals)
 
-    def _collect_bpy_mesh_records(self, node, use_ses: bool = False):
+    def _collect_bpy_mesh_records(self, node, use_ses: bool = False, use_evaluated: bool = True):
         depsgraph = bpy.context.evaluated_depsgraph_get()
         records = []
 
         def collect_mesh(obj, matrix_world):
             if obj is None or obj.type != "MESH":
                 return
-            evaluated_obj = obj.evaluated_get(depsgraph)
-            mesh = evaluated_obj.to_mesh()
+            evaluated_obj = None
+            if use_evaluated:
+                evaluated_obj = obj.evaluated_get(depsgraph)
+                mesh = evaluated_obj.to_mesh()
+            else:
+                mesh = obj.data
             try:
+                if mesh is None:
+                    return
                 vertex_count = len(mesh.vertices)
                 if vertex_count == 0:
                     return
@@ -2023,7 +2343,8 @@ class BpySceneCtx:
                     "area": area,
                 })
             finally:
-                evaluated_obj.to_mesh_clear()
+                if evaluated_obj is not None:
+                    evaluated_obj.to_mesh_clear()
 
         if getattr(node, "type", None) == "MESH":
             collect_mesh(node, node.matrix_world.copy())
@@ -2461,36 +2782,65 @@ class BpySceneCtx:
 
     @staticmethod
     def _write_ply(path: str, points: np.ndarray, colors: np.ndarray, normals: Optional[np.ndarray] = None):
-        """写 ASCII PLY：xyz + nx/ny/nz（世界/规范化 SSL）+ rgb。"""
+        """写 binary PLY：xyz + nx/ny/nz + rgb。"""
+        payload = BpySceneCtx._write_ply_binary_payload(points, colors, normals)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(payload)
+
+    @staticmethod
+    def _write_ply_binary_payload(
+        points: np.ndarray,
+        colors: np.ndarray,
+        normals: Optional[np.ndarray] = None,
+    ) -> bytes:
         colors = np.clip(colors, 0, 255).astype(np.uint8)
-        pts = np.asarray(points, dtype=float)
+        pts = np.asarray(points, dtype=np.float32)
         if normals is None:
-            nrm = np.zeros((len(pts), 3), dtype=float)
+            nrm = np.zeros((len(pts), 3), dtype=np.float32)
         else:
-            nrm = np.asarray(normals, dtype=float)
+            nrm = np.asarray(normals, dtype=np.float32)
             norms = np.linalg.norm(nrm, axis=1, keepdims=True)
             nrm = np.divide(nrm, norms, out=np.zeros_like(nrm), where=norms > 1e-12)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("ply\n")
-            f.write("format ascii 1.0\n")
-            f.write(f"element vertex {len(pts)}\n")
-            f.write("property float x\n")
-            f.write("property float y\n")
-            f.write("property float z\n")
-            f.write("property float nx\n")
-            f.write("property float ny\n")
-            f.write("property float nz\n")
-            f.write("property uchar red\n")
-            f.write("property uchar green\n")
-            f.write("property uchar blue\n")
-            f.write("end_header\n")
-            for point, normal, color in zip(pts, nrm, colors):
-                f.write(
-                    f"{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} "
-                    f"{normal[0]:.6f} {normal[1]:.6f} {normal[2]:.6f} "
-                    f"{int(color[0])} {int(color[1])} {int(color[2])}\n"
-                )
+        header = (
+            "ply\n"
+            "format binary_little_endian 1.0\n"
+            f"element vertex {len(pts)}\n"
+            "property float x\n"
+            "property float y\n"
+            "property float z\n"
+            "property float nx\n"
+            "property float ny\n"
+            "property float nz\n"
+            "property uchar red\n"
+            "property uchar green\n"
+            "property uchar blue\n"
+            "end_header\n"
+        ).encode("ascii")
+        vertex_dtype = np.dtype(
+            [
+                ("x", "<f4"),
+                ("y", "<f4"),
+                ("z", "<f4"),
+                ("nx", "<f4"),
+                ("ny", "<f4"),
+                ("nz", "<f4"),
+                ("red", "u1"),
+                ("green", "u1"),
+                ("blue", "u1"),
+            ]
+        )
+        packed = np.empty(len(pts), dtype=vertex_dtype)
+        packed["x"] = pts[:, 0]
+        packed["y"] = pts[:, 1]
+        packed["z"] = pts[:, 2]
+        packed["nx"] = nrm[:, 0]
+        packed["ny"] = nrm[:, 1]
+        packed["nz"] = nrm[:, 2]
+        packed["red"] = colors[:, 0]
+        packed["green"] = colors[:, 1]
+        packed["blue"] = colors[:, 2]
+        return header + packed.tobytes()
 
     def _write_ply_with_opencv_copy(
         self,
@@ -2499,8 +2849,10 @@ class BpySceneCtx:
         colors: np.ndarray,
         normals: np.ndarray,
         camera_obj,
+        *,
+        quiet: bool = False,
     ):
-        """主 PLY：世界/规范化 SSL 的 xyz+法线；*_opencv.ply：OpenCV 相机系 xyz+法线。"""
+        """主 PLY：世界/规范化 SSL；*_opencv.ply：OpenCV 相机系（均 binary）。"""
         self._write_ply(path, points, colors, normals)
         if camera_obj is None:
             return
@@ -2513,47 +2865,19 @@ class BpySceneCtx:
         pts_o = geo_cv.transform_points_to_opencv(points, pose)
         nrm_o = geo_cv.transform_normals_to_opencv(normals, pose)
         self._write_ply(opencv_path, pts_o, colors, nrm_o)
-        print(f"✅ OpenCV 点云副本: {opencv_path}")
+        if not quiet:
+            print(f"✅ OpenCV 点云副本: {opencv_path}")
 
     def _export_glb_opencv_copy(self, output_path: str, camera_obj, bpy_objects=None) -> None:
-        """导出 OpenCV GLB：写盘前将 mesh 顶点变换到 OpenCV 相机系，再 glTF 导出（保留材质/UV）。"""
-        if camera_obj is None or not bpy_objects:
+        """从已导出的 world GLB 生成 OpenCV 副本（trimesh 变换，避免第二次 Blender glTF 导出）。"""
+        if camera_obj is None or not os.path.isfile(output_path):
             return
         try:
             from . import geometry_opencv as geo_cv
         except ImportError:
             import geometry_opencv as geo_cv  # type: ignore
-
-        opencv_path = geo_cv.opencv_duplicate_path(output_path)
         pose = geo_cv.camera_pose_from_matrix(np.array(camera_obj.matrix_world))
-
-        for obj in bpy_objects:
-            mesh = obj.data
-            if mesh is None or not len(mesh.vertices):
-                continue
-            matrix = np.array(obj.matrix_world, dtype=float)
-            world_pts = np.array(
-                [(matrix @ np.array([v.co.x, v.co.y, v.co.z, 1.0]))[:3] for v in mesh.vertices],
-                dtype=float,
-            )
-            opencv_pts = geo_cv.transform_points_to_opencv(world_pts, pose)
-            for vert, p_o in zip(mesh.vertices, opencv_pts):
-                vert.co.x = float(p_o[0])
-                vert.co.y = float(p_o[1])
-                vert.co.z = float(p_o[2])
-            mesh.update()
-            obj.matrix_world = Matrix.Identity(4)
-
-        bpy.context.view_layer.update()
-        try:
-            bpy.ops.export_scene.gltf(
-                filepath=opencv_path,
-                export_format="GLB",
-                use_selection=True,
-            )
-        except TypeError:
-            bpy.ops.export_scene.gltf(filepath=opencv_path, use_selection=True)
-        print(f"✅ OpenCV GLB 副本: {opencv_path}")
+        geo_cv.export_glb_opencv_copy(output_path, pose)
 
     def setup_lighting(self, intensity: float = 250,
                       lighting_type: Literal["area", "array", "none"] = "array",
@@ -2674,6 +2998,7 @@ class BpySceneCtx:
         if mat is None:
             mat = bpy.data.materials.new(mat_name)
             mat.use_nodes = True
+            mat.use_backface_culling = False
             nodes = mat.node_tree.nodes
             nodes.clear()
             output = nodes.new(type="ShaderNodeOutputMaterial")
@@ -2686,6 +3011,7 @@ class BpySceneCtx:
                     if node.type == "EMISSION":
                         emission = node
                         break
+        mat.use_backface_culling = False
         color = color_rgb if color_rgb is not None else self._semantic_color(color_key)
         if emission is not None:
             emission.inputs["Color"].default_value = [c / 255.0 for c in color] + [1.0]
@@ -2712,6 +3038,7 @@ class BpySceneCtx:
                     info.get("node"),
                     {
                         "category": category,
+                        "entity_id": object_id,
                         "label": object_id,
                         "color": color,
                     },
@@ -2725,6 +3052,7 @@ class BpySceneCtx:
                 caption = data.get("caption")
                 object_meta = {
                     "category": category,
+                    "entity_id": object_id,
                     "label": object_id,
                     "color": color,
                 }
@@ -2734,7 +3062,12 @@ class BpySceneCtx:
                     category,
                     color_key,
                     info.get("node"),
-                    object_meta,
+                    {
+                        "category": category,
+                        "entity_id": object_id,
+                        "label": object_id,
+                        "color": color,
+                    },
                 )
         for object_id, info in self.mesh_nodes.get("boxes", {}).items():
             data = info.get("box_data", {})
@@ -2743,6 +3076,7 @@ class BpySceneCtx:
             color = list(util.semantic_entity_color(color_key, used=used_colors))
             object_meta = {
                 "category": "boxes",
+                "entity_id": object_id,
                 "label": label,
                 "color": color,
             }
@@ -2804,7 +3138,7 @@ class BpySceneCtx:
         }
 
     def _begin_semantic_render_env(self):
-        backup = {"lights": [], "world_bg": None, "cycles": None, "eevee_taa": None}
+        backup = {"lights": [], "world_bg": None, "cycles": None, "eevee": None, "render": None}
         for obj in bpy.data.objects:
             if getattr(obj, "type", None) == "LIGHT":
                 backup["lights"].append((obj, obj.hide_render))
@@ -2834,9 +3168,25 @@ class BpySceneCtx:
             if hasattr(cycles, "use_denoising"):
                 cycles.use_denoising = False
         eevee = getattr(self.scene, "eevee", None)
-        if eevee is not None and hasattr(eevee, "taa_render_samples"):
-            backup["eevee_taa"] = int(eevee.taa_render_samples)
-            eevee.taa_render_samples = 1
+        if eevee is not None:
+            eevee_backup: Dict[str, Any] = {}
+            if hasattr(eevee, "taa_render_samples"):
+                eevee_backup["taa_render_samples"] = int(eevee.taa_render_samples)
+                eevee.taa_render_samples = 1
+            for attr in ("use_bloom", "use_ssr", "use_ssr_refraction", "use_gtao"):
+                if hasattr(eevee, attr):
+                    eevee_backup[attr] = bool(getattr(eevee, attr))
+                    setattr(eevee, attr, False)
+            if eevee_backup:
+                backup["eevee"] = eevee_backup
+
+        render = self.scene.render
+        render_backup: Dict[str, Any] = {}
+        if hasattr(render, "dither_intensity"):
+            render_backup["dither_intensity"] = float(render.dither_intensity)
+            render.dither_intensity = 0.0
+        if render_backup:
+            backup["render"] = render_backup
         return backup
 
     def _restore_semantic_render_env(self, backup):
@@ -2862,16 +3212,99 @@ class BpySceneCtx:
                 cycles.filter_width = cycles_bak["filter_width"]
             if hasattr(cycles, "use_denoising"):
                 cycles.use_denoising = cycles_bak["use_denoising"]
-        if backup.get("eevee_taa") is not None:
-            eevee = getattr(self.scene, "eevee", None)
-            if eevee is not None and hasattr(eevee, "taa_render_samples"):
-                eevee.taa_render_samples = backup["eevee_taa"]
+        eevee_bak = backup.get("eevee")
+        eevee = getattr(self.scene, "eevee", None)
+        if eevee is not None and eevee_bak:
+            if "taa_render_samples" in eevee_bak and hasattr(eevee, "taa_render_samples"):
+                eevee.taa_render_samples = eevee_bak["taa_render_samples"]
+            for attr, value in eevee_bak.items():
+                if attr == "taa_render_samples":
+                    continue
+                if hasattr(eevee, attr):
+                    setattr(eevee, attr, value)
+        render_bak = backup.get("render")
+        render = self.scene.render
+        if render_bak:
+            if "dither_intensity" in render_bak and hasattr(render, "dither_intensity"):
+                render.dither_intensity = render_bak["dither_intensity"]
 
-    def render_semantic_png(self, output_path: str):
+    @contextmanager
+    def _semantic_render_engine(self):
+        """语义 / 隔离 mask 渲染：透视用 EEVEE；equirectangular 全景必须用 Cycles。"""
+        render = self.scene.render
+        prev_engine = render.engine
+        if self._is_equirectangular_camera(self.scene):
+            cycles_engine = "CYCLES"
+            if prev_engine != cycles_engine:
+                print("🎨 全景语义渲染使用 Cycles（EEVEE 不支持 EQUIRECTANGULAR 投影）")
+                render.engine = cycles_engine
+            try:
+                yield
+            finally:
+                render.engine = prev_engine
+            return
+
+        eevee_engine = "BLENDER_EEVEE"
+        if prev_engine != eevee_engine:
+            render.engine = eevee_engine
+        try:
+            yield
+        finally:
+            render.engine = prev_engine
+
+    def _render_resolution(self) -> Tuple[int, int]:
+        render = self.scene.render
+        pct = float(render.resolution_percentage) / 100.0
+        width = max(int(render.resolution_x * pct), 1)
+        height = max(int(render.resolution_y * pct), 1)
+        return width, height
+
+    def _load_semantic_bundle_from_disk(
+        self,
+        output_path: str,
+    ) -> Optional[Tuple[np.ndarray, List[Dict[str, Any]], Dict[Tuple[str, str], int]]]:
+        try:
+            from . import visibility_mask as vm
+        except ImportError:
+            import visibility_mask as vm  # type: ignore
+
+        import imageio
+
+        view_dir = os.path.dirname(output_path) or "."
         semantic_path, metadata_path = self._semantic_outputs(output_path)
+        index_path = vm.semantic_masks_index_path(view_dir)
+        if not os.path.isfile(semantic_path) or not os.path.isfile(index_path):
+            return None
+
+        semantic_rgb = imageio.imread(semantic_path)
+        if semantic_rgb.ndim == 2:
+            semantic_rgb = np.stack([semantic_rgb] * 3, axis=-1)
+        semantic_rgb = np.asarray(semantic_rgb[..., :3], dtype=np.uint8)
+        if os.path.isfile(metadata_path):
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            objects = meta.get("objects", [])
+        else:
+            objects = []
+        overall_pixels_map = vm.load_overall_pixels_map(view_dir)
+        return semantic_rgb, objects, overall_pixels_map
+
+    def _render_semantic_to_array(
+        self,
+        temp_dir: Optional[str] = None,
+    ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
+        """渲染全场景语义图（调用方应已切换 EEVEE）。"""
+        import imageio
+        import tempfile
+
+        temp_dir = temp_dir or "."
+        os.makedirs(temp_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".fast_scene_sem_", dir=temp_dir)
+        os.close(fd)
+
         render = self.scene.render
         render_backup = (render.filepath, render.image_settings.file_format, render.film_transparent)
-        objects = []
+        objects: List[Dict[str, Any]] = []
         hidden_nodes = []
         temp_proxies = []
         env_backup = None
@@ -2886,29 +3319,24 @@ class BpySceneCtx:
             vs.exposure = 0.0
             vs.gamma = 1.0
 
-            for color_key, node, object_meta in self._iter_semantic_scene_nodes():
-                objects.append(object_meta)
+            for _color_key, node, object_meta in self._iter_semantic_scene_nodes():
+                objects.append(dict(object_meta))
                 temp_proxies.extend(
-                    self._create_semantic_proxies(node, color_key, color_rgb=object_meta.get("color"))
+                    self._create_semantic_proxies(node, _color_key, color_rgb=object_meta.get("color"))
                 )
                 node.hide_render = True
                 hidden_nodes.append(node)
 
-            render.filepath = semantic_path
-            render.image_settings.file_format = 'PNG'
+            render.filepath = tmp_path
+            render.image_settings.file_format = "PNG"
             render.film_transparent = False
             bpy.ops.render.render(write_still=True)
-
-            import imageio
-
-            semantic_rgb = imageio.imread(semantic_path)
+            semantic_rgb = imageio.imread(tmp_path)
+            if semantic_rgb.ndim == 2:
+                semantic_rgb = np.stack([semantic_rgb] * 3, axis=-1)
+            semantic_rgb = np.asarray(semantic_rgb[..., :3], dtype=np.uint8)
             util.attach_semantic_bbox_2d(objects, semantic_rgb)
-            with open(metadata_path, "w", encoding="utf-8") as f:
-                json.dump(self._semantic_metadata(objects), f, indent=2, ensure_ascii=False)
-            bbox_overlay_path = util.save_bbox_2d_overlay_png(output_path, objects)
-            if bbox_overlay_path:
-                print(f"✅ 检测框可视化: {bbox_overlay_path}")
-            print(f"✅ 语义图已导出: {semantic_path}")
+            return semantic_rgb, objects
         finally:
             for proxy in temp_proxies:
                 mesh = proxy.data
@@ -2923,6 +3351,173 @@ class BpySceneCtx:
                 vs = self.scene.view_settings
                 vs.view_transform, vs.look, vs.exposure, vs.gamma = view_backup
             render.filepath, render.image_settings.file_format, render.film_transparent = render_backup
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def _render_isolated_semantic_mask(
+        self,
+        target_node,
+        color: Tuple[int, int, int],
+        mask_path: str,
+        temp_dir: str,
+    ) -> int:
+        """仅渲染 target_node，保存二值 mask 并返回像素数。"""
+        if target_node is None or color is None:
+            return 0
+        try:
+            from . import visibility_mask as vm
+        except ImportError:
+            import visibility_mask as vm  # type: ignore
+
+        import imageio
+        import tempfile
+
+        os.makedirs(os.path.dirname(mask_path) or ".", exist_ok=True)
+        os.makedirs(temp_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".fast_scene_iso_sem_", dir=temp_dir)
+        os.close(fd)
+
+        render = self.scene.render
+        render_backup = (render.filepath, render.image_settings.file_format, render.film_transparent)
+        hidden_nodes = []
+        temp_proxies = []
+        env_backup = None
+        view_backup = None
+        rendered = False
+
+        try:
+            env_backup = self._begin_semantic_render_env()
+            vs = self.scene.view_settings
+            view_backup = (vs.view_transform, vs.look, float(vs.exposure), float(vs.gamma))
+            vs.view_transform = "Raw"
+            vs.look = "None"
+            vs.exposure = 0.0
+            vs.gamma = 1.0
+
+            for color_key, node, object_meta in self._iter_semantic_scene_nodes():
+                if node is None:
+                    continue
+                node.hide_render = True
+                hidden_nodes.append(node)
+                if node is not target_node:
+                    continue
+                temp_proxies.extend(
+                    self._create_semantic_proxies(
+                        node, color_key, color_rgb=object_meta.get("color")
+                    )
+                )
+                rendered = True
+
+            if not rendered:
+                return 0
+
+            render.filepath = tmp_path
+            render.image_settings.file_format = "PNG"
+            render.film_transparent = False
+            bpy.ops.render.render(write_still=True)
+            semantic_rgb = imageio.imread(tmp_path)
+            if semantic_rgb.ndim == 2:
+                semantic_rgb = np.stack([semantic_rgb] * 3, axis=-1)
+            semantic_rgb = np.asarray(semantic_rgb[..., :3], dtype=np.uint8)
+            mask = vm.binary_mask_from_isolated_semantic(
+                semantic_rgb,
+                target_color=color,
+                background=util.SEMANTIC_BACKGROUND,
+            )
+            imageio.imwrite(mask_path, (mask.astype(np.uint8) * 255))
+            return int(np.count_nonzero(mask))
+        finally:
+            for proxy in temp_proxies:
+                mesh = proxy.data
+                bpy.data.objects.remove(proxy, do_unlink=True)
+                if mesh and mesh.users == 0:
+                    bpy.data.meshes.remove(mesh, do_unlink=True)
+            for node in hidden_nodes:
+                node.hide_render = False
+            if env_backup is not None:
+                self._restore_semantic_render_env(env_backup)
+            if view_backup is not None:
+                vs = self.scene.view_settings
+                vs.view_transform, vs.look, vs.exposure, vs.gamma = view_backup
+            render.filepath, render.image_settings.file_format, render.film_transparent = render_backup
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def render_semantic_bundle(
+        self,
+        output_path: str,
+        *,
+        save_artifacts: bool = True,
+    ) -> Tuple[np.ndarray, List[Dict[str, Any]], Dict[Tuple[str, str], int]]:
+        """全场景 semantic + 每物体隔离 mask；透视用 EEVEE，全景 equirectangular 用 Cycles。"""
+        try:
+            from . import visibility_mask as vm
+        except ImportError:
+            import visibility_mask as vm  # type: ignore
+
+        import imageio
+
+        cache_key = os.path.abspath(output_path)
+        if cache_key in self._semantic_view_cache:
+            return self._semantic_view_cache[cache_key]
+
+        loaded = self._load_semantic_bundle_from_disk(output_path)
+        if loaded is not None:
+            self._semantic_view_cache[cache_key] = loaded
+            return loaded
+
+        view_dir = os.path.dirname(output_path) or "."
+        masks_dir = vm.semantic_masks_dir(view_dir)
+        os.makedirs(masks_dir, exist_ok=True)
+
+        with self._semantic_render_engine():
+            semantic_rgb, objects = self._render_semantic_to_array(temp_dir=view_dir)
+            overall_pixels_map: Dict[Tuple[str, str], int] = {}
+            index_objects: List[Dict[str, Any]] = []
+            for _color_key, node, object_meta in self._iter_semantic_scene_nodes():
+                category = str(object_meta.get("category", ""))
+                entity_id = object_meta.get("entity_id")
+                if entity_id is None:
+                    entity_id = object_meta.get("label")
+                entity_id = str(entity_id)
+                color = tuple(int(c) for c in object_meta.get("color", (0, 0, 0)))
+                mask_path = vm.semantic_mask_path(view_dir, category, entity_id)
+                overall_pixels = self._render_isolated_semantic_mask(
+                    node, color, mask_path, temp_dir=view_dir
+                )
+                overall_pixels_map[(category, entity_id)] = overall_pixels
+                index_objects.append({
+                    "category": category,
+                    "id": entity_id,
+                    "label": object_meta.get("label", entity_id),
+                    "overall_pixels": int(overall_pixels),
+                    "mask": vm.semantic_mask_relpath(category, entity_id),
+                })
+
+        with open(vm.semantic_masks_index_path(view_dir), "w", encoding="utf-8") as f:
+            json.dump({"objects": index_objects}, f, indent=2, ensure_ascii=False)
+
+        if save_artifacts:
+            semantic_path, metadata_path = self._semantic_outputs(output_path)
+            imageio.imwrite(semantic_path, semantic_rgb)
+            with open(metadata_path, "w", encoding="utf-8") as f:
+                json.dump(self._semantic_metadata(objects), f, indent=2, ensure_ascii=False)
+            bbox_overlay_path = util.save_bbox_2d_overlay_png(output_path, objects)
+            if bbox_overlay_path:
+                print(f"✅ 检测框可视化: {bbox_overlay_path}")
+            print(f"✅ 语义图已导出: {semantic_path}")
+            print(f"✅ 语义 mask 已导出: {masks_dir} ({len(index_objects)} 个)")
+
+        result = (semantic_rgb, objects, overall_pixels_map)
+        self._semantic_view_cache[cache_key] = result
+        return result
+
+    def render_semantic_png(self, output_path: str):
+        self.render_semantic_bundle(output_path, save_artifacts=True)
 
     def normalized_topdown_view(
         self,
@@ -2954,7 +3549,7 @@ class BpySceneCtx:
         align 已提供时跳过二次平移（场景已在 pixel-aligned SSL 下）；write_ssl=False 时不写 ssl.txt。
         """
         for key in (
-            "export_glb", "export_point_cloud", "visible_geometry",
+            "export_glb", "export_point_cloud", "export_voxel", "visible_geometry",
             "rebuild", "auto_fov", "manual_fov", "glb_path",
         ):
             kwargs.pop(key, None)
@@ -3081,8 +3676,8 @@ class BpySceneCtx:
                 )
             else:
                 bpy.ops.render.render(write_still=True)
-            if render_semantic:
-                self.render_semantic_png(png_path)
+            if render_semantic or visible_geometry:
+                self.render_semantic_bundle(png_path, save_artifacts=True)
         finally:
             for wall_id, slots in wall_transparency_records.items():
                 wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
@@ -3136,8 +3731,14 @@ class BpySceneCtx:
                      export_glb: bool = False,
                      glb_path: Optional[str] = None,
                      export_point_cloud: bool = False,
+                     export_voxel: bool = False,
                      visible_geometry: bool = False,
-                     render_semantic: bool = False):
+                     render_semantic: bool = False,
+                     export_planar_faces: Optional[bool] = None,
+                     export_visible_point_cloud: Optional[bool] = None,
+                     skip_render: bool = False,
+                     write_ssl: bool = True,
+                     write_camera_para: bool = True):
         """俯视图渲染：output_path 为目录时在 {output}/topdown/topdown.png 输出单帧及附属产物。"""
         output_path = self._resolve_topdown_output_path(output_path)
         view_dir = os.path.dirname(output_path) or "."
@@ -3292,7 +3893,7 @@ class BpySceneCtx:
             self.scene.render.filepath = output_path
             self.scene.render.image_settings.color_mode = 'RGBA'
 
-            print(f"🎬 渲染中 ({width}x{height})...")
+            print(f"🎬 渲染中 ({width}x{height})..." if not skip_render else "⏭️  跳过 Cycles 渲染（主帧产物已存在）")
             depth_scale = None
             transparent_objects = {
                 self.mesh_nodes["walls"].get(wall_id, {}).get("node")
@@ -3300,9 +3901,22 @@ class BpySceneCtx:
             }
             transparent_objects.update(record.get("object") for record in object_transparency_records)
             transparent_objects = {obj for obj in transparent_objects if obj is not None}
+            do_visible_ply = visible_geometry and export_point_cloud
+            if export_visible_point_cloud is not None:
+                do_visible_ply = bool(export_visible_point_cloud)
+            do_planar = export_point_cloud if export_planar_faces is None else bool(export_planar_faces)
             try:
                 render_start = time.perf_counter()
-                if render_depth:
+                if skip_render:
+                    render_time = 0.0
+                    para_path = self._camera_para_path(output_path)
+                    if os.path.isfile(para_path):
+                        try:
+                            with open(para_path, "r", encoding="utf-8") as f:
+                                depth_scale = json.load(f).get("depth_scale")
+                        except (json.JSONDecodeError, OSError):
+                            depth_scale = None
+                elif render_depth:
                     depth_path = os.path.join(
                         os.path.dirname(output_path),
                         f"{os.path.splitext(os.path.basename(output_path))[0]}_depth.png",
@@ -3310,18 +3924,33 @@ class BpySceneCtx:
                     depth_scale = util_bpy.render_color_and_depth_png(
                         self.scene, output_path, depth_path, skip_objects=transparent_objects
                     )
+                    render_time = time.perf_counter() - render_start
                 else:
                     bpy.ops.render.render(write_still=True)
-                render_time = time.perf_counter() - render_start
-                if visible_geometry and (export_glb or export_point_cloud):
+                    render_time = time.perf_counter() - render_start
+                if skip_render and visible_geometry:
+                    skipped_geom = []
+                    if not export_glb:
+                        skipped_geom.append("GLB")
+                    if not do_visible_ply:
+                        skipped_geom.append("点云")
+                    if not export_voxel:
+                        skipped_geom.append("体素")
+                    if skipped_geom:
+                        print(f"⏭️  跳过可见几何导出（已存在）: {', '.join(skipped_geom)}")
+                if render_semantic or visible_geometry:
+                    self.render_semantic_bundle(output_path, save_artifacts=True)
+                if visible_geometry and (export_glb or do_visible_ply or export_voxel):
                     self.export_visible_geometry(
                         os.path.dirname(output_path),
                         camera_obj,
                         export_glb=export_glb,
-                        export_point_cloud=export_point_cloud,
+                        export_point_cloud=do_visible_ply,
+                        export_voxel=export_voxel,
                         transparent_objects=transparent_objects,
+                        view_image_path=output_path,
                     )
-                if export_point_cloud:
+                if do_planar:
                     self.export_planar_faces_and_lines(
                         output_path,
                         camera_obj,
@@ -3334,8 +3963,6 @@ class BpySceneCtx:
                         show_ceiling=show_ceiling,
                         transparent_objects=transparent_objects,
                     )
-                if render_semantic:
-                    self.render_semantic_png(output_path)
             finally:
                 for wall_id, slots in wall_transparency_records.items():
                     wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
@@ -3351,22 +3978,24 @@ class BpySceneCtx:
                 self.export_glb(glb_path or os.path.splitext(output_path)[0] + ".glb")
 
             save_start = time.perf_counter()
-            para_path = self._camera_para_path(output_path)
-            camera_para = vss.build_camera_para(
-                world_cam_w,
-                world_look_w,
-                vss.world_up,
-                fov_y,
-                1.0,
-                reference_frame=True,
-                depth_scale=depth_scale,
-                include_normal_fields=depth_scale is not None,
-                width=width,
-                height=height,
-            )
-            with open(para_path, 'w') as f:
-                json.dump(camera_para, f, indent=4)
-            self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
+            if write_camera_para:
+                para_path = self._camera_para_path(output_path)
+                camera_para = vss.build_camera_para(
+                    world_cam_w,
+                    world_look_w,
+                    vss.world_up,
+                    fov_y,
+                    1.0,
+                    reference_frame=True,
+                    depth_scale=depth_scale,
+                    include_normal_fields=depth_scale is not None,
+                    width=width,
+                    height=height,
+                )
+                with open(para_path, 'w') as f:
+                    json.dump(camera_para, f, indent=4)
+            if write_ssl:
+                self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
             save_time = time.perf_counter() - save_start
 
             total_time = time.perf_counter() - total_start
@@ -3589,6 +4218,21 @@ class BpySceneCtx:
         return camera_obj, camera_data, prev_camera
 
     @staticmethod
+    def _is_equirectangular_camera(scene=None) -> bool:
+        """当前 scene.camera 是否为 Cycles equirectangular 全景相机。"""
+        scene = scene or bpy.context.scene
+        camera_obj = getattr(scene, "camera", None)
+        camera_data = getattr(camera_obj, "data", None) if camera_obj is not None else None
+        if camera_data is None or getattr(camera_data, "type", None) != "PANO":
+            return False
+        pano_settings = (
+            camera_data
+            if hasattr(camera_data, "panorama_type")
+            else getattr(camera_data, "cycles", None)
+        )
+        return getattr(pano_settings, "panorama_type", None) == "EQUIRECTANGULAR"
+
+    @staticmethod
     def _pano_output_path(output_path: str) -> str:
         view_dir = os.path.dirname(output_path) or "."
         base = os.path.basename(output_path)
@@ -3621,6 +4265,7 @@ class BpySceneCtx:
         visible_geometry: bool,
         export_glb: bool,
         export_point_cloud: bool,
+        export_voxel: bool,
         transparent_objects: set,
         vss,
         world_cam_w,
@@ -3673,12 +4318,15 @@ class BpySceneCtx:
             else:
                 bpy.ops.render.render(write_still=True)
 
-            if visible_geometry and (export_glb or export_point_cloud):
+            if render_semantic or visible_geometry:
+                self.render_semantic_bundle(pano_output_path, save_artifacts=True)
+            if visible_geometry and (export_glb or export_point_cloud or export_voxel):
                 self.export_visible_geometry(
                     pano_dir,
                     camera_obj,
                     export_glb=export_glb,
                     export_point_cloud=export_point_cloud,
+                    export_voxel=export_voxel,
                     transparent_objects=transparent_objects,
                     panoramic=True,
                 )
@@ -3696,8 +4344,6 @@ class BpySceneCtx:
                     transparent_objects=transparent_objects,
                     panoramic=True,
                 )
-            if render_semantic:
-                self.render_semantic_png(pano_output_path)
 
             para_path = self._camera_para_path(pano_output_path)
             camera_para = vss.build_camera_para(
@@ -3824,11 +4470,17 @@ class BpySceneCtx:
         rebuild: bool = False,
         export_glb: bool = False,
         export_point_cloud: bool = False,
+        export_voxel: bool = False,
         visible_geometry: bool = False,
         render_semantic: bool = False,
         pano: bool = False,
         pano_resolution: int = 4096,
         view_dir_name: Optional[str] = None,
+        export_planar_faces: Optional[bool] = None,
+        export_visible_point_cloud: Optional[bool] = None,
+        skip_render: bool = False,
+        write_ssl: bool = True,
+        write_camera_para: bool = True,
     ):
         """多相机序列：所有帧写入同一序列目录；可见几何在该目录合并导出一份（多相机并集）。
 
@@ -3880,6 +4532,22 @@ class BpySceneCtx:
             frame_states = []
             pano_frame_states = []
             n_frames = len(camera_positions)
+            do_visible_ply = visible_geometry and export_point_cloud
+            if export_visible_point_cloud is not None:
+                do_visible_ply = bool(export_visible_point_cloud)
+            do_planar = export_point_cloud if export_planar_faces is None else bool(export_planar_faces)
+            existing_frames: List[str] = []
+            if skip_render:
+                for name in sorted(os.listdir(seq_dir)):
+                    if not name.lower().endswith(".png"):
+                        continue
+                    if any(m in name for m in ("_depth", "_semantic", "_normal", "_lines", "_bbox_2d")):
+                        continue
+                    png_path = os.path.join(seq_dir, name)
+                    base = os.path.splitext(name)[0]
+                    para = os.path.join(seq_dir, f"{base}_camera_para.json")
+                    if os.path.isfile(para) and os.path.getsize(png_path) > 0:
+                        existing_frames.append(png_path)
 
             for frame_idx, (cam_pos, look_at, up_vec) in enumerate(
                 zip(camera_positions, look_at_targets, up_vectors)
@@ -3889,11 +4557,16 @@ class BpySceneCtx:
                 world_up = list(up_vec)
                 render_cam, render_look, render_up = cam_pos, look_at, up_vec
 
-                image_stamp = util.allocate_millis_stamp(exclude=used_frame_stamps)
-                used_frame_stamps.add(image_stamp)
-                output_path = os.path.join(seq_dir, f"{image_stamp}.png")
+                if skip_render and frame_idx < len(existing_frames):
+                    output_path = existing_frames[frame_idx]
+                    image_stamp = os.path.splitext(os.path.basename(output_path))[0]
+                    print(f"⏭️  跳过序列帧 {frame_idx + 1}/{n_frames} Cycles 渲染 -> {output_path}")
+                else:
+                    image_stamp = util.allocate_millis_stamp(exclude=used_frame_stamps)
+                    used_frame_stamps.add(image_stamp)
+                    output_path = os.path.join(seq_dir, f"{image_stamp}.png")
+                    print(f"🎬 序列帧 {frame_idx + 1}/{n_frames} -> {output_path}")
                 view_dir = seq_dir
-                print(f"🎬 序列帧 {frame_idx + 1}/{n_frames} -> {output_path}")
 
                 camera_position, look_at_target, camera_matrix, fov_y = self._build_view_camera_matrix_and_fov(
                     render_cam, render_look, render_up, auto_fov=auto_fov, manual_fov=manual_fov
@@ -3906,6 +4579,23 @@ class BpySceneCtx:
                         camera_position, look_at_target, transparent_alpha, z_max
                     )
 
+                transparent_objects = self._collect_transparent_objects(
+                    wall_transparency_records, object_transparency_records
+                )
+
+                if skip_render:
+                    frame_states.append({
+                        "camera_matrix": camera_matrix.copy(),
+                        "fov_y": fov_y,
+                        "transparent_objects": transparent_objects,
+                    })
+                    if pano:
+                        pano_frame_states.append({
+                            "camera_matrix": camera_matrix.copy(),
+                            "transparent_objects": transparent_objects,
+                        })
+                    continue
+
                 camera_obj, camera_data, prev_camera = self._create_render_camera(
                     camera_matrix, fov_y, width, height
                 )
@@ -3914,9 +4604,6 @@ class BpySceneCtx:
                 render.image_settings.color_mode = 'RGBA'
                 render.film_transparent = hdri_transparent_background
 
-                transparent_objects = self._collect_transparent_objects(
-                    wall_transparency_records, object_transparency_records
-                )
                 depth_scale = None
                 try:
                     if render_depth:
@@ -3930,7 +4617,7 @@ class BpySceneCtx:
                     else:
                         bpy.ops.render.render(write_still=True)
 
-                    if export_point_cloud:
+                    if do_planar:
                         self.export_planar_faces_and_lines(
                             output_path,
                             camera_obj,
@@ -3943,8 +4630,8 @@ class BpySceneCtx:
                             show_ceiling=show_ceiling,
                             transparent_objects=transparent_objects,
                         )
-                    if render_semantic:
-                        self.render_semantic_png(output_path)
+                    if render_semantic or visible_geometry:
+                        self.render_semantic_bundle(output_path, save_artifacts=True)
 
                     frame_states.append({
                         "camera_matrix": camera_matrix.copy(),
@@ -3952,21 +4639,22 @@ class BpySceneCtx:
                         "transparent_objects": transparent_objects,
                     })
 
-                    para_path = self._camera_para_path(output_path)
-                    camera_para = vss.build_camera_para(
-                        world_cam,
-                        world_look,
-                        world_up,
-                        fov_y,
-                        float(width) / float(height),
-                        reference_frame=(frame_idx == 0),
-                        depth_scale=depth_scale,
-                        include_normal_fields=depth_scale is not None,
-                        width=width,
-                        height=height,
-                    )
-                    with open(para_path, 'w') as f:
-                        json.dump(camera_para, f, indent=4)
+                    if write_camera_para:
+                        para_path = self._camera_para_path(output_path)
+                        camera_para = vss.build_camera_para(
+                            world_cam,
+                            world_look,
+                            world_up,
+                            fov_y,
+                            float(width) / float(height),
+                            reference_frame=(frame_idx == 0),
+                            depth_scale=depth_scale,
+                            include_normal_fields=depth_scale is not None,
+                            width=width,
+                            height=height,
+                        )
+                        with open(para_path, 'w') as f:
+                            json.dump(camera_para, f, indent=4)
                     if pano:
                         self._render_pano_view_pass(
                             output_path,
@@ -4002,7 +4690,7 @@ class BpySceneCtx:
                     self._destroy_render_camera(camera_obj, camera_data, prev_camera, self.scene)
                     util_bpy.cleanup_bpy_render_memory(self.scene)
 
-            if visible_geometry and (export_glb or export_point_cloud) and frame_states:
+            if visible_geometry and (export_glb or do_visible_ply or export_voxel) and frame_states:
                 original_camera = self.scene.camera
                 camera_states = []
                 temp_cameras = []
@@ -4016,9 +4704,10 @@ class BpySceneCtx:
                     self.export_visible_geometry_multi(
                         seq_dir,
                         camera_states,
-                        export_glb=export_glb,
-                        export_point_cloud=export_point_cloud,
-                    )
+                    export_glb=export_glb,
+                    export_point_cloud=do_visible_ply,
+                    export_voxel=export_voxel,
+                )
                 finally:
                     for cam_obj, cam_data in reversed(temp_cameras):
                         if cam_obj and self.scene.camera == cam_obj:
@@ -4028,7 +4717,7 @@ class BpySceneCtx:
                                 self.scene.camera = None
                         self._remove_camera_blocks(cam_obj, cam_data)
 
-            if pano and visible_geometry and (export_glb or export_point_cloud) and pano_frame_states:
+            if pano and visible_geometry and (export_glb or export_point_cloud or export_voxel) and pano_frame_states:
                 pano_dir = f"{seq_dir}_pano"
                 original_camera = self.scene.camera
                 camera_states = []
@@ -4044,9 +4733,10 @@ class BpySceneCtx:
                     self.export_visible_geometry_pano_multi(
                         pano_dir,
                         camera_states,
-                        export_glb=export_glb,
-                        export_point_cloud=export_point_cloud,
-                    )
+                    export_glb=export_glb,
+                    export_point_cloud=export_point_cloud,
+                    export_voxel=export_voxel,
+                )
                 finally:
                     for cam_obj, cam_data in reversed(temp_cameras):
                         if cam_obj and self.scene.camera == cam_obj:
@@ -4056,9 +4746,10 @@ class BpySceneCtx:
                                 self.scene.camera = None
                         self._remove_camera_blocks(cam_obj, cam_data)
 
-            self.write_opencv_ssl_for_view(seq_dir, world_cam0, world_look0, world_up0)
+            if write_ssl:
+                self.write_opencv_ssl_for_view(seq_dir, world_cam0, world_look0, world_up0)
             pano_ssl_dir = f"{seq_dir}_pano"
-            if os.path.isdir(pano_ssl_dir):
+            if write_ssl and os.path.isdir(pano_ssl_dir):
                 self.write_opencv_ssl_for_view(pano_ssl_dir, world_cam0, world_look0, world_up0)
 
         total_time = time.perf_counter() - total_start
@@ -4078,11 +4769,17 @@ class BpySceneCtx:
                     export_glb: bool = False,
                     glb_path: Optional[str] = None,
                     export_point_cloud: bool = False,
+                    export_voxel: bool = False,
                     visible_geometry: bool = False,
                     render_semantic: bool = False,
                     pano: bool = False,
                     pano_resolution: int = 4096,
-                    view_dir_name: Optional[str] = None):
+                    view_dir_name: Optional[str] = None,
+                    export_planar_faces: Optional[bool] = None,
+                    export_visible_point_cloud: Optional[bool] = None,
+                    skip_render: bool = False,
+                    write_ssl: bool = True,
+                    write_camera_para: bool = True):
         if self._is_view_sequence(camera_position, look_at_target, up_vector):
             cam_positions, look_ats, ups = self._expand_camera_sequence_args(
                 camera_position, look_at_target, up_vector
@@ -4112,11 +4809,17 @@ class BpySceneCtx:
                 rebuild=rebuild,
                 export_glb=export_glb,
                 export_point_cloud=export_point_cloud,
+                export_voxel=export_voxel,
                 visible_geometry=visible_geometry,
                 render_semantic=render_semantic,
                 pano=pano,
                 pano_resolution=pano_resolution,
                 view_dir_name=view_dir_name,
+                export_planar_faces=export_planar_faces,
+                export_visible_point_cloud=export_visible_point_cloud,
+                skip_render=skip_render,
+                write_ssl=write_ssl,
+                write_camera_para=write_camera_para,
             )
 
         output_path = self._resolve_view_output_path(output_path, view_dir_name=view_dir_name)
@@ -4266,7 +4969,7 @@ class BpySceneCtx:
             render.image_settings.color_mode = 'RGBA'
             render.film_transparent = hdri_transparent_background
 
-            print(f"🎬 渲染中 ({width}x{height})...")
+            print(f"🎬 渲染中 ({width}x{height})..." if not skip_render else "⏭️  跳过 Cycles 渲染（主帧产物已存在）")
             depth_scale = None
             transparent_objects = {
                 self.mesh_nodes["walls"].get(wall_id, {}).get("node")
@@ -4274,9 +4977,22 @@ class BpySceneCtx:
             }
             transparent_objects.update(record.get("object") for record in object_transparency_records)
             transparent_objects = {obj for obj in transparent_objects if obj is not None}
+            do_visible_ply = visible_geometry and export_point_cloud
+            if export_visible_point_cloud is not None:
+                do_visible_ply = bool(export_visible_point_cloud)
+            do_planar = export_point_cloud if export_planar_faces is None else bool(export_planar_faces)
             try:
                 render_start = time.perf_counter()
-                if render_depth:
+                if skip_render:
+                    render_time = 0.0
+                    para_path = self._camera_para_path(output_path)
+                    if os.path.isfile(para_path):
+                        try:
+                            with open(para_path, "r", encoding="utf-8") as f:
+                                depth_scale = json.load(f).get("depth_scale")
+                        except (json.JSONDecodeError, OSError):
+                            depth_scale = None
+                elif render_depth:
                     depth_path = os.path.join(
                         os.path.dirname(output_path),
                         f"{os.path.splitext(os.path.basename(output_path))[0]}_depth.png",
@@ -4284,18 +5000,33 @@ class BpySceneCtx:
                     depth_scale = util_bpy.render_color_and_depth_png(
                         self.scene, output_path, depth_path, skip_objects=transparent_objects
                     )
+                    render_time = time.perf_counter() - render_start
                 else:
                     bpy.ops.render.render(write_still=True)
-                render_time = time.perf_counter() - render_start
-                if visible_geometry and (export_glb or export_point_cloud):
+                    render_time = time.perf_counter() - render_start
+                if skip_render and visible_geometry:
+                    skipped_geom = []
+                    if not export_glb:
+                        skipped_geom.append("GLB")
+                    if not do_visible_ply:
+                        skipped_geom.append("点云")
+                    if not export_voxel:
+                        skipped_geom.append("体素")
+                    if skipped_geom:
+                        print(f"⏭️  跳过可见几何导出（已存在）: {', '.join(skipped_geom)}")
+                if render_semantic or visible_geometry:
+                    self.render_semantic_bundle(output_path, save_artifacts=True)
+                if visible_geometry and (export_glb or do_visible_ply or export_voxel):
                     self.export_visible_geometry(
                         os.path.dirname(output_path),
                         camera_obj,
                         export_glb=export_glb,
-                        export_point_cloud=export_point_cloud,
+                        export_point_cloud=do_visible_ply,
+                        export_voxel=export_voxel,
                         transparent_objects=transparent_objects,
+                        view_image_path=output_path,
                     )
-                if export_point_cloud:
+                if do_planar:
                     self.export_planar_faces_and_lines(
                         output_path,
                         camera_obj,
@@ -4308,8 +5039,6 @@ class BpySceneCtx:
                         show_ceiling=show_ceiling,
                         transparent_objects=transparent_objects,
                     )
-                if render_semantic:
-                    self.render_semantic_png(output_path)
                 if pano:
                     self._render_pano_view_pass(
                         output_path,
@@ -4319,7 +5048,8 @@ class BpySceneCtx:
                         render_semantic=render_semantic,
                         visible_geometry=visible_geometry,
                         export_glb=export_glb,
-                        export_point_cloud=export_point_cloud,
+                        export_point_cloud=do_visible_ply,
+                        export_voxel=export_voxel,
                         transparent_objects=transparent_objects,
                         vss=vss,
                         world_cam_w=world_cam_w,
@@ -4351,22 +5081,24 @@ class BpySceneCtx:
             if export_glb and not visible_geometry and glb_path is not None:
                 self.export_glb(glb_path or os.path.splitext(output_path)[0] + ".glb")
 
-            para_path = self._camera_para_path(output_path)
-            camera_para = vss.build_camera_para(
-                world_cam_w,
-                world_look_w,
-                vss.world_up,
-                float(fov_y),
-                float(width) / float(height),
-                reference_frame=True,
-                depth_scale=depth_scale,
-                include_normal_fields=depth_scale is not None,
-                width=width,
-                height=height,
-            )
-            with open(para_path, 'w') as f:
-                json.dump(camera_para, f, indent=4)
-            self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
+            if write_camera_para:
+                para_path = self._camera_para_path(output_path)
+                camera_para = vss.build_camera_para(
+                    world_cam_w,
+                    world_look_w,
+                    vss.world_up,
+                    float(fov_y),
+                    float(width) / float(height),
+                    reference_frame=True,
+                    depth_scale=depth_scale,
+                    include_normal_fields=depth_scale is not None,
+                    width=width,
+                    height=height,
+                )
+                with open(para_path, 'w') as f:
+                    json.dump(camera_para, f, indent=4)
+            if write_ssl:
+                self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
     
 # ==================== 测试代码 ====================
 

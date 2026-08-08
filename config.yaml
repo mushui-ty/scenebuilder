@@ -53,4 +53,8 @@ nav_mask_depth_tolerance_m: 0.05  # 可行走深度：相机到地面距离 ± �
 nav_mask_inset_m: 0.15           # 贴外边界向内偏移（米）
 nav_mask_point_spacing_m: 0.3    # 沿内边界采样点间距（米）
 
+# 5. 可见几何 mask 判定
+ratio_if_visible: 0.1             # 可见 mask / 整体 mask 低于此比例视为 mostly_occluded
+min_overall_pixels: 16            # 整体 mask 像素数低于此值不参与可见比例判定与几何导出
+
 

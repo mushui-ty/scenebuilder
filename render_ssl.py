@@ -250,6 +250,7 @@ def _job_render_kwargs(job: dict) -> dict:
     return dict(
         export_glb=job.get("export_glb", False),
         export_point_cloud=job.get("export_point_cloud", False),
+        export_voxel=job.get("export_voxel", False),
         visible_geometry=job.get("visible_geometry", False),
         render_semantic=job.get("semantic", False),
         render_depth=job.get("depth", False),
@@ -266,16 +267,20 @@ def worker_render_view(job_path: str, view_name: str) -> None:
 
     try:
         from .core.render_resume import (
+            apply_partial_resume_to_kwargs,
             is_view_complete,
             list_primary_frames,
+            missing_view_artifacts,
             record_view_complete,
             view_dir_for,
             view_dir_name_for,
         )
     except (ImportError, ValueError):
         from core.render_resume import (  # type: ignore
+            apply_partial_resume_to_kwargs,
             is_view_complete,
             list_primary_frames,
+            missing_view_artifacts,
             record_view_complete,
             view_dir_for,
             view_dir_name_for,
@@ -288,6 +293,16 @@ def worker_render_view(job_path: str, view_name: str) -> None:
     ):
         print(f"⏭️  跳过已完成视角: {view_name}")
         return
+
+    if job.get("resume", True):
+        missing = missing_view_artifacts(
+            output_dir, view_name, job, auto_spec=auto_spec
+        )
+        extra = apply_partial_resume_to_kwargs(job, missing)
+        if missing:
+            print(f"🔧 补跑缺失产物 [{view_name}]: {', '.join(sorted(missing))}")
+    else:
+        extra = _job_render_kwargs(job)
 
     if view_name in auto_specs:
         _render_auto_view_spec(ctx, output_dir, auto_specs[view_name], extra, view_dir_name=view_name)
@@ -345,14 +360,18 @@ def worker_render_view(job_path: str, view_name: str) -> None:
 def worker_render_post(job_path: str) -> None:
     job = _load_job(job_path)
     output_dir = job["output_dir"]
+    holo_geometry = bool(job.get("holo_geometry"))
 
     try:
         from .core.render_resume import is_post_export_complete, record_post_complete
     except (ImportError, ValueError):
         from core.render_resume import is_post_export_complete, record_post_complete  # type: ignore
 
+    if not holo_geometry:
+        return
+
     if job.get("resume", True) and is_post_export_complete(output_dir, job):
-        print("⏭️  跳过全场景 GLB/点云导出（已完成）")
+        print("⏭️  跳过全场景几何导出（已完成）")
         return
 
     ctx = _create_render_ctx(job)
@@ -371,6 +390,15 @@ def worker_render_post(job_path: str) -> None:
             ctx.export_point_cloud(point_cloud_dir, rebuild=True, show_ceiling=True)
         except Exception as exc:
             print(f"⚠️ 点云导出失败: {exc}")
+
+    if job.get("export_voxel"):
+        if hasattr(ctx, "export_voxel"):
+            try:
+                ctx.export_voxel(output_dir, rebuild=True, show_ceiling=True)
+            except Exception as exc:
+                print(f"⚠️ 体素导出失败: {exc}")
+        else:
+            print("⚠️ 当前后端不支持全场景体素导出")
 
     with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(scene_json, f, indent=2, ensure_ascii=False)
@@ -523,7 +551,9 @@ def render_ssl(
     views: ViewsSpec = None,
     export_glb: bool = False,
     export_point_cloud: bool = False,
+    export_voxel: bool = False,
     visible_geometry: bool = False,
+    holo_geometry: bool = False,
     semantic: bool = False,
     depth: bool = False,
     pano: bool = False,
@@ -538,6 +568,8 @@ def render_ssl(
 ):
     """渲染场景。``input_text`` 可为标准 SSL 文本，或 JSON 字符串。
 
+    ``visible_geometry=True`` 时会强制 ``semantic=True``（可见比例依赖 semantic mask）。
+
     ``normalized_topdown=True`` 时：
     - 唯一输出根目录 Y = ``{output_root}_normalized``（否则 Y = ``{output_root}``）
     - 先对 SSL 做 pixel-aligned 规范化，后续所有渲染均基于该坐标系
@@ -547,6 +579,8 @@ def render_ssl(
 
     各视角在世界（或规范化）SSL 下渲染；可见几何主文件为世界 SSL，并写 ``*_opencv`` 副本。
     """
+    if visible_geometry:
+        semantic = True
     if views == "auto":
         normalized_topdown = True
         floor_path = True
@@ -688,7 +722,9 @@ def render_ssl(
         "samples": samples,
         "export_glb": export_glb,
         "export_point_cloud": export_point_cloud,
+        "export_voxel": export_voxel,
         "visible_geometry": visible_geometry,
+        "holo_geometry": holo_geometry,
         "semantic": semantic,
         "depth": depth,
         "pano": pano,
@@ -726,8 +762,9 @@ def render_ssl(
     elif normalized_topdown:
         print("⏭️  未指定 views，跳过多视角渲染")
 
-    if export_glb or export_point_cloud or views_to_run:
-        print(f"🔄 子进程导出 GLB/点云 → {y_dir}")
+    need_holo_post = holo_geometry and (export_glb or export_point_cloud or export_voxel)
+    if need_holo_post:
+        print(f"🔄 子进程导出全场景几何 → {y_dir}")
         _spawn_worker_post(job_path)
 
     print(f"✅ 渲染完成！输出目录: {os.path.abspath(y_dir)}")
@@ -815,7 +852,11 @@ def main() -> None:
     parser.add_argument("--glb", action="store_true", help="导出 GLB")
     parser.add_argument("--ply", action="store_true", help="导出彩色点云 PLY")
     parser.add_argument("--visible_geometry", action="store_true",
-                        help="按视角视锥裁剪后导出可见 GLB/PLY（需配合 --glb 或 --ply）")
+                        help="各视角视锥内 GLB/PLY/体素（需配合 --glb、--ply 或 --voxel）")
+    parser.add_argument("--holo_geometry", action="store_true",
+                        help="根目录全场景 GLB/点云/体素（需配合 --glb、--ply 或 --voxel）")
+    parser.add_argument("--voxel", action="store_true",
+                        help="256³ 彩色占用体素（各视角需 --visible_geometry，根目录需 --holo_geometry）")
     parser.add_argument("--semantic", action="store_true", help="导出语义分割图")
     parser.add_argument("--depth", action="store_true", help="导出深度图与法线图")
     parser.add_argument("--pano", action="store_true",
@@ -863,8 +904,10 @@ def main() -> None:
         views=views,
         export_glb=args.glb,
         export_point_cloud=args.ply,
+        export_voxel=args.voxel,
         visible_geometry=args.visible_geometry,
-        semantic=args.semantic,
+        holo_geometry=args.holo_geometry,
+        semantic=args.semantic or args.visible_geometry,
         depth=args.depth,
         pano=args.pano,
         pano_resolution=args.pano_resolution,
@@ -904,5 +947,5 @@ if __name__ == "__main__":
     main()
 
 '''
-python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Office/325148303_0/render_output/ssl.txt --views auto --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Office/325148303_0/out0     --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified --ply --visible_geometry --semantic --depth --pano
+python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt --views auto --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out14  --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified --ply --visible_geometry --semantic --depth --pano --voxel --holo_geometry
 '''
