@@ -51,7 +51,8 @@ class SceneCtx:
         }
     }
 
-    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None):
+    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None,
+                 hole_extra_path: Optional[str] = None):
         self.context = {
             "meta": {"scene_type": scene_type},
             "walls": {},
@@ -60,7 +61,8 @@ class SceneCtx:
         self.scene = None
         self.if_set_lights = False
         self.model_extra_path = model_extra_path
-        
+        self.hole_extra_path = hole_extra_path
+
         # Keep all node references keyed by unique ID
         self.mesh_nodes = {
             "walls": {},      # wall_id -> node
@@ -86,6 +88,24 @@ class SceneCtx:
         generate = self.config.get("model_generate_path")
         if generate:
             candidates.append(generate)
+        return self._dedupe_paths(candidates)
+
+    def _hole_asset_search_paths(self) -> List[str]:
+        candidates = []
+        if self.model_extra_path:
+            candidates.append(self.model_extra_path)
+        if self.hole_extra_path:
+            candidates.append(self.hole_extra_path)
+        default = self.config.get("model_hole_path")
+        if default:
+            candidates.append(default)
+        generate = self.config.get("model_generate_path")
+        if generate:
+            candidates.append(generate)
+        return self._dedupe_paths(candidates)
+
+    @staticmethod
+    def _dedupe_paths(candidates: List[str]) -> List[str]:
         seen = set()
         ordered = []
         for path in candidates:
@@ -98,7 +118,7 @@ class SceneCtx:
         util_data.normalize_scene_context(
             self.context,
             model_paths=self._asset_search_paths("model_path"),
-            hole_paths=self._asset_search_paths("model_hole_path"),
+            hole_paths=self._hole_asset_search_paths(),
         )
 
     def _object_export_identity(self, category: str, object_id: str):
@@ -512,6 +532,8 @@ class SceneCtx:
             config_with_extra = self.config.copy()
             if self.model_extra_path:
                 config_with_extra["model_extra_path"] = self.model_extra_path
+            if self.hole_extra_path:
+                config_with_extra["hole_extra_path"] = self.hole_extra_path
             print("🚪 Processing doors and windows (loading real meshes by asset_id)...")
 
             for wall_id, wall in self.context["walls"].items():

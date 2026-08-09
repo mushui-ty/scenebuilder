@@ -49,7 +49,8 @@ class BpySceneCtx:
     """Scene context manager - pure Blender version"""
     
     
-    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None, 
+    def __init__(self, scene_type: str, model_extra_path: Optional[str] = None,
+                 hole_extra_path: Optional[str] = None,
                  render_engine: Literal["CYCLES", "EEVEE"] = "CYCLES"):
         # Data structure identical to scenebuilder.py
         self.context = {
@@ -60,6 +61,7 @@ class BpySceneCtx:
         self.scene = None
         self.if_set_lights = False
         self.model_extra_path = model_extra_path
+        self.hole_extra_path = hole_extra_path
         self.render_engine = render_engine
         
         # Model cache: asset_id -> master_collection
@@ -102,6 +104,25 @@ class BpySceneCtx:
         generate = self.config.get("model_generate_path")
         if generate:
             candidates.append(generate)
+        return self._dedupe_paths(candidates)
+
+    def _hole_asset_search_paths(self) -> List[str]:
+        """Door/window: assets dir → hole fallback → config model_hole_path → generate."""
+        candidates = []
+        if self.model_extra_path:
+            candidates.append(self.model_extra_path)
+        if self.hole_extra_path:
+            candidates.append(self.hole_extra_path)
+        default = self.config.get("model_hole_path")
+        if default:
+            candidates.append(default)
+        generate = self.config.get("model_generate_path")
+        if generate:
+            candidates.append(generate)
+        return self._dedupe_paths(candidates)
+
+    @staticmethod
+    def _dedupe_paths(candidates: List[str]) -> List[str]:
         seen = set()
         ordered = []
         for path in candidates:
@@ -418,7 +439,7 @@ class BpySceneCtx:
         util_data.normalize_scene_context(
             self.context,
             model_paths=self._asset_search_paths("model_path"),
-            hole_paths=self._asset_search_paths("model_hole_path"),
+            hole_paths=self._hole_asset_search_paths(),
         )
 
     def _object_export_identity(self, category: str, object_id: str):
@@ -766,7 +787,7 @@ class BpySceneCtx:
             print(f"🚪 Processing doors and windows (loading by asset_id)...")
             wall_thickness = self.config.get("wall_thickness", 0.1)
             
-            hole_paths = self._asset_search_paths("model_hole_path")
+            hole_paths = self._hole_asset_search_paths()
 
             for wall_id, wall in self.context["walls"].items():
                 wall_s = np.array(wall["s"])

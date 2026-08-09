@@ -1853,11 +1853,15 @@ def cut_opening_from_wall(wall_mesh: trimesh.Trimesh, wall: Dict, opening: Dict,
 
 
 def build_asset_search_paths(config: Dict, default_key: str = "model_path") -> List[str]:
-    """Search order: extra_path -> default -> generate (deduped, stable)."""
+    """Search order: extra_path -> [hole_extra_path if door/window] -> default -> generate (deduped, stable)."""
     candidates = []
     extra = config.get("model_extra_path")
     if extra:
         candidates.append(extra)
+    if default_key == "model_hole_path":
+        hole_extra = config.get("hole_extra_path")
+        if hole_extra:
+            candidates.append(hole_extra)
     default = config.get(default_key)
     if default:
         candidates.append(default)

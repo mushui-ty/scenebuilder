@@ -299,20 +299,25 @@ def _load_job(job_path: str) -> dict:
         return json.load(f)
 
 
-def _instantiate_ctx(backend: str, room_type: str, asset_dir: Optional[str]):
+def _instantiate_ctx(
+    backend: str,
+    room_type: str,
+    asset_dir: Optional[str],
+    hole_asset_dir: Optional[str] = None,
+):
     """Create SceneCtx / BpySceneCtx for the given backend."""
     if backend == "pyrender":
         try:
             from .core.scenebuilder import SceneCtx
         except (ImportError, ValueError):
             from core.scenebuilder import SceneCtx  # type: ignore
-        return SceneCtx(room_type, asset_dir)
+        return SceneCtx(room_type, asset_dir, hole_asset_dir)
 
     try:
         from .core.scenebuilder_bpy import BpySceneCtx
     except (ImportError, ValueError):
         from core.scenebuilder_bpy import BpySceneCtx  # type: ignore
-    return BpySceneCtx(room_type, asset_dir)
+    return BpySceneCtx(room_type, asset_dir, hole_asset_dir)
 
 
 def _prepare_render_ctx(
@@ -363,6 +368,7 @@ def _create_render_ctx(job: dict):
         job.get("backend", "bpy"),
         scene_json["room"]["room_type"],
         job.get("asset_dir"),
+        job.get("hole_asset_dir"),
     )
     return _prepare_render_ctx(
         ctx,
@@ -643,6 +649,7 @@ def render_normalized_topdown(
     output_dir: str,
     backend: str = "bpy",
     asset_dir: Optional[str] = None,
+    hole_asset_dir: Optional[str] = None,
     texture_dir: Optional[str] = None,
     gen_texture: bool = False,
     image: Optional[str] = None,
@@ -671,6 +678,7 @@ def render_normalized_topdown(
         asset_mode=asset_mode,
         outpaint_image_dir=outpaint_image_dir,
         asset_dir=asset_dir,
+        hole_asset_dir=hole_asset_dir,
         gen_3d_model=gen_3d_model,
         gen_texture=gen_texture,
         texture_dir=texture_dir,
@@ -706,6 +714,7 @@ def render_ssl(
     asset_mode: Literal["none", "retrieve", "generate"] = "none",
     outpaint_image_dir: Optional[str] = None,
     asset_dir: Optional[str] = "/data-nas/data/dataset/qunhe/Manycore-Future/generate",
+    hole_asset_dir: Optional[str] = None,
     gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
     gen_texture: bool = False,
     texture_dir: Optional[str] = None,
@@ -797,7 +806,7 @@ def render_ssl(
     os.makedirs(y_dir, exist_ok=True)
 
     room_type = scene_json["room"]["room_type"]
-    ctx = _instantiate_ctx(backend, room_type, asset_dir)
+    ctx = _instantiate_ctx(backend, room_type, asset_dir, hole_asset_dir)
     _prepare_render_ctx(
         ctx,
         scene_json,
@@ -918,6 +927,7 @@ def render_ssl(
         "output_dir": y_dir,
         "normalized_topdown": normalized_topdown,
         "asset_dir": asset_dir,
+        "hole_asset_dir": hole_asset_dir,
         "texture_dir": texture_dir,
         "gen_texture": gen_texture,
         "image": image,
@@ -1112,6 +1122,11 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     parser.add_argument("--backend", choices=["bpy", "pyrender"], default="bpy", help="Render backend")
     parser.add_argument("--texture", default=None, help="Texture directory")
     parser.add_argument("--assets", default=None, help="3D asset directory (auto-detected if omitted)")
+    parser.add_argument(
+        "--hole_assets",
+        default=None,
+        help="Door/window asset fallback directory; used when asset_id is missing under --assets, before config model_hole_path",
+    )
     parser.add_argument("--glb", action="store_true", help="Export GLB")
     parser.add_argument("--ply", action="store_true", help="Export colored point cloud PLY")
     parser.add_argument("--visible_geometry", action="store_true",
@@ -1175,6 +1190,7 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         retrieve_hole=True,
         asset_mode="none",
         asset_dir=asset_dir,
+        hole_asset_dir=args.hole_assets,
         texture_dir=texture_dir,
         views=views,
         export_glb=args.glb,

@@ -552,6 +552,7 @@ def render_ssl(
     asset_mode: Literal["none", "retrieve", "generate"] = "none",
     outpaint_image_dir: Optional[str] = None,
     asset_dir: Optional[str] = None,
+    hole_asset_dir: Optional[str] = None,
     gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
     gen_texture: bool = False,
     texture_dir: Optional[str] = None,
@@ -589,6 +590,7 @@ def render_ssl(
 | `--views V ...`        | `views`                   | 不指定 = 不渲染视角；`auto` 单独使用              |
 | `--backend bpy         | pyrender`                 | `backend`                            |
 | `--assets DIR`         | `asset_dir`               | 省略时尝试 ssl 旁 `assets/` 等              |
+| `--hole_assets DIR`    | `hole_asset_dir`          | 门窗 fallback：`--assets` 找不到 asset_id 时使用，再回退 config `model_hole_path` |
 | `--texture DIR`        | `texture_dir`             | 含 `floor/wall/ceiling_texture.png`   |
 | `--glb`                | `export_glb=True`         | 几何开关（须配合 `--visible_geometry` 或 `--holo_geometry`） |
 | `--ply`                | `export_point_cloud=True` | 几何开关 + 各视角 `planar_faces`（后者与 `--visible_geometry` 无关） |

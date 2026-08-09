@@ -552,6 +552,7 @@ def render_ssl(
     asset_mode: Literal["none", "retrieve", "generate"] = "none",
     outpaint_image_dir: Optional[str] = None,
     asset_dir: Optional[str] = None,
+    hole_asset_dir: Optional[str] = None,
     gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
     gen_texture: bool = False,
     texture_dir: Optional[str] = None,
@@ -589,6 +590,7 @@ def render_ssl(
 | `--views V ...` | `views` | Unspecified = no view rendering; `auto` used alone |
 | `--backend bpy         | pyrender` | `backend` |
 | `--assets DIR` | `asset_dir` | When omitted, tries `assets/` next to ssl, etc. |
+| `--hole_assets DIR` | `hole_asset_dir` | Door/window fallback when asset_id is missing under `--assets`, before config `model_hole_path` |
 | `--texture DIR` | `texture_dir` | Contains `floor/wall/ceiling_texture.png` |
 | `--glb` | `export_glb=True` | Geometry flag (requires `--visible_geometry` or `--holo_geometry`) |
 | `--ply` | `export_point_cloud=True` | Geometry flag + per-view `planar_faces` (latter independent of `--visible_geometry`) |

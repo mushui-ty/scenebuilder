@@ -138,6 +138,7 @@ python render_ssl.py \
   --ssl path/to/ssl.txt \
   --output out \
   --assets path/to/assets \
+  --hole_assets path/to/holes \
   --visible_geometry --holo_geometry \
   --glb --ply --voxel \
   --semantic --depth --pano \
