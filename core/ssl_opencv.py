@@ -261,5 +261,5 @@ def write_opencv_ssl(
     ssl_path = os.path.join(output_dir, SSL_OPENCV_FILENAME)
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(ssl_text)
-    print(f"✅ OpenCV SSL 已导出: {ssl_path}")
+    print(f"✅ OpenCV SSL exported: {ssl_path}")
     return ssl_path

@@ -1,4 +1,4 @@
-"""平面内表面顶点提取、视锥裁剪、JSON 导出与连线 overlay。"""
+"""Planar inner-surface vertex extraction, frustum clip, JSON export, and line overlay."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def clip_polygon_to_render_frustum(
     vertices: np.ndarray,
     clip_mats: Tuple[np.ndarray, np.ndarray],
 ) -> np.ndarray:
-    """Blender calc_matrix_camera 齐次 clip space 裁剪（与可见几何一致）。"""
+    """Blender calc_matrix_camera homogeneous clip-space cull (consistent with visible geometry)."""
     proj, modelview = clip_mats
     return util_bpy.clip_polygon_to_render_frustum(vertices, proj, modelview)
 
@@ -40,7 +40,7 @@ def _as3(v) -> np.ndarray:
 
 
 def compute_wall_inner_quad(wall: Dict[str, Any], wall_height: float) -> np.ndarray:
-    """墙体内表面四顶点（SSL 中 p/q 即内墙底点）。"""
+    """Inner wall surface quad (in SSL, p/q are inner wall base points)."""
     s = np.asarray(wall["s"], dtype=float)[:2]
     e = np.asarray(wall["e"], dtype=float)[:2]
     h = float(wall_height)
@@ -60,7 +60,7 @@ def compute_opening_inner_quad(
     wall: Dict[str, Any],
     inner_offset: float = 0.001,
 ) -> np.ndarray:
-    """门/窗内表面四顶点，逻辑与 util.create_door_or_window_mesh 一致。"""
+    """Door/window inner surface quad; logic matches util.create_door_or_window_mesh."""
     center = opening["center"]
     width = float(opening["width"])
     height = float(opening["height"])
@@ -101,12 +101,12 @@ def compute_opening_inner_quad(
 
 
 def compute_floor_polygon(vertices_2d: Sequence[Sequence[float]]) -> np.ndarray:
-    """地板顶面（z=0）。"""
+    """Floor top face (z=0)."""
     return np.array([[_as3(v)[0], _as3(v)[1], 0.0] for v in vertices_2d], dtype=float)
 
 
 def compute_ceiling_polygon(vertices_2d: Sequence[Sequence[float]], z_max: float) -> np.ndarray:
-    """天花板底面（z=z_max）。"""
+    """Ceiling bottom face (z=z_max)."""
     z = float(z_max)
     return np.array([[_as3(v)[0], _as3(v)[1], z] for v in vertices_2d], dtype=float)
 
@@ -132,7 +132,7 @@ def _camera_basis(camera_pos: np.ndarray, reference: np.ndarray) -> Tuple[np.nda
 
 
 def _start_vertex_index(vertices: np.ndarray, eps: float = 1e-9) -> int:
-    """选出 z 最小 → y 最小 → x 最小的顶点作为环起点。"""
+    """Pick ring start vertex: minimum z → y → x."""
     idx = 0
     for i in range(1, len(vertices)):
         vi, vj = vertices[i], vertices[idx]
@@ -147,7 +147,7 @@ def _start_vertex_index(vertices: np.ndarray, eps: float = 1e-9) -> int:
 
 
 def _signed_area_in_camera_plane(vertices: np.ndarray, camera_pos: np.ndarray) -> float:
-    """相机视平面上的有符号面积，>0 表示从相机看为 CCW。"""
+    """Signed area in camera view plane; >0 means CCW as seen from camera."""
     verts = np.asarray(vertices, dtype=float)
     if len(verts) < 3:
         return 0.0
@@ -169,7 +169,7 @@ def finalize_ring_vertices(
     vertices: np.ndarray,
     camera_pos: np.ndarray,
 ) -> np.ndarray:
-    """保持输入边界顺序（拓扑），仅确保面向相机 CCW，并旋转到规范起点。"""
+    """Preserve input boundary order (topology); ensure CCW facing camera; rotate to canonical start."""
     verts = np.asarray(vertices, dtype=float)
     if len(verts) < 3:
         return verts
@@ -183,7 +183,7 @@ def finalize_ring_vertices(
 
 
 def make_bpy_view_context(scene, camera_obj, width: int, height: int) -> Dict[str, Any]:
-    """构建 Blender 视锥裁剪矩阵与像素投影（world_to_camera_view）。"""
+    """Build Blender frustum clip matrices and pixel projection (world_to_camera_view)."""
     from bpy_extras.object_utils import world_to_camera_view
     import mathutils
 
@@ -210,7 +210,7 @@ def make_bpy_view_context(scene, camera_obj, width: int, height: int) -> Dict[st
 
 
 def make_bpy_pano_view_context(scene, camera_obj, width: int, height: int) -> Dict[str, Any]:
-    """构建 equirectangular 全景像素投影；不提供视锥裁剪矩阵。"""
+    """Build equirectangular panorama pixel projection; no frustum clip matrix."""
     world_to_camera = camera_obj.matrix_world.inverted()
 
     def to_pixel(co: np.ndarray) -> List[float]:
@@ -236,7 +236,7 @@ def make_bpy_pano_view_context(scene, camera_obj, width: int, height: int) -> Di
 
 
 def make_bpy_project_fn(scene, camera_obj, width: int, height: int):
-    """兼容旧接口。"""
+    """Legacy compatibility wrapper."""
     ctx = make_bpy_view_context(scene, camera_obj, width, height)
     return None, ctx["to_pixel"]
 
@@ -251,7 +251,7 @@ def collect_planar_objects(
     include_floor: bool = True,
     include_ceiling: bool = True,
 ) -> List[Dict[str, Any]]:
-    """收集墙/门/窗/地板/天花板的内表面环。"""
+    """Collect inner-surface rings for walls/doors/windows/floor/ceiling."""
     z_max = float(context["meta"]["z_max"])
     room_vertices = context["meta"]["vertices"]
     objects: List[Dict[str, Any]] = []
@@ -348,7 +348,7 @@ def process_planar_objects_for_view(
     camera_pos: np.ndarray,
     occlusion_fn: Optional[Callable[[str, str, np.ndarray], int]] = None,
 ) -> List[Dict[str, Any]]:
-    """视锥裁剪 + 保持边界顺序 + CCW + 像素坐标。"""
+    """Frustum clip + preserve boundary order + CCW + pixel coordinates."""
     result: List[Dict[str, Any]] = []
     for obj in objects:
         color_key = f"line:{obj['category']}:{obj['id']}"
@@ -393,7 +393,7 @@ def process_planar_objects_for_pano(
     camera_pos: np.ndarray,
     occlusion_fn: Optional[Callable[[str, str, np.ndarray], int]] = None,
 ) -> List[Dict[str, Any]]:
-    """不做视锥裁剪，直接将完整平面环投影到 equirectangular 全景图。"""
+    """No frustum clip; project full planar rings onto equirectangular panorama."""
     result: List[Dict[str, Any]] = []
     for obj in objects:
         color_key = f"line:{obj['category']}:{obj['id']}"
@@ -439,12 +439,12 @@ def draw_lines_overlay(
     line_width: int = 2,
     break_seams: bool = False,
 ) -> None:
-    """在渲染图副本上绘制每个对象的顶点连线（每对象一色）。"""
+    """Draw per-object vertex line loops on a copy of the render image (one color per object)."""
     if Image is None or ImageDraw is None:
-        print("⚠️ PIL 不可用，跳过 planar_faces 连线图")
+        print("⚠️ PIL unavailable; skipping planar_faces line overlay")
         return
     if not os.path.exists(image_path):
-        print(f"⚠️ 渲染图不存在，跳过连线图: {image_path}")
+        print(f"⚠️ Render image not found; skipping line overlay: {image_path}")
         return
 
     img = Image.open(image_path).convert("RGBA")
@@ -471,7 +471,7 @@ def draw_lines_overlay(
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     img.save(output_path)
-    print(f"✅ 平面顶点连线图: {output_path}")
+    print(f"✅ Planar vertex line overlay: {output_path}")
 
 
 def export_planar_faces_for_view(
@@ -492,7 +492,7 @@ def export_planar_faces_for_view(
     occlusion_fn: Optional[Callable[[str, str, np.ndarray], int]] = None,
     panoramic: bool = False,
 ) -> Tuple[str, str]:
-    """导出 {basename}_planar_faces.json 与 {basename}_lines.png。"""
+    """Export {basename}_planar_faces.json and {basename}_lines.png."""
     view_dir = os.path.dirname(output_path) or "."
     base = os.path.splitext(os.path.basename(output_path))[0]
     json_path = os.path.join(view_dir, f"{base}_planar_faces.json")
@@ -529,7 +529,7 @@ def export_planar_faces_for_view(
     os.makedirs(view_dir, exist_ok=True)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
-    print(f"✅ 平面内表面顶点 JSON: {json_path}")
+    print(f"✅ Planar inner-surface vertex JSON: {json_path}")
 
     draw_lines_overlay(output_path, objects, lines_path, break_seams=panoramic)
     return json_path, lines_path

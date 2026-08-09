@@ -1,11 +1,11 @@
 """
-工具函数模块
+Utility functions module
 
-包含SceneCtx使用的各种辅助函数，主要包括：
-- 几何计算相关函数
-- 墙体处理相关函数
-- 多边形计算相关函数
-- Mesh加载和处理相关函数
+Helper functions used by SceneCtx, including:
+- Geometry computation
+- Wall processing
+- Polygon computation
+- Mesh loading and processing
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ import time
 
 
 def allocate_millis_stamp(exclude=None) -> str:
-    """分配毫秒时间戳字符串；exclude 中的 stamp 会被跳过（用于目录名与图片名错开）。"""
+    """Allocate a millisecond timestamp string; stamps in exclude are skipped (separates dir names from image names)."""
     blocked = set(exclude or ())
     while True:
         stamp = str(int(time.time() * 1000))
@@ -38,10 +38,10 @@ def allocate_view_output_dir(
     *,
     sequence: bool = False,
 ) -> Tuple[str, str]:
-    """分配视角输出目录：topdown 固定名，其余用毫秒时间戳。返回 (view_dir, dir_stamp)。
+    """Allocate view output directory: fixed name for topdown, millisecond timestamp otherwise. Returns (view_dir, dir_stamp).
 
-    sequence=True 时目录名为 ``{timestamp}_seq``（相机位姿序列）。
-    dir_stamp 标识一次 render_view 调用；单帧/序列内各帧 png 名用 allocate_millis_stamp(exclude={dir_stamp}) 另取。
+    When sequence=True, directory name is ``{timestamp}_seq`` (camera pose sequence).
+    dir_stamp identifies one render_view call; per-frame png names use allocate_millis_stamp(exclude={dir_stamp}).
     """
     os.makedirs(output_root, exist_ok=True)
     if view_name == "topdown":
@@ -59,13 +59,13 @@ def allocate_view_output_dir(
 
 
 def resolve_topdown_image_path(output_root: str) -> str:
-    """俯视图：在 output_root 下建 topdown/，单帧固定 topdown.png。"""
+    """Top-down view: create topdown/ under output_root; single frame uses topdown.png."""
     view_dir, _ = allocate_view_output_dir(output_root, "topdown")
     return os.path.join(view_dir, "topdown.png")
 
 
 def resolve_view_image_path(output_root: str, view_dir_name: Optional[str] = None) -> str:
-    """单视角：分配 ``{view_dir_name 或 毫秒时间戳}/{image_stamp}.png`` 路径。"""
+    """Single view: allocate ``{view_dir_name or millisecond timestamp}/{image_stamp}.png`` path."""
     if view_dir_name:
         view_dir = os.path.join(output_root, view_dir_name)
         os.makedirs(view_dir, exist_ok=True)
@@ -80,7 +80,7 @@ def allocate_sequence_view_output_dir(
     output_root: str,
     view_dir_name: Optional[str] = None,
 ) -> Tuple[str, str]:
-    """序列视角目录：``view_dir_name`` 给定则用之，否则 ``{timestamp}_seq``。"""
+    """Sequence view directory: use view_dir_name if given, else ``{timestamp}_seq``."""
     os.makedirs(output_root, exist_ok=True)
     if view_dir_name:
         view_dir = os.path.join(output_root, view_dir_name)
@@ -95,71 +95,71 @@ SEMANTIC_BACKGROUND = (0, 0, 0)
 
 def read_jsonl_line(file_path, line_number):
     """
-    读取JSONL文件的第n行（0-based）
+    Read line n (0-based) from a JSONL file
     
     Args:
-        file_path: JSONL文件路径
-        line_number: 行号（从0开始）
+        file_path: Path to JSONL file
+        line_number: Line number (0-based)
     
     Returns:
-        dict: 该行的JSON数据
+        dict: Parsed JSON for that line
     """
     with open(file_path, 'r', encoding='utf-8') as f:
         for i, line in enumerate(f):
             if i == line_number:
                 return json.loads(line.strip())
     
-    raise ValueError(f"行号 {line_number} 超出文件范围")
+    raise ValueError(f"Line number {line_number} is out of file range")
 
 
 
 def generate_unique_id() -> str:
     """
-    生成唯一ID
+    Generate a unique ID
 
-    用途: 为墙体、门窗、家具等对象生成唯一标识符
-    实现: 生成4位字母数字混合ID
+    Purpose: unique identifier for walls, doors, windows, furniture, etc.
+    Implementation: 4-character alphanumeric ID
     """
     import random
     import string
-    chars = string.ascii_letters + string.digits  # 包含大小写字母和数字
+    chars = string.ascii_letters + string.digits  # upper/lower letters and digits
     return ''.join(random.choices(chars, k=4))
 
 
 def point_to_line_distance(point: Tuple[float, float], line_start: Tuple[float, float],
                           line_end: Tuple[float, float], clamp: bool = True) -> Tuple[float, Tuple[float, float]]:
     """
-    计算点到线段或直线的距离和最近点
+    Distance from point to segment or line, and closest point
 
-    用途: 在add_door/add_window时，将门窗中心吸附到墙上
-    实现: 使用向量投影计算点在直线上的投影点
+    Purpose: snap door/window center to wall in add_door/add_window
+    Implementation: vector projection onto the line
 
-    参数:
-        point: 目标点坐标 (x, y)
-        line_start: 起点 (x, y)
-        line_end: 终点 (x, y)
-        clamp: 是否将投影限制在线段内 (True为线段，False为直线)
+    Args:
+        point: Target point (x, y)
+        line_start: Start (x, y)
+        line_end: End (x, y)
+        clamp: Clamp projection to segment (True) or infinite line (False)
 
-    返回:
-        (距离, 最近点坐标)
+    Returns:
+        (distance, closest point)
     """
     x0, y0 = point
     x1, y1 = line_start
     x2, y2 = line_end
 
-    # 线段方向向量
+    # Segment direction vector
     dx = x2 - x1
     dy = y2 - y1
 
-    # 起点到目标点的向量
+    # Vector from start to target point
     px = x0 - x1
     py = y0 - y1
 
-    # 投影到线段上
+    # Project onto segment
     if dx == 0 and dy == 0:
         return np.sqrt(px*px + py*py), (x1, y1)
 
-    # 计算投影参数 t
+    # Projection parameter t
     t = (px * dx + py * dy) / (dx * dx + dy * dy)
     
     if clamp:
@@ -175,22 +175,22 @@ def point_to_line_distance(point: Tuple[float, float], line_start: Tuple[float, 
 def calculate_wall_orientation(wall_start: Tuple[float, float], wall_end: Tuple[float, float],
                                vertices: List[Tuple[float, float]]) -> Tuple[float, float]:
     """
-    计算墙体朝向（指向房间内部的法向量）
+    Wall orientation ( inward-facing normal )
 
-    用途: 在add_walls时为每面墙计算法向量，用于后续墙体mesh生成
-    实现:
-        1. 计算墙的两个垂直方向（候选法向量）
-        2. 从墙中心沿每个方向偏移一小段距离
-        3. 检查测试点是否在地板多边形内
-        4. 选择落在多边形内的方向作为朝向房间内部的方向
+    Purpose: compute per-wall normal in add_walls for mesh generation
+    Implementation:
+        1. Compute two perpendicular directions (candidate normals)
+        2. Offset slightly from wall center along each direction
+        3. Test whether offset points lie inside floor polygon
+        4. Pick the direction inside the polygon as inward normal
 
-    参数:
-        wall_start: 墙起点
-        wall_end: 墙终点
-        vertices: 房间顶点列表（地板多边形，支持凹多边形）
+    Args:
+        wall_start: Wall start
+        wall_end: Wall end
+        vertices: Room vertices (floor polygon, concave OK)
 
-    返回:
-        单位法向量 (nx, ny)，指向房间内部
+    Returns:
+        Unit normal (nx, ny) pointing inward
     """
     dx = wall_end[0] - wall_start[0]
     dy = wall_end[1] - wall_start[1]
@@ -199,17 +199,17 @@ def calculate_wall_orientation(wall_start: Tuple[float, float], wall_end: Tuple[
     if length == 0:
         return (0, 0)
 
-    # 两个可能的法向量（垂直于墙体方向）
+    # Two candidate normals (perpendicular to wall)
     normal1 = (-dy/length, dx/length)
     normal2 = (dy/length, -dx/length)
 
-    # 墙中心点
+    # Wall center
     wall_center = ((wall_start[0] + wall_end[0])/2, (wall_start[1] + wall_end[1])/2)
 
-    # 测试距离：从墙中心沿法向量方向偏移
-    test_offset = 0.01  # 偏移0.01米（1厘米）进行测试
+    # Test offset from wall center along normal
+    test_offset = 0.01  # 1 cm offset for testing
 
-    # 计算两个测试点
+    # Two test points
     test_point1 = (
         wall_center[0] + normal1[0] * test_offset,
         wall_center[1] + normal1[1] * test_offset
@@ -219,40 +219,40 @@ def calculate_wall_orientation(wall_start: Tuple[float, float], wall_end: Tuple[
         wall_center[1] + normal2[1] * test_offset
     )
 
-    # 检查哪个测试点在多边形内
+    # Check which test point is inside polygon
     in_polygon1 = point_in_polygon(test_point1, vertices)
     in_polygon2 = point_in_polygon(test_point2, vertices)
 
-    # 根据测试结果选择法向量
+    # Choose normal from test results
     if in_polygon1 and not in_polygon2:
-        # 只有法向量1指向内部
+        # Only normal1 points inward
         return normal1
     elif in_polygon2 and not in_polygon1:
-        # 只有法向量2指向内部
+        # Only normal2 points inward
         return normal2
     else:
-        # 两个都在内部或都在外部（边界情况）
-        # 这种情况下，选择第一个法向量
-        # 可以根据需要改为其他策略
+        # Both inside or both outside (edge case)
+        # Default to first normal
+        # Other strategies possible
         return normal1
 
 
 def try_find_closed_loop(walls: List[Dict]) -> Optional[List[Tuple[float, float]]]:
     """
-    尝试判断输入的墙体是否组成一个单一的、闭合的简单环路。
+    Test whether walls form a single closed simple loop.
     
-    算法：
-    1. 统计每个顶点的度数。
-    2. 如果所有顶点的度数都为 2，说明这是一个或多个闭合环。
-    3. 从一个点出发，沿着墙体遍历，看是否能访问所有墙体并回到起点。
+    Algorithm:
+    1. Count vertex degree.
+    2. Degree 2 at every vertex implies one or more closed loops.
+    3. Walk walls from a start vertex; check full coverage and return to start.
     
-    返回：
-    如果是单一闭合环路，返回按序排列的顶点列表；否则返回 None。
+    Returns:
+    Ordered vertex list if single closed loop; else None.
     """
     if not walls:
         return None
         
-    # 构建连接图
+    # Build adjacency graph
     graph = {}
     for wall_idx, wall in enumerate(walls):
         s = tuple(wall["s"])
@@ -264,12 +264,12 @@ def try_find_closed_loop(walls: List[Dict]) -> Optional[List[Tuple[float, float]
         graph[s].append((wall_idx, e))
         graph[e].append((wall_idx, s))
         
-    # 1. 每个顶点的度数必须正好为 2 (说明是简单闭合环，没有分叉，没有悬空)
+    # 1. Every vertex degree must be 2 (simple loop, no branch, no dangling)
     for vertex, edges in graph.items():
         if len(edges) != 2:
             return None
             
-    # 2. 尝试遍历整个环
+    # 2. Walk the loop
     start_vertex = next(iter(graph.keys()))
     current_vertex = start_vertex
     visited_walls = set()
@@ -279,7 +279,7 @@ def try_find_closed_loop(walls: List[Dict]) -> Optional[List[Tuple[float, float]
         ordered_vertices.append(current_vertex)
         edges = graph[current_vertex]
         
-        # 找到下一条没走过的墙
+        # Find next unvisited wall
         next_edge = None
         for wall_idx, neighbor in edges:
             if wall_idx not in visited_walls:
@@ -296,7 +296,7 @@ def try_find_closed_loop(walls: List[Dict]) -> Optional[List[Tuple[float, float]
         if current_vertex == start_vertex:
             break
             
-    # 3. 必须覆盖所有的墙体，确保是单一连通的环
+    # 3. Must visit all walls (single connected loop)
     if len(visited_walls) == len(walls):
         return ordered_vertices
         
@@ -305,21 +305,21 @@ def try_find_closed_loop(walls: List[Dict]) -> Optional[List[Tuple[float, float]
 
 def calculate_minimum_area_polygon_and_partitions(walls: List[Dict]) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float, float, float, float]]]:
     """
-    计算包围所有墙体的最小面积多边形（支持凹多边形）并提取内部隔断墙
+    Minimum-area polygon enclosing all walls (concave OK) and interior partition walls
     
-    返回:
+    Returns:
         (vertices, partitions)
-        vertices: [(x1, y1), (x2, y2), ...] 多边形顶点
-        partitions: [(xs, ys, xe, ye, height), ...] 内部隔断墙，包含高度信息
+        vertices: [(x1, y1), (x2, y2), ...] polygon vertices
+        partitions: [(xs, ys, xe, ye, height), ...] interior partitions with height
     """
-    # 尝试直接寻找闭合环路
+    # Try closed loop first
     closed_loop = try_find_closed_loop(walls)
     if closed_loop:
-        # 如果是闭合环路，partitions 为空
-        print(f"✅ 检测到输入墙体已组成闭合环路，直接使用该顺序 ({len(closed_loop)} 个顶点)")
+        # Closed loop => empty partitions
+        print(f"✅ Input walls form a closed loop; using that order directly ({len(closed_loop)} vertices)")
         return closed_loop, []
 
-    # 收集端点并去重
+    # Collect and dedupe endpoints
     points = []
     for wall in walls:
         points.extend([tuple(wall["s"]), tuple(wall["e"])])
@@ -328,13 +328,13 @@ def calculate_minimum_area_polygon_and_partitions(walls: List[Dict]) -> Tuple[Li
     if len(unique_points) < 3:
         return unique_points, []
 
-    # 计算凹多边形
+    # Compute concave polygon
     vertices = calculate_concave_polygon_from_walls(unique_points, walls)
     
-    # 提取内部隔断 (partitions)
+    # Extract interior partitions
     partitions = []
     for wall in walls:
-        # 检查这面墙是否在生成的 vertices 边界线上
+        # Check if wall lies on polygon boundary
         is_on_boundary = False
         for i in range(len(vertices)):
             v1 = vertices[i]
@@ -344,7 +344,7 @@ def calculate_minimum_area_polygon_and_partitions(walls: List[Dict]) -> Tuple[Li
                 break
         
         if not is_on_boundary:
-            # 隔断墙包含 [xs, ys, xe, ye, height]
+            # Partition: [xs, ys, xe, ye, height]
             partitions.append((
                 float(wall["s"][0]), float(wall["s"][1]), 
                 float(wall["e"][0]), float(wall["e"][1]),
@@ -356,21 +356,21 @@ def calculate_minimum_area_polygon_and_partitions(walls: List[Dict]) -> Tuple[Li
 
 def calculate_concave_polygon_from_walls(points: List[Tuple[float, float]], walls: List[Dict]) -> List[Tuple[float, float]]:
     """
-    基于墙体计算凹多边形
+    Compute concave polygon from walls
 
-    算法步骤：
-    1. 计算凸包（最小凸多边形）
-    2. 检查凸包的每条边是否与墙体共线
-    3. 对于不共线的边，尝试用墙体路径替代，形成凹多边形
+    Steps:
+    1. Convex hull
+    2. Check each hull edge against walls
+    3. Replace non-collinear edges with wall paths for concavity
 
-    参数:
-        points: 所有墙体端点的唯一列表
-        walls: 墙体列表
+    Args:
+        points: Unique wall endpoints
+        walls: Wall list
 
-    返回:
-        多边形顶点列表（可能是凹多边形）
+    Returns:
+        Polygon vertices (possibly concave)
     """
-    # 步骤1: 计算凸包
+    # Step 1: convex hull
     points_array = np.array(points)
     hull = ConvexHull(points_array)
     convex_polygon = [points[i] for i in hull.vertices]
@@ -378,22 +378,22 @@ def calculate_concave_polygon_from_walls(points: List[Tuple[float, float]], wall
     if len(convex_polygon) < 3:
         return convex_polygon
     
-    # 步骤2: 构建墙体连接图（用于后续路径搜索）
+    # Step 2: wall graph for path search
     wall_graph = build_wall_graph(walls)
     
-    # 步骤3: 标记哪些墙体在凸包边上（共线）
-    walls_on_convex = set()  # 存储在凸包边上的墙体索引
+    # Step 3: mark walls collinear with convex hull edges
+    walls_on_convex = set()  # wall indices on convex hull edges
     
     for i in range(len(convex_polygon)):
         v1 = convex_polygon[i]
         v2 = convex_polygon[(i + 1) % len(convex_polygon)]
         
-        # 检查哪些墙体与这条边共线
+        # Walls collinear with this edge
         for wall_idx, wall in enumerate(walls):
             if is_wall_on_edge(wall, v1, v2):
                 walls_on_convex.add(wall_idx)
     
-    # 步骤4: 尝试用墙体路径替代凸包的边
+    # Step 4: replace hull edges with wall paths
     final_polygon = []
     all_original_points = points # unique_points
     
@@ -401,33 +401,33 @@ def calculate_concave_polygon_from_walls(points: List[Tuple[float, float]], wall
         start_vertex = convex_polygon[i]
         end_vertex = convex_polygon[(i + 1) % len(convex_polygon)]
         
-        # 检查这条边是否被墙体完全覆盖
+        # Check if edge fully covered by walls
         is_fully_covered = is_edge_fully_covered(start_vertex, end_vertex, walls)
         
-        # 添加起点
+        # Append start vertex
         final_polygon.append(start_vertex)
         
-        # 如果这条边没有被完全覆盖，尝试用墙体路径替代
+        # If not fully covered, try wall path
         if not is_fully_covered:
-            # 找到连接 start_vertex 和 end_vertex 的墙体路径
-            # 只使用尚未在凸包上的墙体进行搜索（为了避免直接走凸包边本身）
+            # Wall path from start_vertex to end_vertex
+            # Search only walls not already on convex hull
             available_walls = [w for idx, w in enumerate(walls) if idx not in walls_on_convex]
             wall_path = find_wall_path(start_vertex, end_vertex, available_walls, wall_graph)
             
             if wall_path and len(wall_path) > 2:
-                # 找到了墙体路径
-                # 校验点包围性：如果使用这条路径，是否仍能包围所有点
-                # 构造临时多边形用于校验
+                # Found wall path
+                # Verify all points remain enclosed
+                # Temporary polygon for enclosure test
                 temp_polygon = []
-                # 1. 加入已经确定的顶点
+                # 1. Already fixed vertices
                 temp_polygon.extend(final_polygon)
-                # 2. 加入当前候选路径的中间点
+                # 2. Intermediate path vertices
                 temp_polygon.extend(wall_path[1:-1])
-                # 3. 加入凸包剩余的边（虽然终点会变，但为了校验包围性，我们需要一个闭合回路）
+                # 3. Remaining hull edges for closed test loop
                 for k in range(i + 1, len(convex_polygon)):
                     temp_polygon.append(convex_polygon[k])
                 
-                # 检查是否包围所有原始点
+                # Check all original points enclosed
                 all_enclosed = True
                 for p in all_original_points:
                     if not is_point_in_or_on_polygon(p, temp_polygon):
@@ -435,25 +435,25 @@ def calculate_concave_polygon_from_walls(points: List[Tuple[float, float]], wall
                         break
                 
                 if all_enclosed:
-                    # 只有在包围所有点的情况下才使用该路径
+                    # Use path only if enclosure holds
                     for j in range(1, len(wall_path) - 1):
                         final_polygon.append(wall_path[j])
-                    # print(f"  - 边 {start_vertex}->{end_vertex} 已被墙体路径替代，且保持包围性")
+                    # print(f"  - edge {start_vertex}->{end_vertex} replaced by wall path with enclosure preserved")
                 else:
                     pass
-                    # print(f"  - 边 {start_vertex}->{end_vertex} 的候选路径无法包围所有点，回退到直线")
+                    # print(f"  - candidate path for {start_vertex}->{end_vertex} fails enclosure, fallback to line")
     
-    # 去除可能的重复顶点
+    # Remove duplicate vertices
     final_polygon = remove_consecutive_duplicates(final_polygon)
     
-    # 确保多边形至少有3个顶点
+    # At least 3 vertices
     if len(final_polygon) < 3:
         return convex_polygon
     
-    # 确保多边形是简单多边形（不自交）
+    # Must be simple (non self-intersecting)
     if not is_simple_polygon(final_polygon):
-        # 如果生成的多边形自交，回退到凸包
-        print("⚠️  生成的凹多边形自交，回退到凸包")
+        # Self-intersection => fall back to convex hull
+        print("⚠️  Generated concave polygon is self-intersecting; falling back to convex hull")
         return convex_polygon
     
     return final_polygon
@@ -461,25 +461,25 @@ def calculate_concave_polygon_from_walls(points: List[Tuple[float, float]], wall
 
 def remove_consecutive_duplicates(vertices: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """
-    移除连续的重复顶点
+    Remove consecutive duplicate vertices
 
-    参数:
-        vertices: 顶点列表
+    Args:
+        vertices: Vertex list
 
-    返回:
-        去除连续重复后的顶点列表
+    Returns:
+        Deduplicated vertex list
     """
     if len(vertices) <= 1:
         return vertices
     
     result = [vertices[0]]
     for i in range(1, len(vertices)):
-        # 使用小容差比较，避免浮点数精度问题
+        # Small tolerance for float comparison
         if not (abs(vertices[i][0] - result[-1][0]) < 1e-6 and 
                 abs(vertices[i][1] - result[-1][1]) < 1e-6):
             result.append(vertices[i])
     
-    # 检查首尾是否重复
+    # Check first/last duplicate
     if len(result) > 1:
         if abs(result[0][0] - result[-1][0]) < 1e-6 and abs(result[0][1] - result[-1][1]) < 1e-6:
             result.pop()
@@ -489,9 +489,9 @@ def remove_consecutive_duplicates(vertices: List[Tuple[float, float]]) -> List[T
 
 def build_wall_graph(walls: List[Dict]) -> Dict[Tuple[float, float], List[Tuple[int, Tuple[float, float]]]]:
     """
-    构建墙体连接图
+    Build wall adjacency graph
 
-    返回一个字典，key是顶点，value是[(墙体索引, 相邻顶点)]的列表
+    Dict: vertex -> [(wall index, neighbor vertex)]
     """
     graph = {}
     
@@ -512,15 +512,15 @@ def build_wall_graph(walls: List[Dict]) -> Dict[Tuple[float, float], List[Tuple[
 
 def snap_wall_endpoints(walls: List[Dict], threshold: float = 0.3) -> List[Dict]:
     """
-    对墙体端点进行吸附处理。
-    对于每个墙体的每个端点，计算它与该墙体所在直线相交的其他墙体线段的交点。
-    如果距离小于阈值，则将端点移动到交点。
+    Snap wall endpoints.
+    For each endpoint, intersect the wall line with other wall segments;
+    if distance < threshold, move endpoint to intersection.
     """
     if not walls:
         return walls
         
     new_walls = []
-    # 转换为数值以便计算
+    # Convert to numeric arrays
     for w in walls:
         new_walls.append({
             "s": np.array(w["s"][:2], dtype=np.float64),
@@ -531,7 +531,7 @@ def snap_wall_endpoints(walls: List[Dict], threshold: float = 0.3) -> List[Dict]
     for i in range(len(new_walls)):
         for key in ["s", "e"]:
             curr_p = new_walls[i][key]
-            # 该墙体的方向向量
+            # Wall direction vector
             other_key = "e" if key == "s" else "s"
             v = new_walls[i][other_key] - curr_p
             norm_v = np.linalg.norm(v)
@@ -542,32 +542,32 @@ def snap_wall_endpoints(walls: List[Dict], threshold: float = 0.3) -> List[Dict]
             best_snap_p = None
             min_dist = threshold
             
-            # 检查与其他所有墙体的交点
+            # Intersections with all other walls
             for j in range(len(new_walls)):
                 if i == j:
                     continue
                 
-                # 墙体 j 的线段 A-B
+                # Wall j segment A-B
                 A = new_walls[j]["s"]
                 B = new_walls[j]["e"]
                 
-                # 计算直线 (curr_p, dir_v) 与线段 AB 的交点
-                # 直线方程: P = curr_p + t * dir_v
-                # 线段方程: P = A + u * (B - A), 0 <= u <= 1
-                # 联立: curr_p + t * dir_v = A + u * (B - A)
+                # Line (curr_p, dir_v) vs segment AB
+                # Line: P = curr_p + t * dir_v
+                # Segment: P = A + u * (B - A), 0 <= u <= 1
+                # Solve curr_p + t * dir_v = A + u * (B - A)
                 # t * dir_v - u * (B - A) = A - curr_p
                 
                 W = B - A
                 det = dir_v[0] * (-W[1]) - dir_v[1] * (-W[0])
                 
-                if abs(det) < 1e-6: # 平行或共线
-                    # 若共线，则尝试将端点吸附到该线段上最近点
+                if abs(det) < 1e-6: # parallel or collinear
+                    # If collinear, snap to nearest point on segment
                     if are_collinear(tuple(curr_p), tuple(A), tuple(B)):
                         tA = np.dot(A - curr_p, dir_v)
                         tB = np.dot(B - curr_p, dir_v)
                         t_min = min(tA, tB)
                         t_max = max(tA, tB)
-                        # 将t=0(当前端点)投影到线段范围内
+                        # Project t=0 (current endpoint) onto segment range
                         t_clamp = min(max(0.0, t_min), t_max)
                         dist = abs(t_clamp)
                         if dist < min_dist:
@@ -588,7 +588,7 @@ def snap_wall_endpoints(walls: List[Dict], threshold: float = 0.3) -> List[Dict]
             if best_snap_p is not None:
                 new_walls[i][key] = best_snap_p
                 
-    # 转换回原始格式
+    # Convert back to original format
     result = []
     for w in new_walls:
         result.append({
@@ -601,29 +601,29 @@ def snap_wall_endpoints(walls: List[Dict], threshold: float = 0.3) -> List[Dict]
 
 def is_wall_on_edge(wall: Dict, edge_start: Tuple[float, float], edge_end: Tuple[float, float]) -> bool:
     """
-    检查墙体是否在凸包的边上（共线且在边的范围内）
+    Check if wall lies on convex hull edge (collinear and within edge)
     """
     wall_s = tuple(wall["s"])
     wall_e = tuple(wall["e"])
     
-    # 检查墙体的两个端点是否都在边上
+    # Both endpoints on edge
     if not (point_on_segment(wall_s, edge_start, edge_end) and 
             point_on_segment(wall_e, edge_start, edge_end)):
         return False
     
-    # 检查三点是否共线
+    # Three-point collinearity
     return are_collinear(edge_start, edge_end, wall_s) and are_collinear(edge_start, edge_end, wall_e)
 
 
 def is_edge_fully_covered(edge_start: Tuple[float, float], edge_end: Tuple[float, float], walls: List[Dict]) -> bool:
     """
-    检查凸包的一条边是否被墙体完全覆盖。
-    实现：收集该边上的所有墙体线段，合并重叠部分，检查是否覆盖了从start到end的全程。
+    Check if a convex hull edge is fully covered by walls.
+    Collect wall segments on edge, merge intervals, verify full coverage.
     """
     on_edge_walls = []
     for wall in walls:
         if is_wall_on_edge(wall, edge_start, edge_end):
-            # 将端点投影到一维（相对于edge_start的距离）
+            # Project endpoints to 1D distance from edge_start
             d1 = np.sqrt((wall["s"][0] - edge_start[0])**2 + (wall["s"][1] - edge_start[1])**2)
             d2 = np.sqrt((wall["e"][0] - edge_start[0])**2 + (wall["e"][1] - edge_start[1])**2)
             on_edge_walls.append((min(d1, d2), max(d1, d2)))
@@ -631,23 +631,23 @@ def is_edge_fully_covered(edge_start: Tuple[float, float], edge_end: Tuple[float
     if not on_edge_walls:
         return False
     
-    # 合并区间
+    # Merge intervals
     on_edge_walls.sort()
     merged = []
     if on_edge_walls:
         curr_start, curr_end = on_edge_walls[0]
         for next_start, next_end in on_edge_walls[1:]:
-            if next_start <= curr_end + 1e-6: # 容差
+            if next_start <= curr_end + 1e-6: # tolerance
                 curr_end = max(curr_end, next_end)
             else:
                 merged.append((curr_start, curr_end))
                 curr_start, curr_end = next_start, next_end
         merged.append((curr_start, curr_end))
     
-    # 检查是否覆盖全程
+    # Check full coverage
     total_dist = np.sqrt((edge_end[0] - edge_start[0])**2 + (edge_end[1] - edge_start[1])**2)
     
-    # 第一个区间的起点应该是0，最后一个区间的终点应该是total_dist
+    # First interval starts at 0, last ends at total_dist
     if not merged:
         return False
     
@@ -656,12 +656,12 @@ def is_edge_fully_covered(edge_start: Tuple[float, float], edge_end: Tuple[float
 
 def is_point_in_or_on_polygon(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
     """
-    检查点是否在多边形内部或边上
+    Check if point is inside or on polygon boundary
     """
     if point_in_polygon(point, polygon):
         return True
     
-    # 检查是否在任何一条边上
+    # Check each edge
     for i in range(len(polygon)):
         if point_on_segment(point, polygon[i], polygon[(i + 1) % len(polygon)]):
             return True
@@ -670,9 +670,9 @@ def is_point_in_or_on_polygon(point: Tuple[float, float], polygon: List[Tuple[fl
 
 def are_collinear(p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[float, float]) -> bool:
     """
-    检查三点是否共线
+    Check three-point collinearity
 
-    使用叉积判断：(p2-p1) × (p3-p1) = 0
+    Cross product: (p2-p1) x (p3-p1) = 0
     """
     dx1 = p2[0] - p1[0]
     dy1 = p2[1] - p1[1]
@@ -686,70 +686,70 @@ def are_collinear(p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[fl
 def find_wall_path(start: Tuple[float, float], end: Tuple[float, float], 
                    available_walls: List[Dict], wall_graph: Dict) -> List[Tuple[float, float]]:
     """
-    使用BFS在可用墙体中搜索从start到end的路径
+    BFS wall path from start to end among available walls
 
-    参数:
-        start: 起点
-        end: 终点
-        available_walls: 可用的墙体列表
-        wall_graph: 墙体连接图
+    Args:
+        start: Start vertex
+        end: End vertex
+        available_walls: Usable walls
+        wall_graph: Wall graph
 
-    返回:
-        顶点路径列表，如果找不到则返回None
+    Returns:
+        Vertex path or None
     """
     from collections import deque
     
-    # 构建可用墙体的端点集合（用于快速查找）
+    # Available wall edge set for lookup
     available_edges = set()
     for wall in available_walls:
         s = tuple(wall["s"])
         e = tuple(wall["e"])
         available_edges.add((s, e))
-        available_edges.add((e, s))  # 双向
+        available_edges.add((e, s))  # bidirectional
     
-    # BFS搜索
+    # BFS
     queue = deque([(start, [start])])
     visited = {start}
     
     while queue:
         current, path = queue.popleft()
         
-        # 找到目标
+        # Target reached
         if current == end:
             return path
         
-        # 检查当前顶点的所有邻居
+        # Neighbors of current vertex
         if current in wall_graph:
             for wall_idx, neighbor in wall_graph[current]:
                 edge = (current, neighbor)
                 
-                # 只使用可用墙体的边，且邻居未访问过
+                # Use available edges only; skip visited
                 if edge in available_edges and neighbor not in visited:
                     visited.add(neighbor)
                     queue.append((neighbor, path + [neighbor]))
     
-    # 找不到路径
+    # No path
     return None
 
 
 def brute_force_minimum_polygon(points: List[Tuple[float, float]], walls: List[Dict]) -> List[Tuple[float, float]]:
     """
-    穷举法寻找最小面积多边形
+    Brute-force minimum-area polygon
 
-    用途: calculate_minimum_area_polygon的子函数，用于小规模点集
-    实现: 枚举所有可能的点组合和排列，找到能包含所有墙且面积最小的多边形
+    Purpose: sub-routine for small point sets
+    Implementation: enumerate vertex sets/orderings; minimize area while enclosing walls
 
-    复杂度: O(2^n * n!)，仅适用于点数较少的情况
+    Complexity: O(2^n * n!); small n only
     """
     from itertools import combinations
 
     min_area = float('inf')
     best_polygon = None
 
-    # 尝试不同数量的顶点（至少3个）
+    # Try vertex counts >= 3
     for num_vertices in range(3, len(points) + 1):
         for vertex_combination in combinations(points, num_vertices):
-            # 找到这些顶点的最佳排列顺序
+            # Best vertex ordering
             polygon = find_best_ordering(list(vertex_combination))
             if polygon and polygon_contains_all_walls(polygon, walls):
                 area = polygon_area(polygon)
@@ -762,36 +762,36 @@ def brute_force_minimum_polygon(points: List[Tuple[float, float]], walls: List[D
 
 def heuristic_minimum_polygon(points: List[Tuple[float, float]], walls: List[Dict]) -> List[Tuple[float, float]]:
     """
-    启发式方法寻找最小多边形
+    Heuristic minimum polygon
 
-    用途: calculate_minimum_area_polygon的子函数，用于大规模点集
-    实现:
-        1. 先计算凸包作为初始解
-        2. 尝试移除不影响墙体包围的顶点来优化
+    Purpose: sub-routine for large point sets
+    Implementation:
+        1. Convex hull as initial solution
+        2. Drop vertices while walls remain enclosed
     """
     points_array = np.array(points)
     hull = ConvexHull(points_array)
     hull_points = [points[i] for i in hull.vertices]
 
-    # 尝试优化多边形
+    # Optimize polygon
     optimized = optimize_polygon(hull_points, walls, points)
     return optimized if optimized else hull_points
 
 
 def find_best_ordering(vertices: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """
-    寻找顶点的最佳排列顺序，形成简单多边形（不自交）
+    Best vertex order for a simple (non self-intersecting) polygon
 
-    用途: brute_force_minimum_polygon的子函数
-    实现:
-        1. 计算顶点相对于中心点的角度
-        2. 按角度排序
-        3. 检查是否自交，如不满足则尝试凸包排序
+    Purpose: sub-routine of brute_force_minimum_polygon
+    Implementation:
+        1. Angle from centroid
+        2. Sort by angle
+        3. Test simplicity; fall back to hull order
     """
     if len(vertices) < 3:
         return vertices
 
-    # 计算中心点
+    # Centroid
     centroid_x = sum(p[0] for p in vertices) / len(vertices)
     centroid_y = sum(p[1] for p in vertices) / len(vertices)
 
@@ -800,11 +800,11 @@ def find_best_ordering(vertices: List[Tuple[float, float]]) -> List[Tuple[float,
 
     sorted_vertices = sorted(vertices, key=angle_from_centroid)
 
-    # 检查是否为简单多边形
+    # Simple polygon test
     if is_simple_polygon(sorted_vertices):
         return sorted_vertices
 
-    # 如果不是，尝试凸包排序
+    # Else convex hull order
     try:
         points_array = np.array(vertices)
         hull = ConvexHull(points_array)
@@ -815,19 +815,19 @@ def find_best_ordering(vertices: List[Tuple[float, float]]) -> List[Tuple[float,
 
 def is_simple_polygon(vertices: List[Tuple[float, float]]) -> bool:
     """
-    检查多边形是否为简单多边形（边不自交）
+    Test simple polygon (no edge self-intersection)
 
-    用途: find_best_ordering的子函数
-    实现: 检查所有边对，判断是否存在相交
+    Purpose: sub-routine of find_best_ordering
+    Implementation: test all edge pairs
     """
     n = len(vertices)
     if n < 3:
         return True
 
-    # 检查边是否自交
+    # Edge intersection test
     for i in range(n):
         for j in range(i + 2, n):
-            if j == n - 1 and i == 0:  # 跳过相邻边
+            if j == n - 1 and i == 0:  # skip adjacent edges
                 continue
             if segments_intersect(vertices[i], vertices[(i + 1) % n],
                                 vertices[j], vertices[(j + 1) % n]):
@@ -838,20 +838,20 @@ def is_simple_polygon(vertices: List[Tuple[float, float]]) -> bool:
 def segments_intersect(p1: Tuple[float, float], q1: Tuple[float, float],
                       p2: Tuple[float, float], q2: Tuple[float, float]) -> bool:
     """
-    检查两条线段是否相交
+    Test segment intersection
 
-    用途: is_simple_polygon的子函数
-    实现: 使用方向判断法（orientation test）
+    Purpose: sub-routine of is_simple_polygon
+    Implementation: orientation test
     """
     def orientation(p, q, r):
-        """计算三点的方向：0=共线，1=顺时针，2=逆时针"""
+        """Orientation of three points: 0=collinear, 1=CW, 2=CCW"""
         val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
         if abs(val) < 1e-10:
             return 0
         return 1 if val > 0 else 2
 
     def on_segment(p, q, r):
-        """检查点q是否在线段pr上（假设三点共线）"""
+        """True if q on segment pr (assumes collinear)"""
         return (min(p[0], r[0]) <= q[0] <= max(p[0], r[0]) and
                 min(p[1], r[1]) <= q[1] <= max(p[1], r[1]))
 
@@ -860,11 +860,11 @@ def segments_intersect(p1: Tuple[float, float], q1: Tuple[float, float],
     o3 = orientation(p2, q2, p1)
     o4 = orientation(p2, q2, q1)
 
-    # 一般情况：两线段跨越彼此
+    # General case: segments straddle
     if o1 != o2 and o3 != o4:
         return True
 
-    # 特殊情况：点在线段上
+    # Special case: point on segment
     if o1 == 0 and on_segment(p1, p2, q1):
         return True
     if o2 == 0 and on_segment(p1, q2, q1):
@@ -879,10 +879,10 @@ def segments_intersect(p1: Tuple[float, float], q1: Tuple[float, float],
 
 def polygon_contains_all_walls(polygon: List[Tuple[float, float]], walls: List[Dict]) -> bool:
     """
-    检查多边形是否包含所有墙体
+    Test whether polygon encloses all walls
 
-    用途: brute_force_minimum_polygon的子函数，验证候选多边形是否有效
-    实现: 检查每面墙的起点和终点是否都在多边形内或边上
+    Purpose: sub-routine of brute_force_minimum_polygon; validate candidate polygon
+    Implementation: both wall endpoints inside or on boundary
     """
     for wall in walls:
         if not (point_in_or_on_polygon(tuple(wall["s"]), polygon) and
@@ -893,28 +893,28 @@ def polygon_contains_all_walls(polygon: List[Tuple[float, float]], walls: List[D
 
 def point_in_or_on_polygon(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
     """
-    检查点是否在多边形内部或边上
+    Check if point is inside or on polygon boundary
 
-    用途: polygon_contains_all_walls的子函数
-    实现: 先检查是否在边上，再使用射线法检查是否在内部
+    Purpose: sub-routine of polygon_contains_all_walls
+    Implementation: edge test then ray casting
     """
-    # 检查是否在边上
+    # On boundary edge
     for i in range(len(polygon)):
         seg_start = polygon[i]
         seg_end = polygon[(i + 1) % len(polygon)]
         if point_on_segment(point, seg_start, seg_end):
             return True
 
-    # 检查是否在内部（射线法）
+    # Inside (ray casting)
     return point_in_polygon(point, polygon)
 
 
 def point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, float]]) -> bool:
     """
-    射线法判断点是否在多边形内
+    Ray casting point-in-polygon test
 
-    用途: point_in_or_on_polygon的子函数
-    实现: 从点向右发射射线，计算与多边形边的交点数量，奇数则在内部
+    Purpose: sub-routine of point_in_or_on_polygon
+    Implementation: ray to +X; odd intersection count => inside
     """
     x, y = point
     n = len(polygon)
@@ -938,27 +938,27 @@ def point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, floa
 def point_on_segment(point: Tuple[float, float], seg_start: Tuple[float, float],
                     seg_end: Tuple[float, float]) -> bool:
     """
-    检查点是否在线段上
+    Test point on segment
 
-    用途: point_in_or_on_polygon的子函数
-    实现: 检查点到线段两端点的距离之和是否等于线段长度
+    Purpose: sub-routine of point_in_or_on_polygon
+    Implementation: dist to endpoints sums to segment length
     """
     dist_to_start = np.sqrt((point[0] - seg_start[0])**2 + (point[1] - seg_start[1])**2)
     dist_to_end = np.sqrt((point[0] - seg_end[0])**2 + (point[1] - seg_end[1])**2)
     seg_length = np.sqrt((seg_end[0] - seg_start[0])**2 + (seg_end[1] - seg_start[1])**2)
 
-    # 使用容差判断（避免浮点数精度问题）
+    # Tolerance for float precision
     return abs(dist_to_start + dist_to_end - seg_length) < 1e-6
 
 
 def polygon_area(polygon: List[Tuple[float, float]]) -> float:
     """
-    计算多边形面积
+    Polygon area
 
-    用途: brute_force_minimum_polygon中比较不同多边形的大小
-    实现: 使用鞋带公式（Shoelace formula）
+    Purpose: compare polygons in brute_force_minimum_polygon
+    Implementation: shoelace formula
 
-    公式: Area = 0.5 * |Σ(x_i * y_{i+1} - x_{i+1} * y_i)|
+    Formula: Area = 0.5 * |Σ(x_i * y_{i+1} - x_{i+1} * y_i)|
     """
     if len(polygon) < 3:
         return 0
@@ -975,10 +975,10 @@ def polygon_area(polygon: List[Tuple[float, float]]) -> float:
 def optimize_polygon(polygon: List[Tuple[float, float]], walls: List[Dict],
                     all_points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """
-    优化多边形，尝试移除不必要的顶点
+    Optimize polygon by removing unnecessary vertices
 
-    用途: heuristic_minimum_polygon的子函数，减少凸包顶点数量
-    实现: 依次尝试移除每个顶点，如果移除后仍能包含所有墙则保留修改
+    Purpose: reduce hull vertices in heuristic_minimum_polygon
+    Implementation: try removing each vertex if walls still enclosed
     """
     optimized = polygon.copy()
     changed = True
@@ -986,7 +986,7 @@ def optimize_polygon(polygon: List[Tuple[float, float]], walls: List[Dict],
     while changed and len(optimized) > 3:
         changed = False
         for i in range(len(optimized)):
-            # 尝试移除顶点i
+            # Try removing vertex i
             test_polygon = optimized[:i] + optimized[i+1:]
             if polygon_contains_all_walls(test_polygon, walls):
                 optimized = test_polygon
@@ -998,17 +998,17 @@ def optimize_polygon(polygon: List[Tuple[float, float]], walls: List[Dict],
 
 def find_closest_wall(center: List[float], walls_dict: Dict) -> str:
     """
-    寻找距离指定中心点最近的墙
+    Find wall closest to a center point
 
-    用途: add_door和add_window时自动关联到最近的墙
-    实现: 遍历所有墙，计算点到每面墙的距离，返回最近的墙ID
+    Purpose: auto-attach door/window to nearest wall
+    Implementation: min distance over all walls
 
-    参数:
-        center: 门/窗的中心点坐标 [x, y, z]
-        walls_dict: 墙体字典 {wall_id: wall_data}
+    Args:
+        center: Door/window center [x, y, z]
+        walls_dict: Walls {wall_id: wall_data}
 
-    返回:
-        最近墙体的unique_id
+    Returns:
+        Closest wall unique_id
     """
     point = (center[0], center[1])
     min_distance = float('inf')
@@ -1025,34 +1025,34 @@ def find_closest_wall(center: List[float], walls_dict: Dict) -> str:
 
 def find_closest_wall_from_list(center: List[float], walls_list: List[Tuple]) -> str:
     """
-    从墙体列表中找到距离给定中心点最近的墙体
+    Closest wall from a wall list
     
     Args:
-        center: 点的中心坐标 [x, y, z]
-        walls_list: 墙体列表 [(wall_id, p, q), ...]
+        center: Point center [x, y, z]
+        walls_list: [(wall_id, p, q), ...]
     
     Returns:
-        最接近的墙体的ID
+        Closest wall ID
     """
     min_distance = float('inf')
     closest_wall_id = None
     
-    point = np.array(center[:2])  # 只使用x, y坐标
+    point = np.array(center[:2])  # XY only
     
     for wall_id, p, q in walls_list:
-        # 计算点到线段的距离
+        # Point-to-segment distance
         wall_start = np.array(p[:2])
         wall_end = np.array(q[:2])
         
-        # 线段向量
+        # Segment vector
         wall_vec = wall_end - wall_start
         wall_length_sq = np.dot(wall_vec, wall_vec)
         
         if wall_length_sq == 0:
-            # 墙体退化为一个点
+            # Degenerate wall (point)
             distance = np.linalg.norm(point - wall_start)
         else:
-            # 计算投影参数 t
+            # Projection parameter t
             t = max(0, min(1, np.dot(point - wall_start, wall_vec) / wall_length_sq))
             projection = wall_start + t * wall_vec
             distance = np.linalg.norm(point - projection)
@@ -1066,26 +1066,26 @@ def find_closest_wall_from_list(center: List[float], walls_list: List[Tuple]) ->
 
 def snap_to_wall(center: List[float], wall: Dict) -> List[float]:
     """
-    将点吸附到墙体所在的直线上（不局限于线段端点）
+    Snap point onto wall line (not clamped to segment)
 
-    用途: add_door和add_window时，将门/窗中心投影到墙所在直线上，即便中心点稍微超出墙段范围
-    实现: 使用point_to_line_distance，设置clamp=False，保持z坐标不变
+    Purpose: project door/window center onto wall line even if slightly beyond segment
+    Implementation: point_to_line_distance with clamp=False; preserve z
 
-    参数:
-        center: 原始中心点 [x, y, z]
-        wall: 墙体数据（包含s和e）
+    Args:
+        center: Original center [x, y, z]
+        wall: Wall data with s and e
 
-    返回:
-        吸附后的中心点 [x', y', z]
+    Returns:
+        Snapped center [x', y', z]
     """
     point = (center[0], center[1])
-    # 这里的 clamp 设置为 False，以便在投影落在线段外时，取其在直线上的投影点
+    # clamp=False: use line projection when outside segment
     _, closest_point = point_to_line_distance(point, tuple(wall["s"]), tuple(wall["e"]), clamp=False)
     return [closest_point[0], closest_point[1], center[2]]
 
 
 def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict[str, Any]:
-    """预计算所有外墙的斜接（Miter Joint）外侧底点。"""
+    """Precompute outer base points for exterior wall miter joints."""
     boundary_walls = {wid: w for wid, w in walls.items() if not w.get("is_partition", False)}
 
     pt_to_walls: Dict[Tuple[float, float], List[str]] = {}
@@ -1131,7 +1131,7 @@ def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict
 
 
 def _walls_at_vertex(vertex, boundary_walls: Dict[str, Any], tol: float = 1e-5) -> List[str]:
-    """返回在 vertex 处相接的外墙 id 列表。"""
+    """Return exterior wall ids meeting at vertex."""
     v = np.array(vertex[:2], dtype=float)
     matched = []
     for wall_id, wall in boundary_walls.items():
@@ -1148,10 +1148,10 @@ def calculate_floor_polygon_with_wall_thickness(
     wall_thickness: float,
 ) -> List[Tuple[float, float]]:
     """
-    根据外墙底边（含墙厚与斜接）计算地板/天花板水平轮廓。
+    Floor/ceiling horizontal outline from exterior wall base (thickness + miters).
 
-    房间 meta.vertices 为墙体内线环；地板/天花板 slab 应覆盖到外墙底边，
-    使墙体完全落在 slab 之内。
+    meta.vertices is inner wall loop; floor/ceiling slab extends to outer base
+    so walls sit fully on the slab.
     """
     if len(vertices) < 3:
         return [(float(v[0]), float(v[1])) for v in vertices]
@@ -1206,51 +1206,51 @@ def calculate_floor_polygon_with_wall_thickness(
 def create_floor_mesh(vertices: List[Tuple[float, float]], bounds: List[float], 
                       texture_scale: float = 2.0) -> trimesh.Trimesh:
     """
-    创建地板mesh（使用方案一：extrude 挤出带厚度的实体）
+    Create floor mesh (extrude solid with thickness)
 
-    参数:
-        vertices: 地板顶点列表 [(x1, y1), (x2, y2), ...]
-        bounds: 边界 [x_min, y_min, x_max, y_max]
-        texture_scale: 纹理缩放系数，默认2.0
+    Args:
+        vertices: Floor vertices [(x1, y1), ...]
+        bounds: [x_min, y_min, x_max, y_max]
+        texture_scale: UV scale, default 2.0
 
-    返回:
-        trimesh.Trimesh对象，具有物理厚度
+    Returns:
+        trimesh.Trimesh with physical thickness
     """
     texture_scale = texture_scale if texture_scale  else 2.0
     if len(vertices) < 3:
         return trimesh.Trimesh()
 
-    # 1. 提取 2D 坐标并确保顺序正确 (CCW)
+    # 1. Extract 2D coords; ensure CCW winding
     pts2_raw = [(float(v[0]), float(v[1])) for v in vertices]
     pts_arr = np.array(pts2_raw)
     xs, ys = pts_arr[:, 0], pts_arr[:, 1]
-    # 计算 2*面积 的符号判断顺逆时针
+    # Signed 2*area for winding
     area2 = np.dot(xs, np.roll(ys, -1)) - np.dot(ys, np.roll(xs, -1))
     if area2 < 0:
         pts2_raw = pts2_raw[::-1]
 
-    # 2. 构建 Polygon 对象（支持凹多边形）
+    # 2. Shapely Polygon (concave OK)
     poly = Polygon(pts2_raw)
     
-    # 3. 使用 extrude 向下挤出 0.1m
-    # 这会自动完成三角化，并生成顶面、底面和侧面
-    # 注意：trimesh 中正确的函数名是 extrude_polygon
+    # 3. Extrude 0.1m downward
+    # Auto-triangulation: top, bottom, sides
+    # trimesh API: extrude_polygon
     floor_mesh = trimesh.creation.extrude_polygon(poly, height=-0.1)
 
-    # 4. 计算并应用投影 UV (Planar Mapping)
+    # 4. Planar UV mapping
     all_verts = floor_mesh.vertices
     
-    # 计算 X 和 Y 方向的实际长度
+    # Physical X/Y spans
     x_length = bounds[2] - bounds[0]
     y_length = bounds[3] - bounds[1]
     max_length = max(x_length, y_length)
     
-    # 使用最大长度作为归一化基准，保持纹理不被拉伸
-    # 这样即使房间是长方形，纹理也会保持正方形
+    # Normalize by max span to avoid stretch
+    # Square texels even for rectangular rooms
     u = (all_verts[:, 0] - bounds[0]) / max_length * texture_scale
     v = (all_verts[:, 1] - bounds[1]) / max_length * texture_scale
     
-    # 赋值给 mesh 的纹理视觉属性
+    # Assign TextureVisuals
     floor_mesh.visual = trimesh.visual.TextureVisuals(uv=np.column_stack((u, v)))
     
     return floor_mesh
@@ -1258,42 +1258,42 @@ def create_floor_mesh(vertices: List[Tuple[float, float]], bounds: List[float],
 
 def create_ceiling_mesh(vertices: List[Tuple[float, float]], bounds: List[float], z_height: float) -> trimesh.Trimesh:
     """
-    创建天花板mesh（法线朝下，使用耳切三角化处理凹多边形）
+    Create ceiling mesh (normals down; ear-clipping for concave polygons)
     
-    参数:
-        vertices: 天花板顶点列表 [(x1, y1), (x2, y2), ...]（与地板相同的顶点）
-        bounds: 边界 [x_min, y_min, x_max, y_max]
-        z_height: 天花板高度（z坐标）
+    Args:
+        vertices: Same as floor [(x1, y1), ...]
+        bounds: [x_min, y_min, x_max, y_max]
+        z_height: Ceiling height (z)
     
-    返回:
-        trimesh.Trimesh对象，带UV坐标，法线朝下
+    Returns:
+        trimesh.Trimesh with UV; normals face -Z
     """
     if len(vertices) < 3:
         return trimesh.Trimesh()
     
     texture_scale = 2.0
-    # 顶点在 XY 平面，Z=z_height
+    # Vertices in XY at z_height
     ceiling_verts = np.array([[v[0], v[1], z_height] for v in vertices], dtype=float)
     
-    # 天花板需要顺时针顺序（从下方看），使法线朝下（-Z）
-    # 与地板相反：如果面积为正（逆时针），需要反转为顺时针
+    # CW from below so normals point -Z
+    # Opposite of floor: flip if CCW
     if ceiling_verts.shape[0] >= 3:
         xs = ceiling_verts[:, 0]
         ys = ceiling_verts[:, 1]
-        # 计算 2*面积 的符号
+        # Signed 2*area
         area2 = np.dot(xs, np.roll(ys, -1)) - np.dot(ys, np.roll(xs, -1))
         if area2 > 0:
-            # 反转顶点顺序以确保为 CW（从 -Z 方向看为顺时针，使法线朝下）
+            # Reverse to CW (from -Z) for downward normals
             ceiling_verts = ceiling_verts[::-1]
     
-    # 计算 UV（使用当前顶点顺序）
+    # UV from current vertex order
     ceiling_uvs = [[(v[0] - bounds[0]) / (bounds[2] - bounds[0]) * texture_scale,
                     (v[1] - bounds[1]) / (bounds[3] - bounds[1]) * texture_scale] for v in ceiling_verts]
     
-    # 使用耳切（ear-clipping）三角化以处理凹多边形
+    # Ear-clipping triangulation for concave polygons
     def _is_convex(a, b, c):
-        # 判断三点 (a,b,c) 在多边形中是否为凸角
-        # 对于CW顺序（天花板），凹凸判断需要取反
+        # Convex corner test for (a,b,c)
+        # Invert for CW ceiling winding
         return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]) < -1e-9
     
     def _point_in_triangle(pt, a, b, c):
@@ -1331,7 +1331,7 @@ def create_ceiling_mesh(vertices: List[Tuple[float, float]], bounds: List[float]
                 if not _is_convex(a, b, c):
                     continue
                 
-                # 检查是否有其他顶点在三角形内
+                # Any other vertex inside triangle
                 any_inside = False
                 for j in idx_list:
                     if j in (i_prev, i_curr, i_next):
@@ -1343,14 +1343,14 @@ def create_ceiling_mesh(vertices: List[Tuple[float, float]], bounds: List[float]
                 if any_inside:
                     continue
                 
-                # 这是一个耳，切掉中心点
+                # Ear clip: remove b
                 ceiling_faces.append([i_prev, i_curr, i_next])
                 idx_list.remove(i_curr)
                 made_cut = True
                 break
             
             if not made_cut:
-                # 可能遇到数值问题或自交，退回到扇形备选以避免死循环
+                # Fallback fan triangulation to avoid infinite loop
                 ceiling_faces = [[0, i, i + 1] for i in range(1, len(pts2) - 1)]
                 break
             safety += 1
@@ -1358,10 +1358,10 @@ def create_ceiling_mesh(vertices: List[Tuple[float, float]], bounds: List[float]
         if len(idx_list) == 3:
             ceiling_faces.append([idx_list[0], idx_list[1], idx_list[2]])
     
-    # 构建 trimesh，关闭自动处理以保留我们指定的顺序
+    # process=False to keep our winding
     ceiling_mesh = trimesh.Trimesh(vertices=ceiling_verts, faces=np.array(ceiling_faces, dtype=int), process=False)
     
-    # 设置UV
+    # Set UV
     ceiling_mesh.visual = trimesh.visual.TextureVisuals(uv=np.array(ceiling_uvs))
     
     return ceiling_mesh
@@ -1370,36 +1370,36 @@ def create_ceiling_mesh(vertices: List[Tuple[float, float]], bounds: List[float]
 def create_opening_box(center: List[float], width: float, height: float,
                       wall_orientation: List[float], wall_thickness: float) -> trimesh.Trimesh:
     """
-    创建门或窗的 Box 用于布尔减法挖洞
+    Create door/window box for boolean subtraction
     
-    参数:
-        center: 门/窗中心点 [x, y, z]（原始面片模式的中心）
-        width: 门/窗宽度
-        height: 门/窗高度
-        wall_orientation: 墙的朝向（法向量），指向房间内部
-        wall_thickness: 墙的厚度
+    Args:
+        center: Door/window center [x,y,z] (face mode center)
+        width: Opening width
+        height: Opening height
+        wall_orientation: Inward wall normal
+        wall_thickness: Wall thickness
     
-    返回:
-        正确定位和旋转的 box mesh
+    Returns:
+        Positioned/rotated box mesh
     """
-    # 1. 创建一个轴对齐的 box（默认朝向）
-    # extents 顺序: [x_size, y_size, z_size]
-    # 这里让 y 方向作为厚度方向
+    # 1. Axis-aligned box (default orientation)
+    # extents: [x_size, y_size, z_size]
+    # Y is thickness direction
     box = trimesh.creation.box(extents=[width, wall_thickness + 0.02, height])
     
-    # 2. 计算旋转角度：让 box 的法线（默认 +Y）对齐到墙的 orientation
-    # 墙的 orientation 是 2D 向量 [nx, ny]，转换为 3D [nx, ny, 0]
+    # 2. Rotate box +Y normal to wall orientation
+    # Wall orientation [nx,ny] -> 3D [nx,ny,0]
     target_normal = np.array([wall_orientation[0], wall_orientation[1], 0.0])
     target_normal /= np.linalg.norm(target_normal) + 1e-9
     
-    # box 默认的法线是 +Y 方向
+    # Default box normal +Y
     default_normal = np.array([0.0, 1.0, 0.0])
     
-    # 计算旋转轴（叉乘）和旋转角度（点积）
+    # Rotation axis (cross) and angle (dot)
     rotation_axis = np.cross(default_normal, target_normal)
     rotation_angle = np.arccos(np.clip(np.dot(default_normal, target_normal), -1.0, 1.0))
     
-    # 如果需要旋转（即两个向量不平行）
+    # Apply rotation if not parallel
     if np.linalg.norm(rotation_axis) > 1e-6:
         rotation_axis /= np.linalg.norm(rotation_axis)
         rotation_matrix = trimesh.transformations.rotation_matrix(
@@ -1407,14 +1407,14 @@ def create_opening_box(center: List[float], width: float, height: float,
         )
         box.apply_transform(rotation_matrix)
     
-    # 3. 调整中心位置：向墙外（-orientation）移动 thickness/2
+    # 3. Shift center outward (-orientation) by thickness/2
     adjusted_center = np.array(center) - np.array([
         wall_orientation[0] * wall_thickness / 2,
         wall_orientation[1] * wall_thickness / 2,
         0.0
     ])
     
-    # 4. 平移到最终位置
+    # 4. Translate to final position
     box.apply_translation(adjusted_center)
     
     return box
@@ -1425,29 +1425,29 @@ def create_single_wall_mesh(start: List[float], end: List[float], height: float,
                             openings: List[Dict] = None, wall_thickness: float = 0.1,
                             texture_scale: float = 2.0) -> trimesh.Trimesh:
     """
-    为单面墙创建mesh。默认创建带厚度并向外部挤出的实体墙。
+    Create mesh for one wall. Default: solid wall extruded outward with thickness.
     
-    参数:
-        start: 墙的起点 [x, y]
-        end: 墙的终点 [x, y]
-        height: 墙的高度
-        orientation: 墙的朝向（法向量），指向房间内部
-        chip: 如果为 True，则返回传统的单面薄片面片
-        openings: 门窗列表，每项包含 {"center": [x,y,z], "width": w, "height": h}
-        wall_thickness: 墙的厚度（米），默认0.1
-        texture_scale: 纹理缩放系数，默认2.0
+    Args:
+        start: Wall start [x, y]
+        end: Wall end [x, y]
+        height: Wall height
+        orientation: Inward normal
+        chip: If True, return legacy single-sided face
+        openings: [{"center": [x,y,z], "width": w, "height": h}, ...]
+        wall_thickness: Wall thickness in meters, default 0.1
+        texture_scale: UV scale, default 2.0
     """
     if height == 0:
         height = 0.01
     texture_scale = texture_scale if texture_scale  else 2.0
-    # 基础墙面向量计算
+    # Base wall vectors
     wall_vec = np.array(end[:2]) - np.array(start[:2])
     wall_length = np.linalg.norm(wall_vec)
     if wall_length == 0: wall_length = 1.0
     unit_wall_vec = wall_vec / wall_length
 
     if chip:
-        # --- 旧逻辑：创建单面薄片 ---
+        # --- Legacy: single-sided face ---
         wall_verts = np.array([
             [start[0], start[1], 0.0],
             [end[0], end[1], 0.0],
@@ -1468,23 +1468,23 @@ def create_single_wall_mesh(start: List[float], end: List[float], height: float,
         wall_mesh.visual = trimesh.visual.TextureVisuals(uv=wall_uvs)
         return wall_mesh
     else:
-        # --- 新逻辑：创建带厚度的实体墙 (Extrude) ---
+        # --- Solid wall via extrude ---
         thickness = wall_thickness
-        # 计算向墙外偏移的向量 (和 orientation 相反)
+        # Outward offset (-orientation)
         off_x, off_y = -orientation[0] * thickness, -orientation[1] * thickness
         
-        # 矩形底面的四个点 (p1, p2 是内墙面底部, p3, p4 是外墙面底部)
+        # Footprint quad: p1,p2 inner base; p3,p4 outer base
         p1 = (float(start[0]), float(start[1]))
         p2 = (float(end[0]), float(end[1]))
         p3 = (p2[0] + off_x, p2[1] + off_y)
         p4 = (p1[0] + off_x, p1[1] + off_y)
         
-        # 使用 Polygon 定义足迹并向上拉伸高度
+        # Extrude footprint polygon upward
         poly = Polygon([p1, p2, p3, p4])
-        # 注意：trimesh 中正确的函数名是 extrude_polygon
+        # trimesh API: extrude_polygon
         wall_mesh = trimesh.creation.extrude_polygon(poly, height=height)
         
-        # --- 布尔运算：挖洞（门窗） ---
+        # --- Boolean openings ---
         if openings:
             for opening in openings:
                 try:
@@ -1497,22 +1497,22 @@ def create_single_wall_mesh(start: List[float], end: List[float], height: float,
                     )
                     wall_mesh = wall_mesh.difference(opening_box)
                 except Exception as e:
-                    print(f"⚠️  布尔运算失败 (opening at {opening.get('center')}): {e}")
+                    print(f"⚠️  Boolean operation failed (opening at {opening.get('center')}): {e}")
         
-        # --- 按照用户指定的投影逻辑计算 UV ---
+        # --- UV per project projection rules ---
         all_verts = wall_mesh.vertices
         
-        # 使用墙长和高度中的最大值作为归一化基准，防止纹理变形
+        # Normalize UV by max(wall_length, height)
         max_dimension = max(wall_length, height)
         
-        # u: 点相对于起点(p1)在墙面方向(unit_wall_vec)上的投影长度占比
+        # u: projection along wall from p1
         rel_vecs = all_verts[:, :2] - np.array(p1)
         u = (np.dot(rel_vecs, unit_wall_vec) / max_dimension) * texture_scale
         
-        # v: 点在垂直方向(Z轴)的高度占比
+        # v: height fraction on Z
         v = (all_verts[:, 2] / max_dimension) * texture_scale
         
-        # 应用投影映射
+        # Apply UV
         wall_mesh.visual = trimesh.visual.TextureVisuals(uv=np.column_stack((u, v)))
         
         return wall_mesh
@@ -1520,32 +1520,32 @@ def create_single_wall_mesh(start: List[float], end: List[float], height: float,
 
 def create_face_wall_mesh(vertices: List[Tuple[float, float]], height: float) -> trimesh.Trimesh:
     """
-    创建无厚度的墙体mesh（双面可见，带UV纹理坐标）
+    Thin wall mesh (double-sided, with UV)
 
-    参数:
-        vertices: 墙环顶点序列 [(x1,y1), (x2,y2), ...]，按逆时针顺序排列
-        height: 墙体高度
+    Args:
+        vertices: Wall loop CCW [(x1,y1), ...]
+        height: Wall height
 
-    返回:
-        trimesh.Trimesh对象，从内外两侧都可见，带UV坐标
+    Returns:
+        trimesh.Trimesh visible from both sides with UV
     """
     n = len(vertices)
     if n < 3:
         return trimesh.Trimesh()
 
-    # 构建顶点：底面环 + 顶面环
+    # Bottom ring + top ring vertices
     mesh_vertices = []
 
-    # 底面环 (z=0)
+    # Bottom ring z=0
     for v in vertices:
         mesh_vertices.append([v[0], v[1], 0.0])
 
-    # 顶面环 (z=height)
+    # Top ring z=height
     for v in vertices:
         mesh_vertices.append([v[0], v[1], height])
 
-    # 计算UV坐标 - 沿着墙的周长展开
-    # 计算每段墙的累计长度用于U坐标
+    # UV unwrap along wall perimeter
+    # Cumulative edge length for U
     cumulative_length = [0.0]
     for i in range(n):
         i_next = (i + 1) % n
@@ -1556,51 +1556,51 @@ def create_face_wall_mesh(vertices: List[Tuple[float, float]], height: float) ->
 
     total_length = cumulative_length[-1]
     if total_length == 0:
-        total_length = 1.0  # 避免除零
+        total_length = 1.0  # avoid div by zero
 
-    # 为每个顶点分配UV坐标
-    # U: 沿墙周长的归一化位置 (0-1范围，但可以超过1实现纹理重复)
-    # V: 高度的归一化位置 (0=底部, 1=顶部)
-    texture_repeat = total_length / height  # 让纹理在水平和垂直方向保持相似比例
+    # Per-vertex UV
+    # U: normalized perimeter (may repeat)
+    # V: height 0=bottom 1=top
+    texture_repeat = total_length / height  # similar H/V texel scale
 
     uvs = []
     for i in range(n):
-        u = cumulative_length[i] / height  # 使用height作为单位长度
-        uvs.append([u, 0.0])  # 底部顶点
+        u = cumulative_length[i] / height  # height as unit length
+        uvs.append([u, 0.0])  # bottom
     for i in range(n):
         u = cumulative_length[i] / height
-        uvs.append([u, 1.0])  # 顶部顶点
+        uvs.append([u, 1.0])  # top
 
-    # 构建面片：双面墙体
-    # 顶点索引布局:
-    # 0~n-1: 底面环
-    # n~2n-1: 顶面环
+    # Double-sided wall faces
+    # Vertex index layout:
+    # 0..n-1 bottom ring
+    # n..2n-1 top ring
     faces = []
 
-    # 遍历顶点环，为每个墙段创建两个三角形构成矩形
+    # Two triangles per wall segment
     for i in range(n):
         i_next = (i + 1) % n
 
-        # 4个顶点索引
-        b_curr = i          # 当前底部顶点
-        b_next = i_next     # 下一个底部顶点
-        t_curr = n + i      # 当前顶部顶点
-        t_next = n + i_next # 下一个顶部顶点
+        # Four corner indices
+        b_curr = i          # current bottom
+        b_next = i_next     # next bottom
+        t_curr = n + i      # current top
+        t_next = n + i_next # next top
 
-        # 第一面：法向量指向多边形内部（假设vertices是逆时针）
-        # 从内部看，三角形顶点应该是逆时针顺序
+        # Face 1: normal inward (CCW vertices)
+        # CCW when viewed from inside
         faces.append([b_curr, t_curr, t_next])
         faces.append([b_curr, t_next, b_next])
 
-        # 第二面：法向量指向多边形外部（反向三角形）
-        # 从外部看，三角形顶点应该是逆时针顺序
+        # Face 2: outward normal (reversed winding)
+        # CCW when viewed from outside
         faces.append([b_curr, t_next, t_curr])
         faces.append([b_curr, b_next, t_next])
 
-    # 创建mesh，启用process=True让trimesh正确计算法线
+    # process=True for correct normals
     mesh = trimesh.Trimesh(vertices=mesh_vertices, faces=faces, process=True)
 
-    # 将UV坐标存储到mesh中
+    # Store UV on mesh
     mesh.visual = trimesh.visual.TextureVisuals(uv=np.array(uvs))
 
     return mesh
@@ -1608,30 +1608,30 @@ def create_face_wall_mesh(vertices: List[Tuple[float, float]], height: float) ->
 
 def create_wall_ring_mesh(vertices: List[Tuple[float, float]], walls: Dict, height: float, thickness: float) -> trimesh.Trimesh:
     """
-    基于墙环顶点创建整体墙体mesh
+    Build combined wall mesh from wall loop vertices
 
-    参数:
-        vertices: 墙环顶点序列 [(x1,y1), (x2,y2), ...]
-        walls: 墙体字典,包含orientation信息
-        height: 墙体高度
-        thickness: 墙体厚度
+    Args:
+        vertices: Wall loop [(x1,y1), (x2,y2), ...]
+        walls: Wall dict with orientation
+        height: Wall height
+        thickness: Wall thickness
 
-    返回:
-        trimesh.Trimesh对象
+    Returns:
+        trimesh.Trimesh
     """
     n = len(vertices)
     if n < 3:
         return trimesh.Trimesh()
 
-    # 计算每个顶点对应的外环偏移
-    # 对于墙环顶点v[i],相邻两条边是: v[i-1]→v[i] 和 v[i]→v[i+1]
-    # 每条边对应一面墙,找到这两面墙的外法向量,沿角平分线方向计算正确的偏移量
+    # Outer offset per loop vertex
+    # At v[i], adjacent edges v[i-1]->v[i] and v[i]->v[i+1]
+    # Each edge has a wall; bisector of outer normals gives corner offset
     #
-    # 几何原理:
-    # 设两个外法向量为 n1, n2 (单位向量), 夹角为 θ
-    # 向量和 n1+n2 指向角平分线方向, 模长为 ||n1+n2|| = 2*cos(θ/2)
-    # 为了使墙体垂直向外偏移 thickness, 沿角平分线的偏移应为:
-    # offset = (n1+n2) * 2*thickness / ||n1+n2||²
+    # Geometry:
+    # Unit outer normals n1, n2, angle theta
+    # n1+n2 bisector, ||n1+n2|| = 2*cos(theta/2)
+    # Perpendicular outward offset thickness along bisector:
+    # offset = (n1+n2) * 2*thickness / ||n1+n2||^2
     vertex_offsets = []
 
     for i in range(n):
@@ -1639,9 +1639,9 @@ def create_wall_ring_mesh(vertices: List[Tuple[float, float]], walls: Dict, heig
         v_prev = np.array(vertices[(i - 1) % n])
         v_next = np.array(vertices[(i + 1) % n])
 
-        # 找到两条边对应的墙
-        edge_prev = (tuple(v_prev), tuple(v_curr))  # 前一条边
-        edge_curr = (tuple(v_curr), tuple(v_next))  # 当前边
+        # Walls for the two adjacent edges
+        edge_prev = (tuple(v_prev), tuple(v_curr))  # previous edge
+        edge_curr = (tuple(v_curr), tuple(v_next))  # current edge
 
         offset_sum = np.array([0.0, 0.0])
 
@@ -1650,114 +1650,114 @@ def create_wall_ring_mesh(vertices: List[Tuple[float, float]], walls: Dict, heig
             e = np.array(wall["e"])
             orientation = np.array(wall.get("orientation", [0, 0]))
 
-            # 判断墙是否匹配边
+            # Match wall to edge
             if (np.allclose(s, v_prev, atol=1e-6) and np.allclose(e, v_curr, atol=1e-6)) or \
                (np.allclose(s, v_curr, atol=1e-6) and np.allclose(e, v_prev, atol=1e-6)):
-                # 这是前一条边对应的墙
+                # Wall for previous edge
                 outer_normal = -orientation
                 offset_sum += outer_normal
 
             if (np.allclose(s, v_curr, atol=1e-6) and np.allclose(e, v_next, atol=1e-6)) or \
                (np.allclose(s, v_next, atol=1e-6) and np.allclose(e, v_curr, atol=1e-6)):
-                # 这是当前边对应的墙
+                # Wall for current edge
                 outer_normal = -orientation
                 offset_sum += outer_normal
 
-        # 根据角度几何关系计算正确的偏移量
-        # offset_sum 是两个单位外法向量的和, 指向角平分线方向
-        # 正确的偏移 = offset_sum * (2 * thickness / ||offset_sum||²)
+        # Corner offset from angle geometry
+        # offset_sum = sum of unit outer normals along bisector
+        # offset = offset_sum * (2 * thickness / ||offset_sum||^2)
         norm = np.linalg.norm(offset_sum)
         if norm > 1e-6:
-            # 使用几何正确的公式: 保证每面墙垂直向外偏移 thickness
+            # Ensures perpendicular outward offset thickness per wall
             offset = offset_sum * (2.0 * thickness / (norm * norm))
         else:
-            # 退化情况: 两个法向量相反(180度角), 使用默认偏移
+            # Degenerate 180 deg: zero offset
             offset = np.array([0.0, 0.0])
 
         vertex_offsets.append(offset)
 
-    # 构建内外环顶点
+    # Build inner/outer vertex rings
     mesh_vertices = []
-    # 底面内环
+    # Bottom inner ring
     for v in vertices:
         mesh_vertices.append([v[0], v[1], 0.0])
-    # 底面外环
+    # Bottom outer ring
     for i, v in enumerate(vertices):
         offset = vertex_offsets[i]
         mesh_vertices.append([v[0] + offset[0], v[1] + offset[1], 0.0])
-    # 顶面内环
+    # Top inner ring
     for v in vertices:
         mesh_vertices.append([v[0], v[1], height])
-    # 顶面外环
+    # Top outer ring
     for i, v in enumerate(vertices):
         offset = vertex_offsets[i]
         mesh_vertices.append([v[0] + offset[0], v[1] + offset[1], height])
 
-    # 构建面片 - 墙体由四部分组成
-    # 顶点索引布局:
-    # 0~n-1: 底面内环
-    # n~2n-1: 底面外环
-    # 2n~3n-1: 顶面内环
-    # 3n~4n-1: 顶面外环
+    # Four wall surface groups
+    # Vertex index layout:
+    # 0..n-1 bottom inner
+    # n..2n-1 bottom outer
+    # 2n..3n-1 top inner
+    # 3n..4n-1 top outer
     faces = []
 
-    # 第一部分: 内环面 (面向房间内部)
-    # 遍历顶点环，连接相邻顶点形成矩形面
+    # Part 1: inner faces (inward)
+    # Quads along inner ring
     for i in range(n):
         i_next = (i + 1) % n
 
-        # 内环面的4个顶点: 底i, 底i+1, 顶i+1, 顶i
+        # Inner quad corners
         b_curr = i
         b_next = i_next
         t_curr = 2 * n + i
         t_next = 2 * n + i_next
 
-        # 法向朝房间内: 从房间内看,逆时针
+        # Normal inward: CCW from inside
         faces.append([b_curr, b_next, t_next])
         faces.append([b_curr, t_next, t_curr])
 
-    # 第二部分: 外环面 (背向房间,面向外部)
-    # 遍历顶点环
+    # Part 2: outer faces
+    # Iterate wall loop
     for i in range(n):
         i_next = (i + 1) % n
 
-        # 外环面的4个顶点
+        # Four outer-face corners
         b_curr_outer = n + i
         b_next_outer = n + i_next
         t_curr_outer = 3 * n + i
         t_next_outer = 3 * n + i_next
 
-        # 法向朝房间外: 从外面看,逆时针 (顶点顺序与内环相反)
+        # Normal outward: reversed winding
         faces.append([b_next_outer, b_curr_outer, t_curr_outer])
         faces.append([b_next_outer, t_curr_outer, t_next_outer])
 
-    # 第三部分: 顶部环带 (法向朝上+z)
-    # 遍历顶点环
+    # Part 3: top cap (+Z)
+    # Iterate wall loop
     for i in range(n):
         i_next = (i + 1) % n
 
-        # 顶部环带的4个顶点: 内i, 内i+1, 外i+1, 外i
+        # Top strip quad
         t_inner_curr = 2 * n + i
         t_inner_next = 2 * n + i_next
         t_outer_curr = 3 * n + i
         t_outer_next = 3 * n + i_next
 
-        # 法向朝上: 从上方看,逆时针
+        # Normal +Z: CCW from above
         faces.append([t_inner_curr, t_inner_next, t_outer_next])
         faces.append([t_inner_curr, t_outer_next, t_outer_curr])
 
-    # 第四部分: 底部环带 (法向朝下-z)
-    # 遍历顶点环
+    # Part 4: bottom cap (-Z)
+    # Iterate wall loop
     for i in range(n):
         i_next = (i + 1) % n
 
-        # 底部环带的4个顶点: 内i, 内i+1, 外i+1, 外i
+        # Bottom strip quad
         b_inner_curr = i
         b_inner_next = i_next
         b_outer_curr = n + i
         b_outer_next = n + i_next
 
-        # 法向朝下: 从下方看,逆时针 (从外向内)
+        # Normal -Z: CCW from below
         faces.append([b_outer_next, b_outer_curr, b_inner_curr])
         faces.append([b_outer_next, b_inner_curr, b_inner_next])
 
@@ -1766,62 +1766,62 @@ def create_wall_ring_mesh(vertices: List[Tuple[float, float]], walls: Dict, heig
 
 def create_wall_mesh(wall: Dict, thickness: float) -> trimesh.Trimesh:
     """
-    创建墙体的3D mesh
+    Create 3D wall mesh
 
-    用途: construct_floor中为每面墙创建3D几何体
-    实现:
-        1. 根据墙的起点、终点、高度和厚度计算8个顶点
-        2. 墙的厚度完全朝向房间外侧延伸(使用orientation指向房间内部)
-        3. 定义12个三角面（每个矩形面用2个三角形）
-        4. 创建trimesh对象
+    Purpose: 3D geometry per wall in construct_floor
+    Implementation:
+        1. Eight corners from start, end, height, thickness
+        2. Thickness extends outward (-orientation)
+        3. Twelve triangles (two per face)
+        4. Build trimesh
 
-    参数:
-        wall: 墙体数据，包含 s(起点), e(终点), height(高度), orientation(朝向房间内部的单位向量)
-        thickness: 墙体厚度
+    Args:
+        wall: s, e, height, inward orientation
+        thickness: Wall thickness
 
-    返回:
-        trimesh.Trimesh对象
+    Returns:
+        trimesh.Trimesh
     """
     s = wall["s"]
     e = wall["e"]
     height = wall["height"]
-    orientation = wall.get("orientation", [0, 0])  # 朝向房间内部的法向量
+    orientation = wall.get("orientation", [0, 0])  # inward normal
 
-    # 墙的外法向量 = -orientation (朝向房间外部)
-    # 墙的厚度完全向外延伸
+    # Outer normal = -orientation
+    # Full thickness outward
     outer_normal = np.array([-orientation[0], -orientation[1], 0]) * thickness
 
-    # 8个顶点布局:
-    # 底面: 0(s内) -- 1(e内)     顶面: 4(s内) -- 5(e内)
+    # Eight vertex layout:
+    # Bottom: 0(inner s) -- 1(inner e)  Top: 4 -- 5
     #        |          |                |          |
-    #       3(s外) -- 2(e外)            7(s外) -- 6(e外)
+    #       3(outer s) -- 2(outer e)      7 -- 6
     vertices = [
-        # 底面
-        [s[0], s[1], 0],  # 0: 起点内侧
-        [e[0], e[1], 0],  # 1: 终点内侧
-        [e[0] + outer_normal[0], e[1] + outer_normal[1], 0],  # 2: 终点外侧
-        [s[0] + outer_normal[0], s[1] + outer_normal[1], 0],  # 3: 起点外侧
-        # 顶面
-        [s[0], s[1], height],  # 4: 起点内侧
-        [e[0], e[1], height],  # 5: 终点内侧
-        [e[0] + outer_normal[0], e[1] + outer_normal[1], height],  # 6: 终点外侧
-        [s[0] + outer_normal[0], s[1] + outer_normal[1], height],  # 7: 起点外侧
+        # Bottom face
+        [s[0], s[1], 0],  # 0: start inner
+        [e[0], e[1], 0],  # 1: end inner
+        [e[0] + outer_normal[0], e[1] + outer_normal[1], 0],  # 2: end outer
+        [s[0] + outer_normal[0], s[1] + outer_normal[1], 0],  # 3: start outer
+        # Top face
+        [s[0], s[1], height],  # 4: start inner top
+        [e[0], e[1], height],  # 5: end inner top
+        [e[0] + outer_normal[0], e[1] + outer_normal[1], height],  # 6: end outer top
+        [s[0] + outer_normal[0], s[1] + outer_normal[1], height],  # 7: start outer top
     ]
 
-    # 12个三角面（6个矩形面 * 2个三角形）
-    # 所有法线朝向墙体立方体外部(远离立方体内部空间)
+    # Twelve triangles (six quads)
+    # Normals point outward from wall solid
     faces = [
-        # 底面 (法向朝下-z): 顺时针0→3→2→1 (从下方看)
+        # Bottom (-Z): CW 0->3->2->1 from below
         [0, 3, 2], [0, 2, 1],
-        # 顶面 (法向朝上+z): 顺时针4→5→6→7 (从上方看)
+        # Top (+Z): CW 4->5->6->7 from above
         [4, 5, 6], [4, 6, 7],
-        # 内侧面 (法向朝房间内+orientation): 逆时针1→0→4→5 (从房间内看墙的内表面)
+        # Inner (+orientation): CCW from room
         [1, 0, 4], [1, 4, 5],
-        # 外侧面 (法向朝房间外-orientation): 顺时针2→3→7→6 (从房间外看墙的外表面)
+        # Outer (-orientation): CW from outside
         [2, 3, 7], [2, 7, 6],
-        # 起点端面 (s端,法向朝-墙方向): 0→3→7→4
+        # Start cap: 0->3->7->4
         [0, 3, 7], [0, 7, 4],
-        # 终点端面 (e端,法向朝+墙方向): 1→5→6→2
+        # End cap: 1->5->6->2
         [1, 5, 6], [1, 6, 2],
     ]
 
@@ -1831,29 +1831,29 @@ def create_wall_mesh(wall: Dict, thickness: float) -> trimesh.Trimesh:
 def cut_opening_from_wall(wall_mesh: trimesh.Trimesh, wall: Dict, opening: Dict,
                          thickness: float) -> trimesh.Trimesh:
     """
-    从墙体中挖去门/窗的开口
+    Cut door/window opening from wall mesh
 
-    用途: construct_floor中处理门窗，在墙上创建开口
-    实现: 创建门/窗的box几何体，使用trimesh的boolean difference操作
+    Purpose: openings in construct_floor
+    Implementation: boolean difference with opening box
 
-    注意: 这是一个占位实现，实际的boolean操作可能需要更复杂的处理
+    Note: placeholder; production may need richer boolean handling
 
-    参数:
-        wall_mesh: 原始墙体mesh
-        wall: 墙体数据
-        opening: 门/窗数据，包含 center, width, height
-        thickness: 墙体厚度
+    Args:
+        wall_mesh: Original wall mesh
+        wall: Wall data
+        opening: center, width, height
+        thickness: Wall thickness
 
-    返回:
-        挖去开口后的墙体mesh
+    Returns:
+        Wall mesh after cut
     """
-    # 简化实现：直接返回原墙体
-    # 实际应用中可以使用trimesh.boolean.difference进行布尔运算
+    # Stub: return original mesh
+    # Production: trimesh.boolean.difference
     return wall_mesh
 
 
 def build_asset_search_paths(config: Dict, default_key: str = "model_path") -> List[str]:
-    """extra_path → 默认路径 → generate 路径（去重保序）。"""
+    """Search order: extra_path -> default -> generate (deduped, stable)."""
     candidates = []
     extra = config.get("model_extra_path")
     if extra:
@@ -1875,20 +1875,20 @@ def build_asset_search_paths(config: Dict, default_key: str = "model_path") -> L
 
 def load_mesh(asset_id: int, config: Dict):
     """
-    加载家具mesh
+    Load furniture mesh
 
-    用途: construct_scene中加载GLTF/GLB模型
-    实现:
-        1. 优先尝试加载GLB格式
-        2. 如果失败，尝试加载GLTF格式
-        3. 使用trimesh.load直接加载
+    Purpose: load GLTF/GLB in construct_scene
+    Implementation:
+        1. Prefer GLB
+        2. Fall back to GLTF
+        3. trimesh.load
 
-    参数:
-        asset_id: 模型ID
-        config: 配置字典，包含model_path和可选的model_extra_path
+    Args:
+        asset_id: Model ID
+        config: model_path and optional model_extra_path
 
-    返回:
-        trimesh.Scene或trimesh.Trimesh对象，失败返回None
+    Returns:
+        trimesh.Scene or Trimesh, or None
     """
     search_paths = build_asset_search_paths(config, default_key="model_path")
 
@@ -1896,7 +1896,7 @@ def load_mesh(asset_id: int, config: Dict):
         glb_path = os.path.join(base_path, f"{asset_id}.glb")
         gltf_path = os.path.join(base_path, f"{asset_id}.gltf")
 
-        # 按优先级尝试加载
+        # Try paths in order
         for path in [glb_path, gltf_path]:
             if os.path.exists(path):
                 try:
@@ -1910,77 +1910,77 @@ def load_mesh(asset_id: int, config: Dict):
 def create_door_or_window_mesh(center: List[float], width: float, height: float, 
                                wall_data: Dict, texture_path: str) -> trimesh.Trimesh:
     """
-    创建门或窗的mesh，贴在墙体上
+    Create door/window mesh flush on wall
     
-    参数:
-        center: 门/窗中心位置 [x, y, z]
-        width: 宽度
-        height: 高度
-        wall_data: 墙体数据，包含s, e, orientation
-        texture_path: 贴图路径
+    Args:
+        center: Center [x,y,z]
+        width: Width
+        height: Height
+        wall_data: Wall with s, e, orientation
+        texture_path: Texture path
         
-    返回:
-        trimesh.Trimesh对象，带贴图和正确法线
+    Returns:
+        trimesh.Trimesh with texture and correct normals
     """
-    # 墙体的起点和终点
+    # Wall start/end
     s = np.array(wall_data["s"], dtype=float)
     e = np.array(wall_data["e"], dtype=float)
     orientation = np.array(wall_data["orientation"], dtype=float)
     
-    # 墙的方向向量（沿着墙）
+    # Direction along wall
     wall_dir = e - s
     wall_length = np.linalg.norm(wall_dir)
     if wall_length < 1e-9:
         return trimesh.Trimesh()
     wall_dir_norm = wall_dir / wall_length
     
-    # 门/窗的中心在墙上的投影
+    # Door/window center projected on wall
     center_2d = np.array([center[0], center[1]], dtype=float)
     
-    # 计算门/窗在墙上的局部坐标（沿墙方向）
+    # Local coords along wall
     to_center = center_2d - s
     along_wall = np.dot(to_center, wall_dir_norm)
     
-    # 门/窗的4个角点（3D空间）
-    # 沿墙方向: ±width/2
-    # 垂直方向: center[2] ±height/2
+    # Four corners in 3D
+    # Along wall: +/- width/2
+    # Vertical: center[2] +/- height/2
     
     half_width = width / 2
     half_height = height / 2
     z_bottom = center[2] - half_height
     z_top = center[2] + half_height
     
-    # 在墙上的位置
+    # Positions along wall
     pos_left = along_wall - half_width
     pos_right = along_wall + half_width
     
-    # 计算4个顶点的3D坐标
+    # Four vertex positions
     vertices = np.array([
-        # 底部左
+        # bottom-left
         [s[0] + pos_left * wall_dir_norm[0], s[1] + pos_left * wall_dir_norm[1], z_bottom],
-        # 底部右  
+        # bottom-right
         [s[0] + pos_right * wall_dir_norm[0], s[1] + pos_right * wall_dir_norm[1], z_bottom],
-        # 顶部右
+        # top-right
         [s[0] + pos_right * wall_dir_norm[0], s[1] + pos_right * wall_dir_norm[1], z_top],
-        # 顶部左
+        # top-left
         [s[0] + pos_left * wall_dir_norm[0], s[1] + pos_left * wall_dir_norm[1], z_top],
     ], dtype=float)
     
-    # 向墙内侧偏移一点点，避免z-fighting
+    # Slight inward offset to avoid z-fighting
     offset = 0.001
     offset_vec = np.array([orientation[0], orientation[1], 0], dtype=float) * offset
     vertices += offset_vec
     
-    # UV坐标（整个贴图映射到矩形）
+    # Full-texture quad UV
     uvs = np.array([
-        [0.0, 0.0],  # 左下
-        [1.0, 0.0],  # 右下
-        [1.0, 1.0],  # 右上
-        [0.0, 1.0],  # 左上
+        [0.0, 0.0],  # bottom-left
+        [1.0, 0.0],  # bottom-right
+        [1.0, 1.0],  # top-right
+        [0.0, 1.0],  # top-left
     ])
     
-    # 计算法线方向（与墙体一致）
-    # 使用和墙体相同的逻辑判断三角形顶点顺序
+    # Normal aligned with wall
+    # Same winding test as wall
     v0 = vertices[0]
     v1 = vertices[1]
     v2 = vertices[2]
@@ -1989,31 +1989,31 @@ def create_door_or_window_mesh(center: List[float], width: float, height: float,
     default_normal = np.cross(edge1, edge2)
     default_normal = default_normal / (np.linalg.norm(default_normal) + 1e-9)
     
-    # 目标法线（和墙体一致，指向房间内部）
+    # Target inward normal
     target_normal_3d = np.array([orientation[0], orientation[1], 0.0])
     dot = np.dot(default_normal, target_normal_3d)
     
-    # 根据法线方向选择顶点顺序
+    # Winding from normal dot
     if dot > 0:
         faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=int)
     else:
         faces = np.array([[0, 2, 1], [0, 3, 2]], dtype=int)
     
-    # 创建mesh
+    # Build mesh
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
     
-    # 加载并设置贴图
+    # Load texture
     try:
         from PIL import Image
         if os.path.exists(texture_path):
             texture_image = Image.open(texture_path)
             mesh.visual = trimesh.visual.TextureVisuals(uv=uvs, image=texture_image)
         else:
-            print(f"⚠️  贴图文件不存在: {texture_path}")
-            # 使用默认颜色
+            print(f"⚠️  Texture file not found: {texture_path}")
+            # Default color fallback
             mesh.visual = trimesh.visual.TextureVisuals(uv=uvs)
     except Exception as e:
-        print(f"⚠️  加载贴图失败 {texture_path}: {e}")
+        print(f"⚠️  Failed to load texture {texture_path}: {e}")
         mesh.visual = trimesh.visual.TextureVisuals(uv=uvs)
     
     return mesh
@@ -2022,21 +2022,21 @@ def create_door_or_window_mesh(center: List[float], width: float, height: float,
 def create_windows_and_doors(walls_data: Dict, door_texture_path: str, 
                              window_texture_path: str, config: Dict = None) -> List[Dict]:
     """
-    为所有墙体上的门窗创建mesh
+    Create meshes for all doors/windows on walls
     
-    参数:
-        walls_data: 墙体数据字典 {wall_id: {s, e, height, orientation, doors: {}, windows: {}}}
-        door_texture_path: 门的贴图路径
-        window_texture_path: 窗的贴图路径
-        config: 配置字典（可选）
+    Args:
+        walls_data: {wall_id: {s,e,height,orientation,doors,windows}}
+        door_texture_path: Door texture path
+        window_texture_path: Window texture path
+        config: Optional config dict
         
-    返回:
-        门窗mesh列表 [{type: 'door'/'window', id: xxx, mesh: trimesh}]
+    Returns:
+        List [{type: 'door'/'window', id, mesh, ...}]
     """
     result = []
     
     for wall_id, wall in walls_data.items():
-        # 处理门
+        # Doors
         for door_id, door_data in wall.get("doors", {}).items():
             door_mesh = create_door_or_window_mesh(
                 center=door_data["center"],
@@ -2052,7 +2052,7 @@ def create_windows_and_doors(walls_data: Dict, door_texture_path: str,
                 "wall_id": wall_id
             })
         
-        # 处理窗
+        # Windows
         for window_id, window_data in wall.get("windows", {}).items():
             window_mesh = create_door_or_window_mesh(
                 center=window_data["center"],
@@ -2074,33 +2074,33 @@ def create_windows_and_doors(walls_data: Dict, door_texture_path: str,
 def segment_intersects_wall(segment_start: np.ndarray, segment_end: np.ndarray, 
                             wall_data: dict) -> bool:
     """
-    检测线段是否与墙体相交（3D线段与墙体矩形面相交）
+    Test segment vs wall rectangle (3D line vs wall face)
     
     Args:
-        segment_start: 线段起点 [x, y, z]
-        segment_end: 线段终点 [x, y, z]
-        wall_data: 墙体数据，包含s, e, height
+        segment_start: Segment start [x,y,z]
+        segment_end: Segment end [x,y,z]
+        wall_data: Wall with s, e, height
         
     Returns:
-        bool: 是否相交
+        bool: intersection flag
     """
-    # 墙体的4个顶点（矩形）
-    s = np.array(wall_data["s"] + [0], dtype=float)  # 底部起点
-    e = np.array(wall_data["e"] + [0], dtype=float)  # 底部终点
+    # Wall rectangle corners
+    s = np.array(wall_data["s"] + [0], dtype=float)  # bottom start
+    e = np.array(wall_data["e"] + [0], dtype=float)  # bottom end
     height = wall_data["height"]
     
-    # 墙体的4个角点
-    p1 = s  # 左下
-    p2 = e  # 右下
-    p3 = np.array([e[0], e[1], height], dtype=float)  # 右上
-    p4 = np.array([s[0], s[1], height], dtype=float)  # 左上
+    # Four wall corners
+    p1 = s  # bottom-left
+    p2 = e  # bottom-right
+    p3 = np.array([e[0], e[1], height], dtype=float)  # top-right
+    p4 = np.array([s[0], s[1], height], dtype=float)  # top-left
     
-    # 墙体法向量 (垂直于墙面)
+    # Wall plane normal
     wall_dir = e - s
     wall_normal = np.array([-wall_dir[1], wall_dir[0], 0])
     wall_normal = wall_normal / np.linalg.norm(wall_normal)
     
-    # 线段方向
+    # Segment direction
     line_dir = segment_end - segment_start
     line_length = np.linalg.norm(line_dir)
     
@@ -2109,37 +2109,37 @@ def segment_intersects_wall(segment_start: np.ndarray, segment_end: np.ndarray,
         
     line_dir_norm = line_dir / line_length
     
-    # 计算线段与墙面所在平面的交点（使用平面方程）
+    # Line-plane intersection
     denom = np.dot(line_dir_norm, wall_normal)
     
     if abs(denom) < 1e-9:
-        # 线段与墙面平行
+        # Segment parallel to wall
         return False
     
-    # 平面方程: dot(P - p1, wall_normal) = 0
+    # Plane: dot(P - p1, wall_normal) = 0
     t = np.dot(p1 - segment_start, wall_normal) / denom
     
-    # 检查交点是否在线段范围内
+    # Intersection within segment
     if t < 0 or t > line_length:
         return False
     
-    # 计算交点
+    # Intersection point
     intersection = segment_start + t * line_dir_norm
     
-    # 检查交点是否在墙体矩形内
-    # 将3D问题投影到2D（墙面的局部坐标系）
-    # 墙面的两个轴：沿着墙 (wall_dir) 和 垂直向上 (0,0,1)
+    # Point inside wall rectangle
+    # Project to wall-local 2D
+    # Axes: along wall and +Z
     to_intersection = intersection - p1
     
-    # 沿墙方向的投影
+    # Projection along wall
     wall_dir_norm = wall_dir / np.linalg.norm(wall_dir)
     proj_along_wall = np.dot(to_intersection, wall_dir_norm)
     wall_length = np.linalg.norm(wall_dir)
     
-    # 沿高度方向的投影
+    # Projection along height
     proj_along_height = intersection[2] - p1[2]
     
-    # 检查是否在矩形范围内（留一点容差）
+    # Inside rectangle with epsilon
     epsilon = 0.01
     if (proj_along_wall >= -epsilon and proj_along_wall <= wall_length + epsilon and
         proj_along_height >= -epsilon and proj_along_height <= height + epsilon):
@@ -2152,81 +2152,81 @@ def find_walls_to_make_transparent(camera_pos_2d: list, look_at_2d: list,
                                    floor_vertices: List[Tuple[float, float]], 
                                    walls_dict: dict) -> list:
     """
-    基于相机位置和视角，确定需要设为透明的墙体
+    Pick walls to make transparent from camera pose and view
     
-    算法：
-    1. 检查相机(x,y)是否在凹多边形内
-    2. 如果在内部：不透明任何墙体（返回空列表）
-    3. 如果在外部：
-       - 从相机到每个顶点计算射线方向
-       - 找到夹角最大的两条射线（视锥边界）
-       - 确定这两个顶点之间的"前方弧段"
-       - 前方弧段上的墙体设为透明
+    Algorithm:
+    1. Test if camera (x,y) inside concave polygon
+    2. If inside: no transparent walls (empty list)
+    3. If outside:
+       - Ray from camera to each vertex
+       - Two extreme-angle rays (view frustum bounds)
+       - Front arc between those vertices
+       - Walls on front arc become transparent
     
     Args:
-        camera_pos_2d: 相机位置 [x, y]
-        look_at_2d: 目标位置 [x, y]
-        floor_vertices: 地板多边形顶点列表（凹多边形）
-        walls_dict: 墙体字典 {wall_id: wall_data}
+        camera_pos_2d: Camera [x, y]
+        look_at_2d: Look-at [x, y]
+        floor_vertices: Floor polygon (concave OK)
+        walls_dict: Walls {wall_id: wall_data}
         
     Returns:
-        list: 需要设为透明的墙体ID列表
+        list: Wall IDs to make transparent
     """
     camera_pos = np.array(camera_pos_2d, dtype=float)
     look_at = np.array(look_at_2d, dtype=float)
     
-    # 步骤1: 检查相机是否在多边形内部
+    # Step 1: camera inside polygon
     camera_tuple = tuple(camera_pos)
     is_inside = point_in_polygon(camera_tuple, floor_vertices)
     
     if is_inside:
-        # 相机在房间内，不需要透明任何墙体
-        print("📍 相机位于房间内部，不设置透明墙体")
+        # Inside room: no transparent walls
+        print("📍 Camera is inside the room; no transparent walls will be set")
         return []
     
-    print("📍 相机位于房间外部，计算需要透明的墙体...")
+    print("📍 Camera is outside the room; computing walls that should be transparent...")
     
-    # 步骤2: 计算相机朝向（参考方向）
+    # Step 2: camera forward (reference)
     camera_direction = look_at - camera_pos
     if np.linalg.norm(camera_direction) < 1e-6:
-        # 相机和目标点重合，无法确定方向
-        print("⚠️  相机和目标点重合，无法确定朝向")
+        # Camera equals look-at: no direction
+        print("⚠️  Camera and look-at target coincide; cannot determine orientation")
         return []
     camera_direction = camera_direction / np.linalg.norm(camera_direction)
     
-    # 步骤3: 计算从相机到每个顶点的向量和夹角
+    # Step 3: vectors and signed angles to vertices
     vertex_angles = []
     for i, vertex in enumerate(floor_vertices):
         vertex_pos = np.array(vertex, dtype=float)
         to_vertex = vertex_pos - camera_pos
         
         if np.linalg.norm(to_vertex) < 1e-6:
-            # 顶点和相机重合
+            # Vertex at camera
             angle = 0.0
         else:
             to_vertex_norm = to_vertex / np.linalg.norm(to_vertex)
             
-            # 计算带符号的夹角（-180° 到 +180°）
-            # 使用 atan2 计算相对于相机朝向的角度
+            # Signed angle [-pi, pi]
+            # atan2 relative to camera forward
             cos_angle = np.dot(camera_direction, to_vertex_norm)
-            # 计算垂直方向的分量（用于确定左右）
+            # Cross component for left/right
             cross = camera_direction[0] * to_vertex_norm[1] - camera_direction[1] * to_vertex_norm[0]
-            angle = np.arctan2(cross, cos_angle)  # 返回 [-π, π]
+            angle = np.arctan2(cross, cos_angle)  # [-pi, pi]
         
         vertex_angles.append((i, vertex, angle))
     
-    # 步骤4: 找到最左（最负角度）和最右（最正角度）的顶点
+    # Step 4: leftmost and rightmost vertices
     vertex_angles.sort(key=lambda x: x[2])
     leftmost_idx, leftmost_vertex, leftmost_angle = vertex_angles[0]
     rightmost_idx, rightmost_vertex, rightmost_angle = vertex_angles[-1]
     
-    print(f"   最左顶点: 索引{leftmost_idx}, 角度{np.degrees(leftmost_angle):.1f}°")
-    print(f"   最右顶点: 索引{rightmost_idx}, 角度{np.degrees(rightmost_angle):.1f}°")
+    print(f"   Leftmost vertex: index {leftmost_idx}, angle {np.degrees(leftmost_angle):.1f}°")
+    print(f"   Rightmost vertex: index {rightmost_idx}, angle {np.degrees(rightmost_angle):.1f}°")
     
-    # 步骤5: 确定前方弧段（从最左到最右，选择距离相机更近的路径）
+    # Step 5: front arc (shorter path from left to right)
     n_vertices = len(floor_vertices)
     
-    # 计算两种路径
+    # Two candidate arcs
     if leftmost_idx <= rightmost_idx:
         path1 = list(range(leftmost_idx, rightmost_idx + 1))
         path2 = list(range(rightmost_idx, n_vertices)) + list(range(0, leftmost_idx + 1))
@@ -2234,7 +2234,7 @@ def find_walls_to_make_transparent(camera_pos_2d: list, look_at_2d: list,
         path1 = list(range(leftmost_idx, n_vertices)) + list(range(0, rightmost_idx + 1))
         path2 = list(range(rightmost_idx, leftmost_idx + 1))
     
-    # 计算每条路径上顶点到相机的平均距离
+    # Mean camera distance per arc
     def avg_distance_to_camera(path):
         if not path:
             return float('inf')
@@ -2248,69 +2248,69 @@ def find_walls_to_make_transparent(camera_pos_2d: list, look_at_2d: list,
     dist1 = avg_distance_to_camera(path1)
     dist2 = avg_distance_to_camera(path2)
     
-    # 选择距离相机更近的路径作为前方弧段
+    # Pick closer arc as front
     front_vertex_indices = path1 if dist1 < dist2 else path2
     front_vertices_set = set(front_vertex_indices)
     
-    print(f"   路径1平均距离: {dist1:.2f}m, 路径2平均距离: {dist2:.2f}m")
-    print(f"   选择{'路径1' if dist1 < dist2 else '路径2'}作为前方弧段（距离更近）")
+    print(f"   Path 1 average distance: {dist1:.2f}m, path 2 average distance: {dist2:.2f}m")
+    print(f"   Selected {'path 1' if dist1 < dist2 else 'path 2'} as the front arc (closer distance)")
     
-    print(f"   前方弧段包含 {len(front_vertex_indices)} 个顶点: {front_vertex_indices}")
-    print(f"   前方弧段顶点坐标: {[floor_vertices[i] for i in front_vertex_indices]}")
+    print(f"   Front arc contains {len(front_vertex_indices)} vertices: {front_vertex_indices}")
+    print(f"   Front arc vertex coordinates: {[floor_vertices[i] for i in front_vertex_indices]}")
     
-    # 步骤6: 找到前方弧段上的墙体
-    # 前方弧段上的墙 = 连接前方弧段中相邻顶点的墙
+    # Step 6: walls on front arc
+    # Walls joining adjacent front-arc vertices
     transparent_wall_ids = []
     
     for wall_id, wall_data in walls_dict.items():
         wall_s = tuple(wall_data["s"])
         wall_e = tuple(wall_data["e"])
         
-        # 检查墙的两个端点是否都在顶点列表中
+        # Both endpoints in vertex list
         try:
             s_idx = floor_vertices.index(wall_s)
             e_idx = floor_vertices.index(wall_e)
         except ValueError:
-            # 墙的端点不在顶点列表中（不应该发生）
+            # Endpoint missing from list (unexpected)
             continue
         
-        # 检查墙的两个端点是否都在前方弧段中
+        # Both endpoints on front arc
         if s_idx not in front_vertices_set or e_idx not in front_vertices_set:
             continue
         
-        # 检查这两个端点在前方弧段中是否相邻
-        # 在front_vertex_indices中找到它们的位置
+        # Adjacent on front arc
+        # Positions in front_vertex_indices
         try:
             pos_s = front_vertex_indices.index(s_idx)
             pos_e = front_vertex_indices.index(e_idx)
         except ValueError:
             continue
         
-        # 检查是否相邻（考虑环形）
+        # Adjacency on cyclic arc
         n_front = len(front_vertex_indices)
         is_adjacent = (abs(pos_s - pos_e) == 1 or 
                       abs(pos_s - pos_e) == n_front - 1)
         
         if is_adjacent:
             transparent_wall_ids.append(wall_id)
-            print(f"      透明墙: {wall_id}, 端点索引({s_idx},{e_idx}), 在前方弧段位置({pos_s},{pos_e})")
+            print(f"      Transparent wall: {wall_id}, endpoint indices ({s_idx},{e_idx}), positions on front arc ({pos_s},{pos_e})")
     
-    print(f"   共 {len(transparent_wall_ids)} 面墙体将设为透明")
+    print(f"   {len(transparent_wall_ids)} wall(s) will be set transparent")
     
     return transparent_wall_ids
 
 
 def find_intersecting_walls(camera_position: list, look_at_target: list, mesh_nodes: dict) -> list:
     """
-    找到与相机到目标线段相交的所有墙体ID（旧方法，已弃用）
+    Find walls intersecting camera-to-target segment (legacy, deprecated)
     
     Args:
-        camera_position: 相机位置 [x, y, z]
-        look_at_target: 目标位置 [x, y, z]
-        mesh_nodes: 场景的mesh节点字典
+        camera_position: Camera [x,y,z]
+        look_at_target: Target [x,y,z]
+        mesh_nodes: Scene mesh node dict
         
     Returns:
-        list: 相交的墙体ID列表
+        list: Intersecting wall IDs
     """
     segment_start = np.array(camera_position, dtype=float)
     segment_end = np.array(look_at_target, dtype=float)
@@ -2327,27 +2327,27 @@ def find_intersecting_walls(camera_position: list, look_at_target: list, mesh_no
 
 def set_mesh_alpha(mesh_nodes: dict, mesh_type: str, mesh_id: str, alpha: float = 0.0):
     """
-    设置指定mesh的透明度
+    Set alpha for a mesh
     
     Args:
-        mesh_nodes: 场景的mesh节点字典
-        mesh_type: mesh类型 ("walls", "boxes", "doors", "windows")
-        mesh_id: mesh的唯一ID
-        alpha: 透明度 (0.0-1.0, 0为完全透明, 1为完全不透明)
+        mesh_nodes: Scene mesh node dict
+        mesh_type: "walls", "boxes", "doors", "windows"
+        mesh_id: Mesh unique ID
+        alpha: 0.0-1.0 (0 fully transparent, 1 opaque)
     """
     import pyrender
     
     if mesh_type not in mesh_nodes:
-        print(f"⚠️  未知的mesh类型: {mesh_type}")
+        print(f"⚠️  Unknown mesh type: {mesh_type}")
         return
     
     if mesh_id not in mesh_nodes[mesh_type]:
-        print(f"⚠️  未找到ID为 {mesh_id} 的{mesh_type}")
+        print(f"⚠️  {mesh_type} with ID {mesh_id} not found")
         return
     
     mesh_info = mesh_nodes[mesh_type][mesh_id]
     
-    # 处理单节点或多节点
+    # Single or multiple nodes
     nodes_to_update = []
     if "node" in mesh_info:
         nodes_to_update = [mesh_info["node"]]
@@ -2356,35 +2356,35 @@ def set_mesh_alpha(mesh_nodes: dict, mesh_type: str, mesh_id: str, alpha: float 
     
     for node in nodes_to_update:
         if node and node.mesh:
-            # 更新所有primitives的材质
+            # Update all primitive materials
             for primitive in node.mesh.primitives:
-                # 保存原始材质（如果还没保存）
+                # Stash original material once
                 if not hasattr(primitive, '_original_material'):
                     primitive._original_material = primitive.material
                 
-                # 创建新的透明材质（使用pyrender的材质类）
+                # New transparent pyrender material
                 if primitive.material:
-                    # 复制现有材质属性
+                    # Copy existing material fields
                     mat = primitive.material
                     baseColorFactor = list(getattr(mat, 'baseColorFactor', [1.0, 1.0, 1.0, 1.0]))
-                    baseColorFactor[3] = alpha  # 设置alpha通道
+                    baseColorFactor[3] = alpha  # set alpha
                     
-                    # 创建pyrender的MetallicRoughnessMaterial
+                    # pyrender MetallicRoughnessMaterial
                     new_mat = pyrender.MetallicRoughnessMaterial(
                         baseColorFactor=baseColorFactor,
                         metallicFactor=getattr(mat, 'metallicFactor', 0.0),
                         roughnessFactor=getattr(mat, 'roughnessFactor', 1.0),
-                        alphaMode='BLEND',  # 关键：启用透明度混合
+                        alphaMode='BLEND',  # enable alpha blending
                         doubleSided=True
                     )
                     
-                    # 保留纹理（如果有）
+                    # Preserve texture if any
                     if hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
                         new_mat.baseColorTexture = mat.baseColorTexture
                     
                     primitive.material = new_mat
                 else:
-                    # 没有材质，创建一个透明材质
+                    # Create transparent material if missing
                     primitive.material = pyrender.MetallicRoughnessMaterial(
                         baseColorFactor=[0.8, 0.8, 0.8, alpha],
                         metallicFactor=0.0,
@@ -2393,17 +2393,17 @@ def set_mesh_alpha(mesh_nodes: dict, mesh_type: str, mesh_id: str, alpha: float 
                         doubleSided=True
                     )
     
-    print(f"✅ 已设置 {mesh_type}[{mesh_id}] 的透明度为 {alpha}")
+    print(f"✅ Set alpha of {mesh_type}[{mesh_id}] to {alpha}")
 
 
 def reset_mesh_alpha(mesh_nodes: dict, mesh_type: str, mesh_id: str):
     """
-    恢复指定mesh的原始材质
+    Restore original mesh material
     
     Args:
-        mesh_nodes: 场景的mesh节点字典
-        mesh_type: mesh类型
-        mesh_id: mesh的唯一ID
+        mesh_nodes: Scene mesh node dict
+        mesh_type: Mesh category
+        mesh_id: Mesh unique ID
     """
     if mesh_type not in mesh_nodes:
         return
@@ -2426,15 +2426,15 @@ def reset_mesh_alpha(mesh_nodes: dict, mesh_type: str, mesh_id: str):
                     primitive.material = primitive._original_material
                     delattr(primitive, '_original_material')
     
-    print(f"✅ 已恢复 {mesh_type}[{mesh_id}] 的原始材质")
+    print(f"✅ Restored original material for {mesh_type}[{mesh_id}]")
 
 
 def reset_all_alpha(mesh_nodes: dict):
     """
-    恢复所有mesh的原始材质
+    Restore all mesh materials
     
     Args:
-        mesh_nodes: 场景的mesh节点字典
+        mesh_nodes: Scene mesh node dict
     """
     for mesh_type in mesh_nodes:
         if isinstance(mesh_nodes[mesh_type], dict):
@@ -2447,105 +2447,105 @@ def calculate_optimal_fov(camera_position: np.ndarray, look_at_target: np.ndarra
                          bounds: List[float], indoor_fov: float = 120.0, 
                          outdoor_fov_scale: float = 1.05) -> float:
     """
-    智能计算最佳FOV
+    Compute optimal FOV
     
     Args:
-        camera_position: 相机位置 [x, y, z]
-        look_at_target: 目标位置 [x, y, z]
-        floor_vertices: 地板顶点列表（凹多边形）
-        z_max: 房间高度
-        bounds: 边界 [x_min, y_min, x_max, y_max]
-        indoor_fov: 室内FOV（度）
-        outdoor_fov_scale: 室外FOV缩放系数
+        camera_position: Camera [x,y,z]
+        look_at_target: Target [x,y,z]
+        floor_vertices: Floor vertices (concave)
+        z_max: Room height
+        bounds: [x_min, y_min, x_max, y_max]
+        indoor_fov: Indoor FOV (degrees)
+        outdoor_fov_scale: Outdoor FOV scale factor
         
     Returns:
-        fov_y: 垂直视场角（弧度）
+        fov_y: Vertical FOV (radians)
         
-    算法：
-        情况1: 相机在包围盒（XY+Z）内部 → 使用固定FOV 70°
-        情况2: 相机的 z 坐标超出 [0, z_max] → 以相机到包围盒中心连线为方向，确保视锥包裹整个 3D 包围盒
-        情况3: 相机在垂直范围内但 XY 在包围盒外 → 使用之前的视锥平面与立方体交点计算
-            - 垂直平面（forward + up）与立方体相交 → 计算最大夹角
-            - 水平平面（forward + right）与立方体相交 → 计算最大夹角
-            - FOV = 2 × max(两个夹角) × scale_factor
+    Algorithm:
+        Case 1: camera inside XY+Z bbox -> fixed indoor FOV
+        Case 2: z outside [0,z_max] -> aim at bbox center to frame 3D box
+        Case 3: z in range but XY outside -> frustum plane vs box edges
+            - Vertical plane (forward+up) vs box -> max angle
+            - Horizontal plane (forward+right) vs box -> max angle
+            - FOV = 2 * max(two angles) * scale_factor
     """
-    # 包围盒中心（用于 z 越界时确定方向）
+    # Bbox center (when z out of range)
     center_xy = np.array([(bounds[0] + bounds[2]) / 2.0, (bounds[1] + bounds[3]) / 2.0], dtype=float)
     bbox_center = np.array([center_xy[0], center_xy[1], z_max / 2.0], dtype=float)
 
-    # 检查相机是否在包围盒内（xy + z）
+    # Camera inside XY+Z bbox
     in_bbox_xy = (bounds[0] <= camera_position[0] <= bounds[2] and 
                   bounds[1] <= camera_position[1] <= bounds[3])
     in_bbox_z = (0 <= camera_position[2] <= z_max)
 
     if in_bbox_xy and in_bbox_z:
-        # 情况1: 相机在包围盒内部，使用传入的 indoor_fov
+        # Case 1: use indoor_fov
         fixed_fov = indoor_fov
-        print(f"📐 相机在包围盒内部，使用固定FOV: {fixed_fov}°")
+        print(f"📐 Camera is inside bounding box; using fixed FOV: {fixed_fov}°")
         return np.radians(fixed_fov)
     
     camera_z_outside = camera_position[2] < 0 or camera_position[2] > z_max
     if camera_z_outside:
-        print("📐 相机 z 超出 [0, z_max]，以包围盒中心为方向计算 FOV...")
+        print("📐 Camera z is outside [0, z_max]; computing FOV toward bounding box center...")
         target_point = bbox_center
     else:
-        print("📐 相机在垂直范围内但 XY 超出包围盒，基于视锥平面计算 FOV...")
+        print("📐 Camera is within vertical range but XY is outside bounding box; computing FOV from frustum planes...")
         target_point = look_at_target
 
-    # 计算相机坐标系
+    # Camera basis
     forward = target_point - camera_position
     forward = forward / np.linalg.norm(forward)
     
-    # 假设up向量为z轴向上
+    # World up = +Z
     world_up = np.array([0, 0, 1], dtype=float)
     right = np.cross(forward, world_up)
     if np.linalg.norm(right) < 1e-6:
-        # forward和world_up平行，使用y轴
+        # forward parallel to up: use Y axis
         right = np.cross(forward, np.array([0, 1, 0]))
     right = right / np.linalg.norm(right)
     up = np.cross(right, forward)
     
-    # 构建立方体边（vertices多边形向上拉伸）
+    # Box edges: floor polygon extruded to z_max
     edges_3d = []
     n = len(floor_vertices)
     
-    # 底边（z=0）
+    # Bottom edges z=0
     for i in range(n):
         v1 = np.array([floor_vertices[i][0], floor_vertices[i][1], 0.0])
         v2 = np.array([floor_vertices[(i+1)%n][0], floor_vertices[(i+1)%n][1], 0.0])
         edges_3d.append((v1, v2))
     
-    # 顶边（z=z_max）
+    # Top edges z=z_max
     for i in range(n):
         v1 = np.array([floor_vertices[i][0], floor_vertices[i][1], z_max])
         v2 = np.array([floor_vertices[(i+1)%n][0], floor_vertices[(i+1)%n][1], z_max])
         edges_3d.append((v1, v2))
     
-    # 竖边
+    # Vertical edges
     for i in range(n):
         v1 = np.array([floor_vertices[i][0], floor_vertices[i][1], 0.0])
         v2 = np.array([floor_vertices[i][0], floor_vertices[i][1], z_max])
         edges_3d.append((v1, v2))
     
-    # 计算两个平面与立方体的交点
-    # 平面1：垂直平面（forward + up）
+    # Intersections of two planes with box
+    # Plane 1: forward + up
     plane1_normal = np.cross(forward, up)
     plane1_normal = plane1_normal / np.linalg.norm(plane1_normal)
     
-    # 平面2：水平平面（forward + right）
+    # Plane 2: forward + right
     plane2_normal = np.cross(forward, right)
     plane2_normal = plane2_normal / np.linalg.norm(plane2_normal)
     
     def plane_edge_intersection(plane_normal, plane_point, edge_start, edge_end):
-        """计算平面与线段的交点"""
-        # 平面方程: dot(P - plane_point, plane_normal) = 0
-        # 线段参数方程: P = edge_start + t * (edge_end - edge_start), t in [0,1]
+        """Intersection of plane and segment."""
+        # Plane: dot(P - plane_point, plane_normal) = 0
+        # Segment: P = edge_start + t * (edge_end - edge_start), t in [0,1]
         
         edge_dir = edge_end - edge_start
         denom = np.dot(edge_dir, plane_normal)
         
         if abs(denom) < 1e-9:
-            # 边与平面平行
+            # Edge parallel to plane
             return None
         
         t = np.dot(plane_point - edge_start, plane_normal) / denom
@@ -2554,7 +2554,7 @@ def calculate_optimal_fov(camera_position: np.ndarray, look_at_target: np.ndarra
             return edge_start + t * edge_dir
         return None
     
-    # 收集两个平面的交点
+    # Collect plane intersections
     intersections_plane1 = []
     intersections_plane2 = []
     
@@ -2567,7 +2567,7 @@ def calculate_optimal_fov(camera_position: np.ndarray, look_at_target: np.ndarra
         if pt2 is not None:
             intersections_plane2.append(pt2)
     
-    # 计算每个平面交点的最大夹角
+    # Max angle per plane
     def calc_max_angle(intersections):
         if len(intersections) == 0:
             return 0.0
@@ -2588,14 +2588,14 @@ def calculate_optimal_fov(camera_position: np.ndarray, look_at_target: np.ndarra
     angle1 = calc_max_angle(intersections_plane1)
     angle2 = calc_max_angle(intersections_plane2)
     
-    print(f"   垂直平面交点数: {len(intersections_plane1)}, 最大夹角: {np.degrees(angle1):.1f}°")
-    print(f"   水平平面交点数: {len(intersections_plane2)}, 最大夹角: {np.degrees(angle2):.1f}°")
+    print(f"   Vertical plane intersections: {len(intersections_plane1)}, max angle: {np.degrees(angle1):.1f}°")
+    print(f"   Horizontal plane intersections: {len(intersections_plane2)}, max angle: {np.degrees(angle2):.1f}°")
     
     # FOV = 2 * max_angle * scale_factor
     max_angle = max(angle1, angle2)
     fov_y = 2 * max_angle * outdoor_fov_scale
     
-    # 限制范围
+    # Clamp FOV range
     fov_y = np.clip(fov_y, np.radians(10), np.radians(120))
     
     print(f"   FOV = 2 × {np.degrees(max_angle):.1f}° × {outdoor_fov_scale} = {np.degrees(fov_y):.1f}°")
@@ -2605,57 +2605,57 @@ def create_wall_edge_lines(start: List[float], end: List[float], height: float,
                            orientation: List[float], edge_color: List[float] = None,
                            offset: float = 0.01):
     """
-    为墙体创建边缘线条，使墙与地面、墙与墙之间的分界线更明显
-    边缘线会向墙的内侧（房间内部）偏移，避免相邻墙的边缘线重叠
+    Wall edge lines to emphasize floor and corner boundaries
+    Offset inward to avoid overlapping adjacent wall edges
     
     Args:
-        start: 墙的起点 [x, y]
-        end: 墙的终点 [x, y]
-        height: 墙的高度
-        orientation: 墙的朝向（法向量） [nx, ny]，指向房间内部
-        edge_color: 边缘线条颜色 [R, G, B, A]，默认为深灰色
-        offset: 边缘线向内偏移距离，默认0.01米
+        start: Wall start [x, y]
+        end: Wall end [x, y]
+        height: Wall height
+        orientation: Inward wall normal [nx, ny]
+        edge_color: Line color RGBA, default dark gray
+        offset: Inward offset in meters, default 0.01
         
     Returns:
-        pyrender.Mesh 线条对象
+        pyrender.Mesh line object
     """
     import pyrender
-    # 计算向内偏移的量（沿着orientation方向）
+    # Inward offset along orientation
     offset_vec = np.array([orientation[0] * offset, orientation[1] * offset, 0.0])
     
-    # 定义墙的4个顶点，并向内偏移
+    # Four wall corners, shifted inward
     vertices = np.array([
-        [start[0], start[1], 0.0],        # 0: 底部起点
-        [end[0], end[1], 0.0],            # 1: 底部终点
-        [end[0], end[1], height],         # 2: 顶部终点
-        [start[0], start[1], height]      # 3: 顶部起点
+        [start[0], start[1], 0.0],        # 0: bottom start
+        [end[0], end[1], 0.0],            # 1: bottom end
+        [end[0], end[1], height],         # 2: top end
+        [start[0], start[1], height]      # 3: top start
     ], dtype=np.float32)
     
-    # 将所有顶点向房间内部偏移
+    # Shift all vertices inward
     vertices += offset_vec
     
-    # 定义边缘线的连接关系（线段索引对）
-    # 4条边缘线：底边、顶边、左边、右边
+    # Edge line index pairs
+    # Four edges: bottom, top, left, right
     edges = np.array([
-        [0, 1],  # 底边（墙与地面）
-        [2, 3],  # 顶边（墙与天花板）
-        [0, 3],  # 左边（墙与墙）
-        [1, 2],  # 右边（墙与墙）
+        [0, 1],  # bottom (wall-floor)
+        [2, 3],  # top (wall-ceiling)
+        [0, 3],  # left (wall-wall)
+        [1, 2],  # right (wall-wall)
     ], dtype=np.uint32)
     
-    # 设置边缘线的颜色
+    # Edge color
     if edge_color is None:
-        edge_color = [0.1, 0.1, 0.1, 1.0]  # 默认深灰色
+        edge_color = [0.1, 0.1, 0.1, 1.0]  # default dark gray
     edge_color = np.array(edge_color, dtype=np.float32)
     
-    # 创建线条的材质
+    # Line material
     material = pyrender.MetallicRoughnessMaterial(
         baseColorFactor=edge_color,
         metallicFactor=0.0,
         roughnessFactor=1.0
     )
     
-    # 创建线条 primitive
+    # Line primitive
     primitive = pyrender.Primitive(
         positions=vertices,
         indices=edges,
@@ -2663,20 +2663,20 @@ def create_wall_edge_lines(start: List[float], end: List[float], height: float,
         material=material
     )
     
-    # 创建并返回 pyrender.Mesh 对象
+    # Return pyrender.Mesh
     return pyrender.Mesh(primitives=[primitive])
 
 
 def bbox_2d_from_binary_mask(mask: np.ndarray) -> Optional[List[int]]:
-    """从二值 mask 计算目标检测框 [x1, y1, x2, y2]（像素坐标，左上角为原点，含边界）。"""
+    """Bounding box [x1,y1,x2,y2] from binary mask (pixel coords, top-left origin, inclusive)."""
     ys, xs = np.nonzero(mask)
     if xs.size == 0:
         return None
     return [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())]
 
 
-# 语义图以无抗锯齿方式渲染，索引使用精确 RGB 匹配（不再依赖最近邻）。
-SEMANTIC_COLOR_MAX_DIST_SQ = 0  # 保留常量名兼容；0 表示仅精确匹配
+# Semantic map rendered without antialiasing; exact RGB index match (no nearest-neighbor).
+SEMANTIC_COLOR_MAX_DIST_SQ = 0  # keep name; 0 = exact match only
 
 
 def attach_semantic_bbox_2d(
@@ -2685,11 +2685,11 @@ def attach_semantic_bbox_2d(
     background: Tuple[int, int, int] = SEMANTIC_BACKGROUND,
     max_dist_sq: float = SEMANTIC_COLOR_MAX_DIST_SQ,
 ) -> None:
-    """为 semantic.json 各 object 写入 pixel_num 与 bbox_2d。
+    """Fill pixel_num and bbox_2d for each semantic.json object.
 
-    默认精确匹配 JSON 中的 color（需配合语义渲染关闭抗锯齿）。
-    max_dist_sq>0 时回退为带阈值最近邻（兼容旧语义图）。
-    bbox_2d 取该实体全部 mask 像素（含多个连通域）的外接矩形；pixel_num==0 时不写 bbox_2d。
+    Default: exact color match (requires antialiased-off semantic render).
+    max_dist_sq>0: thresholded nearest-neighbor (legacy maps).
+    bbox_2d is axis-aligned bounds of all mask pixels; omitted when pixel_num==0.
     """
     for obj in objects:
         obj["pixel_num"] = 0
@@ -2724,7 +2724,7 @@ def attach_semantic_bbox_2d(
                 obj["bbox_2d"] = bbox
         return
 
-    # 兼容旧图：带阈值最近邻
+    # Legacy maps: thresholded nearest neighbor
     palette: List[Tuple[int, int, int]] = [background] + colors
     palette_arr = np.asarray(palette, dtype=np.float32)
     pixels = rgb_u8.reshape(-1, 3).astype(np.float32)
@@ -2746,7 +2746,7 @@ def attach_semantic_bbox_2d(
 
 
 def bbox_2d_overlay_path(render_path: str) -> str:
-    """与渲染图并列的检测框可视化路径，如 topdown.png -> topdown_bbox_2d.png。"""
+    """Sidecar bbox overlay path, e.g. topdown.png -> topdown_bbox_2d.png."""
     base, _ = os.path.splitext(render_path)
     return f"{base}_bbox_2d.png"
 
@@ -2757,15 +2757,15 @@ def save_bbox_2d_overlay_png(
     output_path: Optional[str] = None,
     line_width: int = 2,
 ) -> Optional[str]:
-    """在原渲染图上绘制 semantic bbox_2d 与 label，保存为 *_bbox_2d.png。"""
+    """Draw semantic bbox_2d and labels on render; save as *_bbox_2d.png."""
     try:
         from PIL import Image, ImageDraw
     except ImportError:
-        print("⚠️ PIL 不可用，跳过 bbox_2d 可视化")
+        print("⚠️ PIL is unavailable; skipping bbox_2d visualization")
         return None
 
     if not os.path.isfile(render_path):
-        print(f"⚠️ 渲染图不存在，跳过 bbox_2d 可视化: {render_path}")
+        print(f"⚠️ Render image not found; skipping bbox_2d visualization: {render_path}")
         return None
 
     if output_path is None:
@@ -2816,7 +2816,7 @@ def semantic_entity_color(
     entity_key: str,
     used: Optional[Set[Tuple[int, int, int]]] = None,
 ) -> Tuple[int, int, int]:
-    """为单个实体生成语义色；可选 used 集合保证同场景内颜色唯一，便于精确索引。"""
+    """Semantic color for one entity; optional used set ensures unique colors per scene."""
     used_set = used if used is not None else set()
     salt = 0
     while salt < 4096:
@@ -2842,7 +2842,7 @@ def semantic_entity_color(
 
 
 def compute_depth_encode_scale(depth_m: np.ndarray) -> float:
-    """根据有效米制深度动态计算 uint16 编码倍率: n = max_depth * 1.5, scale = 65535 / n。"""
+    """Dynamic uint16 depth scale: n = max_depth * 1.5, scale = 65535 / n."""
     valid = np.isfinite(depth_m) & (depth_m > 0)
     if not np.any(valid):
         n = 1.0
@@ -2854,7 +2854,7 @@ def compute_depth_encode_scale(depth_m: np.ndarray) -> float:
 
 
 def encode_depth_uint16(depth_m: np.ndarray, depth_scale: float) -> np.ndarray:
-    """将米制深度编码为 uint16 PNG 像素值: pixel = depth_m * depth_scale。"""
+    """Encode metric depth to uint16 PNG: pixel = depth_m * depth_scale."""
     valid = np.isfinite(depth_m) & (depth_m > 0)
     depth_png = np.zeros(depth_m.shape, dtype=np.uint16)
     if np.any(valid):
@@ -2864,9 +2864,9 @@ def encode_depth_uint16(depth_m: np.ndarray, depth_scale: float) -> np.ndarray:
 
 
 def decode_depth_uint16(depth_png: np.ndarray, depth_scale: float) -> np.ndarray:
-    """uint16 深度 PNG → 米制深度 depth_m = pixel / depth_scale；0 表示无效。"""
+    """Decode uint16 depth PNG to meters: depth_m = pixel / depth_scale; 0 invalid."""
     if depth_scale <= 0:
-        raise ValueError("depth_scale 必须 > 0")
+        raise ValueError("depth_scale must be > 0")
     arr = np.asarray(depth_png)
     if arr.ndim == 3:
         arr = arr[..., 0]
@@ -2876,7 +2876,7 @@ def decode_depth_uint16(depth_png: np.ndarray, depth_scale: float) -> np.ndarray
 
 
 def encode_normal_world_png(normal_01: np.ndarray) -> np.ndarray:
-    """已映射到 [0, 1] 的世界法线 → uint8 RGB PNG（每通道 round(c * 255)）。"""
+    """World normal in [0,1] -> uint8 RGB PNG (round(c*255) per channel)."""
     arr = np.asarray(normal_01, dtype=np.float64)
     if arr.ndim == 2:
         arr = np.stack([arr, arr, arr], axis=-1)
@@ -2885,19 +2885,19 @@ def encode_normal_world_png(normal_01: np.ndarray) -> np.ndarray:
 
 
 def encode_normal_directions_uint8_png(normal_vectors: np.ndarray) -> np.ndarray:
-    """法向量分量 ∈ [-1, 1]（任意坐标系）→ uint8 RGB PNG。"""
+    """Normal components in [-1,1] (any frame) -> uint8 RGB PNG."""
     arr = np.asarray(normal_vectors, dtype=np.float64)
     normal_01 = np.clip((arr + 1.0) * 0.5, 0.0, 1.0)
     return encode_normal_world_png(normal_01)
 
 
 def encode_normal_world_png_from_cycles_exr(normal_exr: np.ndarray) -> np.ndarray:
-    """Cycles Normal pass EXR（世界空间，每分量 [-1, 1]）→ uint8 RGB PNG。"""
+    """Cycles Normal pass EXR (world, [-1,1]) -> uint8 RGB PNG."""
     return encode_normal_directions_uint8_png(normal_exr)
 
 
 def decode_normal_world_uint8(normal_png: np.ndarray) -> np.ndarray:
-    """uint8 法线 PNG → 单位法向量 (H,W,3)，分量范围 [-1, 1]（坐标系见 camera_para.normal_space）。"""
+    """uint8 normal PNG -> unit vectors (H,W,3) in [-1,1] (frame in camera_para.normal_space)."""
     rgb = np.asarray(normal_png, dtype=np.float64)
     if rgb.ndim == 2:
         rgb = np.stack([rgb, rgb, rgb], axis=-1)
@@ -2916,7 +2916,7 @@ def build_opencv_intrinsic_4x4(
     *,
     aspect_ratio: Optional[float] = None,
 ) -> np.ndarray:
-    """Pinhole 内参 4×4 K（无畸变），与 util_bpy 视锥 / Blender sensor_fit=AUTO 一致。"""
+    """Pinhole 4x4 intrinsic K (no distortion); matches util_bpy frustum / Blender sensor_fit=AUTO."""
     w = int(width)
     h = int(height)
     aspect = float(aspect_ratio) if aspect_ratio is not None else w / max(h, 1)
@@ -2950,7 +2950,7 @@ def camera_calibration_matrix_fields(
     aspect_ratio: Optional[float] = None,
     include_intrinsic: bool = True,
 ) -> Dict[str, Any]:
-    """ScanNet / OpenSpatial 风格的 c2w + intrinsic，写入 camera_para.json。"""
+    """ScanNet/OpenSpatial-style c2w + intrinsic for camera_para.json."""
     try:
         from . import geometry_opencv as geo_cv
     except ImportError:
@@ -2975,12 +2975,12 @@ def camera_calibration_matrix_fields(
 
 
 def decode_normal_opencv_uint8(normal_png: np.ndarray) -> np.ndarray:
-    """uint8 法线 PNG → OpenCV 相机系单位法向量 (H,W,3)。"""
+    """uint8 normal PNG -> OpenCV camera-frame unit normals (H,W,3)."""
     return decode_normal_world_uint8(normal_png)
 
 
 def normal_map_camera_para_fields() -> Dict[str, Any]:
-    """写入 {basename}_camera_para.json 的法线图元数据（与 --depth 一并导出）。"""
+    """Normal-map metadata for {basename}_camera_para.json (exported with --depth)."""
     return {
         "normal_space": "opencv_camera",
         "normal_axes": {

@@ -1,4 +1,4 @@
-"""几何导出：视角 SSL 坐标 + OpenCV 相机坐标副本（+X 右, +Y 下, +Z 前）。"""
+"""Geometry export: view SSL coordinates + OpenCV camera-coordinate copies (+X right, +Y down, +Z forward)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,39 @@ import numpy as np
 
 CameraPose = Dict[str, List[float]]
 SslRef = Tuple[List[float], List[float]]
+
+DEFAULT_RENDER_VIEW_UP = (0.0, 0.0, 1.0)
+TOPDOWN_FALLBACK_UP = (0.0, 1.0, 0.0)
+_COLLINEAR_EPS = 1e-6
+
+
+def resolve_render_view_up_vector(
+    camera_position,
+    look_at_target,
+    up_vector=None,
+) -> List[float]:
+    """Resolve the up direction for render_view.
+
+    Defaults to ``[0,0,1]`` when ``up_vector`` is not set; if the view direction is
+    collinear with ``[0,0,1]`` (e.g. top-down), falls back to ``[0,1,0]`` from
+    ``topdown_view`` to avoid forward/up degeneracy.
+    Returns ``up_vector`` unchanged when explicitly provided.
+    """
+    if up_vector is not None:
+        return [float(x) for x in up_vector]
+
+    cam = np.asarray(camera_position, dtype=float)
+    look = np.asarray(look_at_target, dtype=float)
+    forward = look - cam
+    forward_norm = float(np.linalg.norm(forward))
+    if forward_norm < _COLLINEAR_EPS:
+        return list(DEFAULT_RENDER_VIEW_UP)
+
+    forward = forward / forward_norm
+    default_up = np.asarray(DEFAULT_RENDER_VIEW_UP, dtype=float)
+    if abs(float(np.dot(forward, default_up))) > 1.0 - _COLLINEAR_EPS:
+        return list(TOPDOWN_FALLBACK_UP)
+    return list(DEFAULT_RENDER_VIEW_UP)
 
 
 def opencv_duplicate_path(path: str) -> str:
@@ -61,10 +94,10 @@ def _reference_view_camera_pose(world_camera, world_look_at, origin_xy, theta: f
 
 
 def view_ssl_to_blender_gltf_vertices(points: np.ndarray) -> np.ndarray:
-    """视角 SSL Z-up (x,y,z) → 写入 Blender mesh 的顶点，使 glTF 导出后与 PLY 一致。
+    """View SSL Z-up (x,y,z) → Blender mesh vertices so glTF export matches PLY.
 
-    Blender Z-up 导出 glTF Y-up: (bx, by, bz) → (bx, bz, -by)。
-    目标 glTF = 视角 SSL，故 bpy 顶点应为 (vx, -vz, vy)。
+    Blender Z-up exports to glTF Y-up: (bx, by, bz) → (bx, bz, -by).
+    Target glTF = view SSL, so bpy vertices should be (vx, -vz, vy).
     """
     pts = np.asarray(points, dtype=float)
     if pts.ndim == 1:
@@ -73,7 +106,7 @@ def view_ssl_to_blender_gltf_vertices(points: np.ndarray) -> np.ndarray:
 
 
 def build_view_ssl_transform_matrix(origin_xy, theta: float) -> np.ndarray:
-    """世界/场景 SSL → 视角 SSL 的 4×4 变换（与 transform_points_to_view_ssl 一致）。"""
+    """4×4 transform from world/scene SSL → view SSL (same as transform_points_to_view_ssl)."""
     origin_xy = np.asarray(origin_xy, dtype=float)
     c, s = float(np.cos(theta)), float(np.sin(theta))
     T = np.eye(4, dtype=float)
@@ -105,7 +138,7 @@ def build_ply_export_frames(
     look_at_target,
     world_up=(0.0, 0.0, 1.0),
 ) -> Tuple[np.ndarray, float, CameraPose]:
-    """根据世界系相机位姿，构造 PLY 导出用的视角 SSL 参数与首帧 OpenCV pose（均在 SSL 内）。"""
+    """Build view SSL params and first-frame OpenCV pose for PLY export from world camera pose (both in SSL)."""
     origin_xy, theta = _view_ssl_params(world_camera, look_at_target)
     ref_cam, ref_look = _reference_view_camera_pose(
         world_camera, look_at_target, origin_xy, theta
@@ -154,7 +187,7 @@ def build_blender_camera_matrix(
     look_at_target,
     world_up=(0.0, 0.0, 1.0),
 ) -> np.ndarray:
-    """与 scenebuilder_bpy._build_view_camera_matrix_and_fov 相同的 4×4 相机矩阵（列基 right, up, -forward）。"""
+    """Same 4×4 camera matrix as scenebuilder_bpy._build_view_camera_matrix_and_fov (column basis: right, up, -forward)."""
     camera_position = np.asarray(camera_position, dtype=float)
     look_at_target = np.asarray(look_at_target, dtype=float)
     up_vector = np.asarray(world_up if world_up is not None else [0.0, 0.0, 1.0], dtype=float)
@@ -195,10 +228,10 @@ def opencv_rotation_from_pose(
     look_at_target,
     world_up=(0.0, 0.0, 1.0),
 ) -> np.ndarray:
-    """视角 SSL / 世界 → OpenCV 相机坐标 的 3×3 旋转 R，满足 p_cam = R @ (p - eye)。
+    """3×3 rotation R from view SSL / world → OpenCV camera coords, with p_cam = R @ (p - eye).
 
-    OpenCV: +X 图像右, +Y 图像下, +Z 沿视线向场景深处。
-    与 Blender 渲染相机矩阵一致（从 matrix 列向量直接提取）。
+    OpenCV: +X image right, +Y image down, +Z along view ray into the scene.
+    Matches the Blender render camera matrix (extracted directly from matrix columns).
     """
     mat = build_blender_camera_matrix(camera_position, look_at_target, world_up)
     return opencv_rotation_from_blender_matrix(mat)
@@ -262,11 +295,11 @@ def write_ply(
     points_in_view_ssl: bool = False,
     camera_pose: Optional[CameraPose] = None,
 ) -> None:
-    """写 PLY：主文件为视角 SSL；可选 _opencv 副本（首帧 OpenCV 相机系）。
+    """Write PLY: main file in view SSL; optional _opencv copy (first-frame OpenCV camera frame).
 
-    - 默认输入点为 Blender 世界坐标，导出前变换到视角 SSL。
-    - 若 points_in_view_ssl=True，输入已在视角 SSL，不再做 SSL 变换。
-    - opencv_camera_pose 应在视角 SSL 内（首帧参考相机 (0,0,h)）。
+    - By default input points are in Blender world coords and are transformed to view SSL before export.
+    - If points_in_view_ssl=True, input is already in view SSL and no SSL transform is applied.
+    - opencv_camera_pose should be in view SSL (first-frame reference camera at (0,0,h)).
     """
     if opencv_camera_pose is None and camera_pose is not None:
         opencv_camera_pose = camera_pose
@@ -312,14 +345,14 @@ def write_ply(
             nrm_o,
             points_in_view_ssl=True,
         )
-        print(f"✅ OpenCV 点云副本: {opencv_path}")
+        print(f"✅ OpenCV point cloud copy: {opencv_path}")
 
 
 def gltf_yup_to_blender_zup_matrix() -> np.ndarray:
-    """glTF Y-up（Blender 导出 GLB）→ Blender Z-up / SSL 世界坐标。
+    """glTF Y-up (Blender-exported GLB) → Blender Z-up / SSL world coordinates.
 
-    与 ``view_ssl_to_blender_gltf_vertices`` 互逆：
-    Blender (bx, by, bz) 导出 glTF 为 (gx, gy, gz) = (bx, bz, -by)。
+    Inverse of ``view_ssl_to_blender_gltf_vertices``:
+    Blender (bx, by, bz) exports to glTF as (gx, gy, gz) = (bx, bz, -by).
     """
     return np.array(
         [
@@ -340,18 +373,18 @@ def gltf_yup_to_blender_zup(points: np.ndarray) -> np.ndarray:
 
 
 def opencv_transform_matrix_for_gltf_vertices(camera_pose: CameraPose) -> np.ndarray:
-    """对已导出的 glTF Y-up GLB 顶点做 OpenCV 变换（先还原为 Blender 世界坐标）。"""
+    """OpenCV transform for already-exported glTF Y-up GLB vertices (first restore to Blender world coords)."""
     return opencv_transform_matrix(camera_pose) @ gltf_yup_to_blender_zup_matrix()
 
 
 def export_glb_opencv_copy(src_path: str, camera_pose: CameraPose) -> Optional[str]:
-    """从主 GLB 生成 OpenCV 副本（fallback：需先把 glTF Y-up 还原为 Blender 世界坐标）。"""
+    """Generate OpenCV copy from main GLB (fallback: restore glTF Y-up to Blender world coords first)."""
     if not os.path.isfile(src_path):
         return None
     try:
         import trimesh
     except ImportError as exc:
-        raise RuntimeError("导出 OpenCV GLB 副本需要 trimesh") from exc
+        raise RuntimeError("Exporting OpenCV GLB copy requires trimesh") from exc
 
     dst_path = opencv_duplicate_path(src_path)
     loaded = trimesh.load(src_path, force="scene")
@@ -365,11 +398,11 @@ def export_glb_opencv_copy(src_path: str, camera_pose: CameraPose) -> Optional[s
         scene.add_geometry(loaded)
         loaded = scene
     else:
-        raise RuntimeError(f"无法识别的 GLB 类型: {type(loaded)}")
+        raise RuntimeError(f"Unrecognized GLB type: {type(loaded)}")
 
     os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
     loaded.export(dst_path)
-    print(f"✅ OpenCV GLB 副本: {dst_path}")
+    print(f"✅ OpenCV GLB copy: {dst_path}")
     return dst_path
 
 
@@ -386,9 +419,9 @@ def build_opencv_c2w_matrix(
     look_at_target,
     world_up=(0.0, 0.0, 1.0),
 ) -> np.ndarray:
-    """OpenCV 相机系 → SSL/Blender 世界系 的 4×4 c2w（ScanNet / OpenSpatial 风格）。
+    """4×4 c2w from OpenCV camera frame → SSL/Blender world frame (ScanNet / OpenSpatial style).
 
-    列向量分别为相机 +X(右)、+Y(下)、+Z(前/深度) 在世界系下的方向；平移 t 为光心世界坐标（米）。
+    Column vectors are camera +X (right), +Y (down), +Z (forward/depth) in world frame; translation t is optical center in meters.
     """
     mat = build_blender_camera_matrix(camera_position, look_at_target, world_up)
     right = mat[:3, 0]

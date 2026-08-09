@@ -13,16 +13,17 @@ import imageio
 from typing import List, Dict, Any, Optional
 
 try:
-    from . import util, util_data
+    from . import util, util_data, geometry_opencv as geo_cv
     from .config_utils import CONFIG_PATH, load_config
 except ImportError:
     import util  # type: ignore
     import util_data  # type: ignore
+    import geometry_opencv as geo_cv  # type: ignore
     from config_utils import CONFIG_PATH, load_config  # type: ignore
 
 class SceneCtx:
-    """场景上下文管理器"""
-    # 立方体贴图每个面的坐标轴（right/up/forward），与标准Cubemap约定一致
+    """Scene context manager."""
+    # Cubemap face axes (right/up/forward), aligned with standard cubemap convention
     CUBEMAP_FACE_AXES = {
         "right": {
             "forward": np.array([1.0, 0.0, 0.0]),
@@ -60,7 +61,7 @@ class SceneCtx:
         self.if_set_lights = False
         self.model_extra_path = model_extra_path
         
-        # 保存所有节点引用，key为唯一ID
+        # Keep all node references keyed by unique ID
         self.mesh_nodes = {
             "walls": {},      # wall_id -> node
             "doors": {},      # door_id -> node
@@ -130,25 +131,25 @@ class SceneCtx:
         self._scene_show_ceiling = None
 
     def clear_scene(self):
-        """与 BpySceneCtx 对齐：视角 SSL 临时变换后清空已构建场景。"""
+        """Match BpySceneCtx: clear built scene after temporary view SSL transforms."""
         self._reset_render_state()
 
     def add_walls(self, walls: List[Dict[str, Any]]):
-        """添加墙体并计算场景元数据"""
-        # 转换格式: p/q -> s/e
+        """Add walls and compute scene metadata."""
+        # Convert format: p/q -> s/e
         walls_converted = [{"s": w["p"][:2], "e": w["q"][:2], "height": w["height"]} for w in walls]
 
-        # 端点吸附功能，默认开启，阈值为0.3m
+        # Endpoint snapping enabled by default, threshold 0.3m
         do_snap = True
         if do_snap:
             walls_converted = util.snap_wall_endpoints(walls_converted, threshold=0.3)
 
-        # 计算bounds和vertices
+        # Compute bounds and vertices
         all_points = [p for w in walls_converted for p in [w["s"], w["e"]]]
         x_coords, y_coords = zip(*all_points)
 
-        # vertices: [(x1, y1), (x2, y2), ...] 多边形外边界顶点序列
-        # partitions: [(xs, ys, xe, ye, height), ...] 内部隔断墙线段序列（含高度）
+        # vertices: [(x1, y1), (x2, y2), ...] outer polygon boundary vertex sequence
+        # partitions: [(xs, ys, xe, ye, height), ...] interior partition wall segments (with height)
         vertices, partitions = util.calculate_minimum_area_polygon_and_partitions(walls_converted)
         
         self.context["meta"].update({
@@ -160,18 +161,18 @@ class SceneCtx:
         })
         self.context["meta"].pop("_scene_normalized", None)
         
-        # 调试信息
-        print(f"📐 输入原始墙体数量: {len(walls_converted)}")
-        print(f"📐 边界墙段数量: {len(vertices)}")
-        print(f"📐 内部隔断墙数量: {len(partitions)}")
+        # Debug info
+        print(f"📐 Input wall count: {len(walls_converted)}")
+        print(f"📐 Boundary wall segments: {len(vertices)}")
+        print(f"📐 Interior partition walls: {len(partitions)}")
         
-        # 1. 添加边界墙 (Boundary Walls)
-        # 边界墙由 vertices 闭合环路构成，确保地板和墙基完美重合
+        # 1. Add boundary walls
+        # Boundary walls form a closed loop from vertices so floor and wall bases align
         for i in range(len(vertices)):
             v_s = vertices[i]
             v_e = vertices[(i + 1) % len(vertices)]
             
-            # 查找该段边界墙对应的原始高度
+            # Look up original height for this boundary segment
             height = None
             for w in walls_converted:
                 if util.is_wall_on_edge(w, v_s, v_e):
@@ -185,21 +186,21 @@ class SceneCtx:
                 "s": list(v_s),
                 "e": list(v_e),
                 "height": height,
-                # 边界墙需要计算朝向（指向房间内部）
+                # Boundary walls need orientation (pointing into the room)
                 "orientation": util.calculate_wall_orientation(v_s, v_e, vertices),
                 "is_partition": False,
                 "doors": {},
                 "windows": {}
             }
 
-        # 2. 添加内部隔断墙 (Partition Walls)
+        # 2. Add interior partition walls
         for p in partitions:
             wall_id = util.generate_unique_id()
             self.context["walls"][wall_id] = {
                 "s": [p[0], p[1]],
                 "e": [p[2], p[3]],
                 "height": p[4],
-                # 隔断墙不需要朝向
+                # Partition walls do not need orientation
                 "orientation": (0.0, 0.0),
                 "is_partition": True,
                 "doors": {},
@@ -207,22 +208,22 @@ class SceneCtx:
             }
 
     def add_wall(self, s: List[float], e: List[float], height: float):
-        """添加单面墙"""
-        # 简单实现：重新调用add_walls
+        """Add a single wall."""
+        # Simple implementation: rebuild via add_walls
         current_walls = [{"p": w["s"] + [0], "q": w["e"] + [0], "height": w["height"]}
                         for w in self.context["walls"].values()]
         current_walls.append({"p": s[:2] + [0], "q": e[:2] + [0], "height": height})
-        self.context["walls"] = {}  # 清空
+        self.context["walls"] = {}  # clear
         self.add_walls(current_walls)
 
     def add_doors(self, doors: List[Dict[str, Any]]):
-        """批量添加门"""
+        """Add doors in batch."""
         self.context["meta"].pop("_scene_normalized", None)
         for door in doors:
             self.add_door(door["center"], door["width"], door["height"], door.get("asset_id"))
 
     def add_door(self, center: List[float], width: float, height: float, asset_id: Optional[int] = None):
-        """添加单个门"""
+        """Add a single door."""
         wall_id = util.find_closest_wall(center, self.context["walls"])
         if wall_id:
             wall = self.context["walls"][wall_id]
@@ -237,13 +238,13 @@ class SceneCtx:
             self.context["walls"][wall_id]["doors"][door_id] = door_data
 
     def add_windows(self, windows: List[Dict[str, Any]]):
-        """批量添加窗"""
+        """Add windows in batch."""
         self.context["meta"].pop("_scene_normalized", None)
         for window in windows:
             self.add_window(window["center"], window["width"], window["height"], window.get("asset_id"))
 
     def add_window(self, center: List[float], width: float, height: float, asset_id: Optional[int] = None):
-        """添加单个窗"""
+        """Add a single window."""
         wall_id = util.find_closest_wall(center, self.context["walls"])
         if wall_id:
             wall = self.context["walls"][wall_id]
@@ -258,7 +259,7 @@ class SceneCtx:
             self.context["walls"][wall_id]["windows"][window_id] = window_data
 
     def add_boxes(self, boxes: List[Dict[str, Any]]):
-        """批量添加家具"""
+        """Add furniture boxes in batch."""
         self.context["meta"].pop("_scene_normalized", None)
         for box in boxes:
             self.add_box(box["center"], box["angle_z"], box["scale"], box.get("class"),
@@ -267,7 +268,7 @@ class SceneCtx:
     def add_box(self, center: List[float], angle_z: float, scale: List[float],
                 class_name: Optional[str] = None, label: Optional[str] = None,
                 caption: Optional[str] = None, asset_id: Optional[int] = None) -> str:
-        """添加单个家具，返回ID"""
+        """Add a single furniture box; returns its ID."""
         box_id = util.generate_unique_id()
         box_data = {"center": center, "angle_z": angle_z, "scale": scale}
 
@@ -278,7 +279,7 @@ class SceneCtx:
 
         self.context["boxes"][box_id] = box_data
 
-        # 更新z_max
+        # Update z_max
         box_top = center[2] + scale[2] / 2
         if box_top > self.context["meta"].get("z_max", 0):
             self.context["meta"]["z_max"] = box_top
@@ -286,14 +287,14 @@ class SceneCtx:
         return box_id
 
     def delete_box(self, box_id: str):
-        """删除家具并重新计算z_max"""
+        """Remove a furniture box and recompute z_max."""
         if box_id not in self.context["boxes"]:
             raise ValueError(f"Box ID {box_id} not found")
 
         del self.context["boxes"][box_id]
-        self.scene = None  # 标记需要重建
+        self.scene = None  # mark scene for rebuild
 
-        # 重新计算z_max: 取墙体和剩余boxes中的最大高度
+        # Recompute z_max: max height across walls and remaining boxes
         wall_max = max((w["height"] for w in self.context["walls"].values()), default=0)
 
         box_max = 0
@@ -304,29 +305,29 @@ class SceneCtx:
         self.context["meta"]["z_max"] = max(wall_max, box_max)
 
     def get_context(self) -> Dict:
-        """获取场景上下文"""
+        """Return the scene context."""
         return self.context
     
     def get_boxes(self) -> Dict:
-        """获取所有家具boxes"""
+        """Return all furniture boxes."""
         return self.context["boxes"]
 
     def export_wall_ssl(self, output_dir: str):
         """
-        导出墙体SSL格式文件 (包含 Room 和所有 Wall)
-        包含边界墙和内部隔断墙
+        Export wall SSL (Room and all Wall entries).
+        Includes boundary and interior partition walls.
         """
         output_path = os.path.join(output_dir, 'wall_ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
         
         lines = []
         
-        # 生成 room_id
+        # Generate room_id
         room_id = util.generate_unique_id()
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 直接从 context["walls"] 导出所有墙体
+        # Export all walls directly from context["walls"]
         all_walls = self.context["walls"]
         for wall_id, wall in all_walls.items():
             p = list(wall["s"]) + [0.0]
@@ -334,28 +335,28 @@ class SceneCtx:
             height = wall["height"]
             lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
         
-        # 写入文件
+        # Write file
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 墙体SSL已导出: {output_path} ({len(all_walls)} 面墙)")
+        print(f"✅ Wall SSL exported: {output_path} ({len(all_walls)} walls)")
         return output_path
 
     def export_wall_hole_ssl(self, output_dir: str):
         """
-        导出墙体和门窗SSL格式文件 (包含 Room, Wall, Door, Window)
+        Export wall and opening SSL (Room, Wall, Door, Window).
         """
         output_path = os.path.join(output_dir, 'wall_hole_ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
         
         lines = []
         
-        # 生成 room_id
+        # Generate room_id
         room_id = util.generate_unique_id()
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 记录所有墙体
+        # Record all walls
         all_walls = self.context["walls"]
         for wall_id, wall in all_walls.items():
             p = list(wall["s"]) + [0.0]
@@ -363,36 +364,36 @@ class SceneCtx:
             height = wall["height"]
             lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
             
-            # 导出该墙体上的门
+            # Export doors on this wall
             for door_id, door in wall.get("doors", {}).items():
                 lines.append(f'Door(id="{door_id}", wall_id="{wall_id}", center={door["center"]}, width={door["width"]}, height={door["height"]})')
             
-            # 导出该墙体上的窗
+            # Export windows on this wall
             for window_id, window in wall.get("windows", {}).items():
                 lines.append(f'Window(id="{window_id}", wall_id="{wall_id}", center={window["center"]}, width={window["width"]}, height={window["height"]})')
         
-        # 写入文件
+        # Write file
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 墙体和门窗SSL已导出: {output_path}")
+        print(f"✅ Wall and opening SSL exported: {output_path}")
         return output_path
 
     def export_ssl(self, output_dir: str):
         """
-        导出完整SSL格式文件 (包含 Room, Wall, Door, Window, Bbox)
+        Export full SSL (Room, Wall, Door, Window, Bbox).
         """
         output_path = os.path.join(output_dir, 'ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
         
         lines = []
         
-        # 生成 room_id
+        # Generate room_id
         room_id = util.generate_unique_id()
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 导出所有墙体及门窗
+        # Export all walls and openings
         for wall_id, wall in self.context["walls"].items():
             p = list(wall["s"]) + [0.0]
             q = list(wall["e"]) + [0.0]
@@ -405,26 +406,26 @@ class SceneCtx:
             for window_id, window in wall.get("windows", {}).items():
                 lines.append(f'Window(id="{window_id}", wall_id="{wall_id}", center={window["center"]}, width={window["width"]}, height={window["height"]})')
         
-        # 导出所有物品 (Bbox)
+        # Export all objects (Bbox)
         for box_id, box in self.context["boxes"].items():
             lines.append(f'Bbox(id="{box_id}", room_id="{room_id}", center={box["center"]}, scale={box["scale"]}, angle_z={box["angle_z"]}, class="{box["class"]}")')
         
-        # 写入文件
+        # Write file
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 完整SSL已导出: {output_path}")
+        print(f"✅ Full SSL exported: {output_path}")
         return output_path
     
     def construct_floor(self, show_wall=True, show_window=True, show_door=True, show_ceiling=True):
-        """构建地板和墙体"""
+        """Build floor and walls."""
         self.scene = pyrender.Scene()
         vertices = self.context["meta"]["vertices"]
 
         if len(vertices) < 3:
             return
 
-        # 创建地板
+        # Create floor
         bounds = self.context["meta"]["bounds"]
         texture_scale = self.config.get("texture_scale", None)
         wall_thickness = self.config.get("wall_thickness", 0.1)
@@ -439,7 +440,7 @@ class SceneCtx:
         ]
         floor_mesh = util.create_floor_mesh(floor_vertices, floor_bounds, texture_scale=texture_scale)
 
-        # 加载纹理
+        # Load texture
         texture_path = self.config.get("floor_texture_path")
         if texture_path and os.path.exists(texture_path):
             try:
@@ -453,7 +454,7 @@ class SceneCtx:
         floor_node = self.scene.add(pyrender.Mesh.from_trimesh(floor_mesh))
         self.mesh_nodes["floor"] = {"node": floor_node, "mesh": floor_mesh}
 
-        # 创建墙体
+        # Create walls
         if show_wall:
             wall_color = self.config["wall_color"]
             wall_texture_path = self.config.get("wall_texture_path")
@@ -467,7 +468,7 @@ class SceneCtx:
                     enhancer = PIL.ImageEnhance.Brightness(wall_texture)
                     wall_texture = enhancer.enhance(1.5)
                 except Exception as e:
-                    print(f"⚠️ 加载墙体纹理失败: {e}")
+                    print(f"⚠️ Failed to load wall texture: {e}")
             
             for wall_id, wall in self.context["walls"].items():
                 openings = []
@@ -506,12 +507,12 @@ class SceneCtx:
                         edge_node = self.scene.add(edge_lines)
                         self.mesh_nodes["walls"][wall_id]["edge_node"] = edge_node
         
-        # 添加真实门窗 mesh：墙体上方已经按 openings 挖洞，这里只负责把 asset 放入洞口。
+        # Add real door/window meshes: walls already cut openings above; place assets into holes here.
         if show_door or show_window:
             config_with_extra = self.config.copy()
             if self.model_extra_path:
                 config_with_extra["model_extra_path"] = self.model_extra_path
-            print("🚪 开始处理门窗 (按 asset_id 加载真实 mesh)...")
+            print("🚪 Processing doors and windows (loading real meshes by asset_id)...")
 
             for wall_id, wall in self.context["walls"].items():
                 wall_vec = np.array(wall["e"], dtype=float) - np.array(wall["s"], dtype=float)
@@ -538,7 +539,7 @@ class SceneCtx:
                     for item_id, item in wall.get(key, {}).items():
                         asset_id = item.get("asset_id")
                         if not asset_id:
-                            print(f"  ⚠️ 跳过 {item_type} {item_id}: 缺少 asset_id，无法加载真实 mesh")
+                            print(f"  ⚠️ Skipping {item_type} {item_id}: missing asset_id, cannot load real mesh")
                             continue
 
                         center = np.array(item["center"], dtype=float)
@@ -558,7 +559,7 @@ class SceneCtx:
                             default_key="model_hole_path",
                         )
                         if loaded is None:
-                            print(f"  ❌ {item_type} {item_id} (asset_id={asset_id}) 加载失败")
+                            print(f"  ❌ {item_type} {item_id} (asset_id={asset_id}) load failed")
                             continue
 
                         nodes = self._add_trimesh_to_scene(loaded)
@@ -569,10 +570,10 @@ class SceneCtx:
                                 f"{item_type}_data": dict(item),
                             }
                         else:
-                            print(f"  ❌ {item_type} {item_id} (asset_id={asset_id}) 添加到场景失败")
+                            print(f"  ❌ {item_type} {item_id} (asset_id={asset_id}) failed to add to scene")
         
         if show_ceiling:
-            # 创建天花板（与地板相同的外轮廓，含墙厚）
+            # Create ceiling (same outer outline as floor, including wall thickness)
             z_max = self.context["meta"]["z_max"]
             ceiling_mesh = util.create_ceiling_mesh(floor_vertices, floor_bounds, z_max)
             ceiling_color = [0.9, 0.9, 0.9, 1.0]
@@ -587,7 +588,7 @@ class SceneCtx:
                     enhancer = PIL.ImageEnhance.Brightness(ceiling_texture)
                     ceiling_texture = enhancer.enhance(1.5)
                 except Exception as e:
-                    print(f"⚠️ 加载天花板纹理失败: {e}")
+                    print(f"⚠️ Failed to load ceiling texture: {e}")
             
             if ceiling_texture:
                 ceiling_mesh.visual = trimesh.visual.TextureVisuals(uv=ceiling_mesh.visual.uv, image=ceiling_texture)
@@ -642,7 +643,7 @@ class SceneCtx:
                 loaded.vertices = (loaded.vertices * scale_factors).dot(rotation.T) + translation
             return loaded
         except Exception as e:
-            print(f"  ❌ asset {asset_id} 变换失败: {e}")
+            print(f"  ❌ asset {asset_id} transform failed: {e}")
             return None
 
     @staticmethod
@@ -669,7 +670,7 @@ class SceneCtx:
     def construct_scene(self, show_wall: bool = True, show_window: bool = True,
                         show_door: bool = True, use_bbox_geometry: bool = False,
                         show_ceiling: bool = True):
-        """构建完整场景"""
+        """Build the full scene."""
         total_start = time.perf_counter()
         os.environ['PYOPENGL_PLATFORM'] = 'egl'
         self.normalize_scene_data()
@@ -682,7 +683,7 @@ class SceneCtx:
         )
         self._scene_show_ceiling = bool(show_ceiling)
 
-        print(f"📦 加载家具 ({len(self.context['boxes'])} 个物体)...")
+        print(f"📦 Loading furniture ({len(self.context['boxes'])} objects)...")
         success_count = 0
         load_time = 0
         transform_time = 0
@@ -753,10 +754,10 @@ class SceneCtx:
             except Exception as e:
                 print(f"  ❌ {box.get('class')}: {e}")
 
-        print(f"✅ 构建完成! 成功 {success_count}/{len(self.context['boxes'])} 个物体 (耗时: {time.perf_counter() - total_start:.2f}s)")
+        print(f"✅ Build complete! {success_count}/{len(self.context['boxes'])} objects succeeded (elapsed: {time.perf_counter() - total_start:.2f}s)")
 
     def export_glb(self, output_path: str, rebuild: bool = False, **construct_kwargs):
-        """导出当前场景为 GLB 文件。"""
+        """Export the current scene as a GLB file."""
         if rebuild or self.scene is None or self.mesh_nodes.get("floor") is None:
             self.construct_scene(**construct_kwargs)
 
@@ -804,14 +805,14 @@ class SceneCtx:
             add_mesh(f"box_{box_id}", box_info.get("mesh"))
 
         if not export_scene.geometry:
-            raise ValueError("当前场景没有可导出的 mesh，请先构建或渲染场景")
+            raise ValueError("No exportable meshes in current scene; build or render the scene first")
 
         export_scene.export(output_path)
-        print(f"✅ GLB 已导出: {output_path}")
+        print(f"✅ GLB exported: {output_path}")
         return output_path
 
     def export_point_cloud(self, output_dir: str, rebuild: bool = False, **construct_kwargs):
-        """按场景对象分别采样表面点云并导出为彩色 PLY。"""
+        """Sample per-object surface point clouds and export colored PLY files."""
         if rebuild or self.scene is None or self.mesh_nodes.get("floor") is None:
             self.construct_scene(**construct_kwargs)
 
@@ -840,7 +841,7 @@ class SceneCtx:
                 use_ses=(category in ("boxes", "doors", "windows")),
             )
             if len(points) == 0:
-                print(f"⚠️ 点云采样跳过空对象: {category}/{object_id}")
+                print(f"⚠️ Point cloud sampling skipped empty object: {category}/{object_id}")
                 return
 
             path = os.path.join(output_dir, filename)
@@ -893,18 +894,18 @@ class SceneCtx:
         with open(os.path.join(output_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-        print(f"✅ 点云已导出: {output_dir}")
+        print(f"✅ Point cloud exported: {output_dir}")
         return output_dir
 
     def export_visible_geometry(self, output_dir: str, camera_pose: np.ndarray, fov_y: float, aspect: float,
                                 export_glb: bool = False, export_point_cloud: bool = False,
                                 transparent_keys: Optional[set] = None,
                                 clip_start: float = 0.05, clip_end: Optional[float] = None):
-        """导出当前相机视锥内、对象级可见的裁剪几何。"""
+        """Export object-level visible geometry clipped to the current camera frustum."""
         transparent_keys = transparent_keys or set()
         entries = self._visible_trimesh_entries(camera_pose, fov_y, aspect, transparent_keys, clip_start, clip_end)
         if not entries:
-            print("⚠️ 当前 pyrender 视角没有检测到可见几何")
+            print("⚠️ No visible geometry detected in current pyrender view")
             return
         if export_glb:
             self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), entries)
@@ -923,10 +924,10 @@ class SceneCtx:
                         node_name=f"{entry['category']}_{entry['id']}{name_suffix}_{idx}",
                     )
         if not scene.geometry:
-            print("⚠️ scene_visible.glb 跳过：裁剪后没有几何")
+            print("⚠️ scene_visible.glb skipped: no geometry after clipping")
             return
         scene.export(output_path)
-        print(f"✅ 可见 GLB 已导出: {output_path}")
+        print(f"✅ Visible GLB exported: {output_path}")
 
     def export_visible_point_cloud(self, output_dir: str, entries: List[Dict[str, Any]]):
         os.makedirs(output_dir, exist_ok=True)
@@ -972,7 +973,7 @@ class SceneCtx:
 
         with open(os.path.join(output_dir, "metadata_visible.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
-        print(f"✅ 可见点云已导出: {output_dir}")
+        print(f"✅ Visible point cloud exported: {output_dir}")
 
     def _visible_trimesh_entries(
         self,
@@ -1475,7 +1476,7 @@ class SceneCtx:
         depth_scale = util.compute_depth_encode_scale(depth)
         depth_png = util.encode_depth_uint16(depth, depth_scale)
         imageio.imwrite(png_path, depth_png)
-        print(f"✅ 深度图已导出: {png_path} (uint16, depth_m * {depth_scale:.6f})")
+        print(f"✅ Depth map exported: {png_path} (uint16, depth_m * {depth_scale:.6f})")
         return depth_scale
 
     def _semantic_entries(self):
@@ -1580,8 +1581,8 @@ class SceneCtx:
             json.dump(self._semantic_metadata(objects), f, indent=2, ensure_ascii=False)
         bbox_overlay_path = util.save_bbox_2d_overlay_png(output_path, objects)
         if bbox_overlay_path:
-            print(f"✅ 检测框可视化: {bbox_overlay_path}")
-        print(f"✅ 语义图已导出: {semantic_path}")
+            print(f"✅ Bounding box visualization: {bbox_overlay_path}")
+        print(f"✅ Semantic map exported: {semantic_path}")
 
     def _get_class_color(self, class_name: Optional[str]):
         label = (class_name or "default").lower()
@@ -1659,7 +1660,7 @@ class SceneCtx:
         write_ssl: bool = True,
         **kwargs,
     ):
-        """像素对齐俯视图（pyrender）：平移 SSL 后渲染并写出 camera_para.json。"""
+        """Pixel-aligned top-down view (pyrender): translate SSL, render, and write camera_para.json."""
         for key in (
             "export_glb", "export_point_cloud", "visible_geometry",
             "rebuild", "use_HDRI", "geometry_mode", "show_wall", "show_window", "show_door",
@@ -1746,7 +1747,7 @@ class SceneCtx:
             align["look_at_target_ssl"],
             [0.0, 0.0, 1.0],
         )
-        print(f"✅ 像素对齐俯视图完成: {output_dir}")
+        print(f"✅ Pixel-aligned top-down view complete: {output_dir}")
 
     def topdown_view(self, output_path: str, width: int = 1024, height: int = 1024, **kwargs):
         if not output_path.lower().endswith((".png", ".jpg", ".jpeg", ".exr", ".webp")):
@@ -1862,7 +1863,7 @@ class SceneCtx:
             self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
             if export_glb and not visible_geometry:
                 self.export_glb(glb_path or os.path.splitext(output_path)[0] + ".glb")
-        print(f"✅ 俯视图保存至: {output_path}")
+        print(f"✅ Top-down view saved to: {output_path}")
 
     def render_view(self, output_path: str, camera_position: list, look_at_target: list = None, **kwargs):
         export_glb = kwargs.pop("export_glb", False)
@@ -1871,7 +1872,7 @@ class SceneCtx:
         visible_geometry = kwargs.pop("visible_geometry", False)
         width = int(kwargs.pop("width", 1024))
         height = int(kwargs.pop("height", 1024))
-        up_vector = np.array(kwargs.pop("up_vector", [0.0, 0.0, 1.0]), dtype=float)
+        up_vector_kw = kwargs.pop("up_vector", None)
         auto_fov = kwargs.pop("auto_fov", True)
         manual_fov = kwargs.pop("manual_fov", None)
         auto_transparent = kwargs.pop("auto_transparent", True)
@@ -1896,7 +1897,9 @@ class SceneCtx:
         else:
             world_look_w = list(look_at_target)
         world_cam_w = list(camera_position)
-        world_up_raw = up_vector.tolist() if hasattr(up_vector, "tolist") else list(up_vector)
+        world_up_raw = geo_cv.resolve_render_view_up_vector(
+            world_cam_w, world_look_w, up_vector_kw
+        )
 
         construct_kwargs = {
             key: kwargs[key]
@@ -1917,14 +1920,20 @@ class SceneCtx:
             bounds = self.context["meta"]["bounds"]
             if look_at_target is None:
                 look_at_target = [center[0], center[1], z_max / 2]
-            camera_position = np.array(camera_position, dtype=float)
-            look_at_target = np.array(look_at_target, dtype=float)
-            up_vector = np.array(world_up_raw, dtype=float)
+            up_vector = np.array(
+                geo_cv.resolve_render_view_up_vector(
+                    camera_position, look_at_target, up_vector_kw
+                ),
+                dtype=float,
+            )
 
             if np.linalg.norm(up_vector) < 1e-6:
                 up_vector = np.array([0.0, 0.0, 1.0], dtype=float)
             else:
                 up_vector = up_vector / np.linalg.norm(up_vector)
+
+            camera_position = np.array(camera_position, dtype=float)
+            look_at_target = np.array(look_at_target, dtype=float)
 
             forward = look_at_target - camera_position
             if np.linalg.norm(forward) < 1e-6:
@@ -2038,7 +2047,7 @@ class SceneCtx:
 
             if export_glb and not visible_geometry:
                 self.export_glb(glb_path or os.path.splitext(output_path)[0] + ".glb")
-            print(f"✅ 视角图保存至: {output_path}")
+            print(f"✅ View image saved to: {output_path}")
 
 if __name__ == "__main__":
     pass

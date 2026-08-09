@@ -1,4 +1,4 @@
-"""地板路径通用工具：像素↔SSL、墙内线 snap、可视化。"""
+"""Floor path utilities: pixel↔SSL, wall inner-line snap, visualization."""
 
 from __future__ import annotations
 
@@ -266,7 +266,7 @@ def snap_path_points_to_room(
     *,
     wall_margin_m: float,
 ) -> tuple[List[List[int]], Dict[str, Any]]:
-    """保证每个点在墙环内，且离最近墙内线 ≥ margin（米）。"""
+    """Ensure each point is inside wall ring and ≥ margin (m) from nearest inner wall line."""
     meta: Dict[str, Any] = {
         "snapped": False,
         "wall_margin_m": wall_margin_m,

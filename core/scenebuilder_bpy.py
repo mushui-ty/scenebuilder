@@ -1,11 +1,11 @@
 """
-SceneBuilder - 纯 Blender 渲染版本（无 trimesh 依赖）
+SceneBuilder - Pure Blender rendering version (no trimesh dependency)
 
-用 bpy 替代 trimesh/pyrender
+Uses bpy instead of trimesh/pyrender
 
-使用方式：
+Usage:
    $BLENDER_PATH --background --python -m scenebuilder.core.scenebuilder_bpy
-   或者在 pip install bpy 后: python -m scenebuilder.core.scenebuilder_bpy
+   Or after pip install bpy: python -m scenebuilder.core.scenebuilder_bpy
 """
 
 import os
@@ -24,14 +24,15 @@ import hashlib
 from contextlib import contextmanager
 from typing import List, Dict, Any, Optional, Literal, Tuple, Union
 
-# 导入 util 的数据处理函数（不使用其 mesh 创建函数）
+# Import util data processing functions (not its mesh creation functions)
 try:
-    from . import util, util_bpy, util_data
+    from . import util, util_bpy, util_data, geometry_opencv as geo_cv
     from .config_utils import CONFIG_PATH, load_config
 except ImportError:
     import util
     import util_bpy
     import util_data  # type: ignore
+    import geometry_opencv as geo_cv  # type: ignore
     from config_utils import CONFIG_PATH, load_config
 
 try:
@@ -39,18 +40,18 @@ try:
     import mathutils  # type: ignore[import]
     from mathutils import Matrix  # type: ignore[import]
 except ImportError:
-    print("❌ 错误：无法导入 bpy 模块")
-    print("   请在 Blender Python 环境中运行此脚本")
+    print("❌ Error: Failed to import bpy module")
+    print("   Please run this script in a Blender Python environment")
     raise
 
 
 class BpySceneCtx:
-    """场景上下文管理器 - 纯 Blender 版本"""
+    """Scene context manager - pure Blender version"""
     
     
     def __init__(self, scene_type: str, model_extra_path: Optional[str] = None, 
                  render_engine: Literal["CYCLES", "EEVEE"] = "CYCLES"):
-        # 与 scenebuilder.py 完全一致的数据结构
+        # Data structure identical to scenebuilder.py
         self.context = {
             "meta": {"scene_type": scene_type},
             "walls": {},
@@ -61,14 +62,14 @@ class BpySceneCtx:
         self.model_extra_path = model_extra_path
         self.render_engine = render_engine
         
-        # 模型缓存：asset_id -> master_collection
+        # Model cache: asset_id -> master_collection
         self.asset_cache = {}
         self.asset_bounds = {}
         self._point_cloud_material_cache = {}
         self._point_cloud_image_cache = {}
         self._semantic_view_cache: Dict[str, Tuple[Any, List[Dict[str, Any]], Dict[Tuple[str, str], int]]] = {}
         
-        # 保存所有对象引用（与 scenebuilder.py 的 mesh_nodes 对应）
+        # Keep all object references (corresponds to mesh_nodes in scenebuilder.py)
         self.mesh_nodes = {
             "walls": {},      # wall_id -> node
             "doors": {},      # door_id -> node
@@ -78,20 +79,20 @@ class BpySceneCtx:
             "ceiling": None,  # ceiling node
         }
 
-        # 加载配置
+        # Load configuration
         config_path = os.path.join(os.path.dirname(__file__), '..', 'config.yaml')
         self.config = load_config(config_path)
 
-        # 初始化 Blender 场景
+        # Initialize Blender scene
         self._init_blender_scene()
 
     def set_model_path(self, path: str):
-        """更改模型查找路径"""
-        print(f"🔄 更改模型路径为: {path}")
+        """Change model lookup path"""
+        print(f"🔄 Changed model path to: {path}")
         self.config["model_path"] = path
 
     def _asset_search_paths(self, default_key: str = "model_path") -> List[str]:
-        """extra_path → 默认路径 → generate 路径（去重保序）。"""
+        """extra_path → default path → generate path (deduplicated, order preserved)."""
         candidates = []
         if self.model_extra_path:
             candidates.append(self.model_extra_path)
@@ -110,8 +111,8 @@ class BpySceneCtx:
         return ordered
 
     def _init_blender_scene(self):
-        """初始化 Blender 场景"""
-        # 使用工厂设置重置场景，这比手动删除物体更彻底，有助于在无头模式下初始化 EGL 上下文
+        """Initialize Blender scene"""
+        # Reset scene with factory settings; more thorough than manual deletion, helps init EGL context in headless mode
         bpy.ops.wm.read_factory_settings(use_empty=True)
         
         if "Scene" in bpy.data.scenes:
@@ -120,7 +121,7 @@ class BpySceneCtx:
             self.scene = bpy.data.scenes.new("Scene")
         bpy.context.window.scene = self.scene
         
-        # 设置渲染引擎
+        # Set render engine
         engine_map = {
             "CYCLES": "CYCLES",
             "EEVEE": "BLENDER_EEVEE"
@@ -138,37 +139,37 @@ class BpySceneCtx:
             self.scene.cycles.samples = self.config.get("blender_samples", 32)
             self.scene.cycles.use_denoising = True
             self.scene.cycles.denoiser = 'OPENIMAGEDENOISE'
-            print(f"✅ Blender 场景初始化完成 (Cycles + CUDA)")
+            print(f"✅ Blender scene initialized (Cycles + CUDA)")
         else:
-            # EEVEE Next 相关设置 (Blender 4.2+)
+            # EEVEE Next settings (Blender 4.2+)
             if hasattr(self.scene, "eevee"):
-                # EEVEE Next 在 4.2 中有一些新参数，这里可以根据需要配置
+                # EEVEE Next in 4.2 has new parameters; configure here as needed
                 self.scene.eevee.taa_render_samples = self.config.get("blender_samples", 32)
-            print(f"✅ Blender 场景初始化完成 (EEVEE Next)")
+            print(f"✅ Blender scene initialized (EEVEE Next)")
         
         self.scene_collection = self.scene.collection
 
     def clear_scene(self):
-        """彻底清空所有物体、灯光和相机，并重置状态"""
-        # 切换到 Object 模式以防万一
+        """Completely clear all objects, lights, and cameras, and reset state"""
+        # Switch to Object mode just in case
         if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
             
         bpy.ops.object.select_all(action='SELECT')
         bpy.ops.object.delete(use_global=False)
         
-        # --- 深度清理内存 ---
-        # 1. 物理删除所有图像块（这是最占内存的残留之一）
+        # --- Deep memory cleanup ---
+        # 1. Physically remove all image datablocks (one of the largest memory leftovers)
         for img in bpy.data.images:
-            if img.users == 0 or not img.filepath: # 只删除未使用的或占位图
+            if img.users == 0 or not img.filepath: # Remove only unused or placeholder images
                 try:
                     bpy.data.images.remove(img, do_unlink=True)
                 except:
                     pass
         
-        # 2. 清空所有孤立的数据块（材质、网格等）
+        # 2. Purge all orphan datablocks (materials, meshes, etc.)
         bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
-        # 2b. 释放 Cycles 渲染缓冲
+        # 2b. Release Cycles render buffers
         try:
             from . import util_bpy
             util_bpy.cleanup_bpy_render_memory(self.scene)
@@ -176,7 +177,7 @@ class BpySceneCtx:
             pass
         # -------------------
         
-        # 3. 清空 Collection 缓存
+        # 3. Clear Collection cache
         for coll in self.asset_cache.values():
             if coll:
                 try:
@@ -189,7 +190,7 @@ class BpySceneCtx:
         self._point_cloud_image_cache = {}
         # -------------------
         
-        # 重置引用状态
+        # Reset reference state
         self.mesh_nodes = {
             "walls": {},      
             "doors": {},      
@@ -199,26 +200,26 @@ class BpySceneCtx:
             "ceiling": None,  
         }
         self.if_set_lights = False
-        print("🧹 场景已完全清空并重置状态")
+        print("🧹 Scene fully cleared and state reset")
 
-    # ==================== 数据管理函数（与 scenebuilder.py 完全一致）====================
+    # ==================== Data management (identical to scenebuilder.py) ====================
     def add_walls(self, walls: List[Dict[str, Any]]):
-        """添加墙体并计算场景元数据（自动跳过 height<=0 的墙，支持室外场景）"""
-        # walls_converted: 用全部墙体来计算多边形和元数据（包含 height=0 的室外边界）
+        """Add walls and compute scene metadata (auto-skip height<=0 walls; supports outdoor scenes)"""
+        # walls_converted: use all walls to compute polygon and metadata (includes height=0 outdoor boundary)
         walls_converted = [{"s": w["p"][:2], "e": w["q"][:2], "height": w["height"]} for w in walls]
 
-        # 端点吸附功能，默认开启，阈值为0.3m
+        # Endpoint snapping enabled by default, threshold 0.3m
         do_snap = True
         if do_snap:
             walls_converted = util.snap_wall_endpoints(walls_converted, threshold=0.3)
 
         all_points = [p for w in walls_converted for p in [w["s"], w["e"]]]
         x_coords, y_coords = zip(*all_points)
-        # vertices: [(x1, y1), (x2, y2), ...] 多边形外边界顶点序列
-        # partitions: [(xs, ys, xe, ye, height), ...] 内部隔断墙线段序列（含高度）
+        # vertices: [(x1, y1), (x2, y2), ...] outer polygon boundary vertex sequence
+        # partitions: [(xs, ys, xe, ye, height), ...] interior partition wall segments (with height)
         vertices, partitions = util.calculate_minimum_area_polygon_and_partitions(walls_converted)
 
-        # z_max: 取所有墙体的最大高度，室外场景全为0时 z_max=0
+        # z_max: max wall height; z_max=0 when all walls are height 0 (outdoor scene)
         z_max = max(w["height"] for w in walls_converted)
 
         self.context["meta"].update({
@@ -230,33 +231,33 @@ class BpySceneCtx:
         })
         self.context["meta"].pop("_scene_normalized", None)
 
-        # 过滤 height<=0 的墙，室外场景只保留地板多边形，不构建墙体对象
+        # Filter height<=0 walls; outdoor scenes keep floor polygon only, no wall objects
         valid_walls = [w for w in walls_converted if w["height"] > 0]
         if len(valid_walls) < len(walls_converted):
-            print(f"🏞️ 室外场景：跳过 {len(walls_converted) - len(valid_walls)} 面高度为0的墙")
+            print(f"🏞️ Outdoor scene: skipping {len(walls_converted) - len(valid_walls)} walls with height 0")
         if not valid_walls:
-            print(f"🏞️ 纯室外场景：仅计算地板多边形({len(vertices)}顶点)，不构建墙体")
+            print(f"🏞️ Pure outdoor scene: computing floor polygon only ({len(vertices)} vertices), skipping wall construction")
             return
 
-        print(f"📐 输入原始墙体数量: {len(valid_walls)}")
-        print(f"📐 边界墙段数量: {len(vertices)}")
-        print(f"📐 内部隔断墙数量: {len(partitions)}")
+        print(f"📐 Input raw wall count: {len(valid_walls)}")
+        print(f"📐 Boundary wall segment count: {len(vertices)}")
+        print(f"📐 Interior partition wall count: {len(partitions)}")
 
-        # 1. 添加边界墙 (Boundary Walls)
-        # 边界墙由 vertices 闭合环路构成，确保地板和墙基完美重合
+        # 1. Add boundary walls
+        # Boundary walls form a closed loop from vertices so floor and wall base align perfectly
         for i in range(len(vertices)):
             v_s = vertices[i]
             v_e = vertices[(i + 1) % len(vertices)]
 
-            # 查找该段边界墙对应的原始高度
-            # 优先匹配覆盖该线段的原始墙体，若无匹配（如桥接线）则取邻近墙体高度
+            # Find original height for this boundary segment
+            # Prefer walls covering this segment; if none (e.g. bridge edge), use neighbor height
             height = None
             for w in valid_walls:
                 if util.is_wall_on_edge(w, v_s, v_e):
                     height = w["height"]
                     break
             if height is None:
-                # 容错：取所有有效墙体中的最大高度作为默认值
+                # Fallback: use max height among all valid walls
                 height = max(w["height"] for w in valid_walls)
 
             wall_id = util.generate_unique_id()
@@ -264,24 +265,24 @@ class BpySceneCtx:
                 "s": list(v_s),
                 "e": list(v_e),
                 "height": height,
-                # 边界墙需要计算朝向（指向房间内部），用于后续单向厚度偏移
+                # Boundary walls need inward orientation for one-sided thickness offset
                 "orientation": util.calculate_wall_orientation(v_s, v_e, vertices),
                 "is_partition": False,
                 "doors": {},
                 "windows": {}
             }
 
-        # 2. 添加内部隔断墙 (Partition Walls)
-        # 隔断墙不属于外部轮廓，通常两侧都在房间内
+        # 2. Add interior partition walls
+        # Partitions are not on outer contour; both sides are typically inside the room
         for p in partitions:
             if p[4] <= 0:
-                continue  # 跳过高度为0的隔断
+                continue  # Skip zero-height partitions
             wall_id = util.generate_unique_id()
             self.context["walls"][wall_id] = {
                 "s": [p[0], p[1]],
                 "e": [p[2], p[3]],
                 "height": p[4],
-                # 隔断墙不需要朝向，后续渲染时应以中心线为基准向两侧平分厚度
+                # Partitions need no orientation; render thickness split evenly about centerline
                 "orientation": (0.0, 0.0),
                 "is_partition": True,
                 "doors": {},
@@ -289,24 +290,24 @@ class BpySceneCtx:
             }
 
     def add_wall(self, s: List[float], e: List[float], height: float):
-        """添加单面墙体"""
-        # 转换现有墙体为输入格式，并加入新墙体
+        """Add a single wall"""
+        # Convert existing walls to input format and append new wall
         current_walls = [{"p": w["s"] + [0], "q": w["e"] + [0], "height": w["height"]}
                         for w in self.context["walls"].values()]
         current_walls.append({"p": s[:2] + [0], "q": e[:2] + [0], "height": height})
         
-        # 清空当前状态并重新批量添加（以触发重新分类和吸附逻辑）
+        # Clear current state and re-add in batch (triggers reclassification and snapping)
         self.context["walls"] = {}
         self.add_walls(current_walls)
 
     def add_doors(self, doors: List[Dict[str, Any]]):
-        """批量添加门"""
+        """Add doors in batch"""
         self.context["meta"].pop("_scene_normalized", None)
         for door in doors:
             self.add_door(door["center"], door["width"], door["height"], door.get("asset_id"))
 
     def add_door(self, center: List[float], width: float, height: float, asset_id: Optional[int] = None):
-        """添加单个门"""
+        """Add a single door"""
         wall_id = util.find_closest_wall(center, self.context["walls"])
         if wall_id:
             wall = self.context["walls"][wall_id]
@@ -321,13 +322,13 @@ class BpySceneCtx:
             self.context["walls"][wall_id]["doors"][door_id] = door_data
 
     def add_windows(self, windows: List[Dict[str, Any]]):
-        """批量添加窗"""
+        """Add windows in batch"""
         self.context["meta"].pop("_scene_normalized", None)
         for window in windows:
             self.add_window(window["center"], window["width"], window["height"], window.get("asset_id"))
 
     def add_window(self, center: List[float], width: float, height: float, asset_id: Optional[int] = None):
-        """添加单个窗"""
+        """Add a single window"""
         wall_id = util.find_closest_wall(center, self.context["walls"])
         if wall_id:
             wall = self.context["walls"][wall_id]
@@ -342,7 +343,7 @@ class BpySceneCtx:
             self.context["walls"][wall_id]["windows"][window_id] = window_data
 
     def add_boxes(self, boxes: List[Dict[str, Any]]):
-        """批量添加家具"""
+        """Add furniture boxes in batch"""
         self.context["meta"].pop("_scene_normalized", None)
         for box in boxes:
             self.add_box(box["center"], box["angle_z"], box["scale"],
@@ -351,7 +352,7 @@ class BpySceneCtx:
     def add_box(self, center: List[float], angle_z: float, scale: List[float],
                 label: Optional[str] = None, caption: Optional[str] = None, 
                 asset_id: Optional[int] = None) -> str:
-        """添加单个家具，返回ID"""
+        """Add a single furniture box; returns ID"""
         box_id = util.generate_unique_id()
         box_data = {"center": center, "angle_z": angle_z, "scale": scale}
 
@@ -368,17 +369,17 @@ class BpySceneCtx:
         return box_id
 
     def delete_box(self, box_id: str):
-        """删除家具，并从 Blender 场景中移除对应物体"""
+        """Delete furniture and remove corresponding objects from Blender scene"""
         if box_id not in self.context["boxes"]:
-            print(f"⚠️  未找到 Box ID: {box_id}，无法删除")
+            print(f"⚠️  Box ID not found: {box_id}, cannot delete")
             return
 
-        # 1. 如果该物体已经渲染，则在 Blender 中物理删除
+        # 1. If already rendered, physically delete in Blender
         if box_id in self.mesh_nodes["boxes"]:
             box_info = self.mesh_nodes["boxes"][box_id]
             node = box_info.get("node")
             if node:
-                # 递归删除对象及其所有子对象（对于 import 的 gltf 根节点）
+                # Recursively delete object and all children (for imported glTF root nodes)
                 objs_to_remove = [node] + list(node.children_recursive)
                 for obj in objs_to_remove:
                     try:
@@ -387,10 +388,10 @@ class BpySceneCtx:
                         pass
             del self.mesh_nodes["boxes"][box_id]
 
-        # 2. 从 context 中移除
+        # 2. Remove from context
         del self.context["boxes"][box_id]
 
-        # 3. 重新计算 z_max
+        # 3. Recompute z_max
         wall_max = max((w["height"] for w in self.context["walls"].values()), default=0)
         box_max = 0
         for box in self.context["boxes"].values():
@@ -398,18 +399,18 @@ class BpySceneCtx:
             box_max = max(box_max, box_top)
         self.context["meta"]["z_max"] = max(wall_max, box_max)
         
-        print(f"🗑️  家具 {box_id[:4]} 已删除")
+        print(f"🗑️  Furniture {box_id[:4]} deleted")
 
     def get_context(self) -> Dict:
-        """获取场景上下文"""
+        """Get scene context"""
         return self.context
     
     def get_boxes(self) -> Dict:
-        """获取所有家具boxes"""
+        """Get all furniture boxes"""
         return self.context["boxes"]
 
     def normalize_scene_data(self) -> None:
-        """统一 context label / 校验 asset_id（与输出 ssl 一致）。"""
+        """Normalize context labels / validate asset_id (consistent with exported SSL)."""
         try:
             from . import util_data
         except ImportError:
@@ -421,7 +422,7 @@ class BpySceneCtx:
         )
 
     def _object_export_identity(self, category: str, object_id: str):
-        """点云/可见几何命名：(label, asset_id|None)。"""
+        """Point cloud / visible geometry naming: (label, asset_id|None)."""
         if category == "walls":
             wall = self.context["walls"].get(object_id, {})
             return wall.get("label", object_id), None
@@ -438,52 +439,52 @@ class BpySceneCtx:
         return object_id, None
 
     def set_wall_blender_texture_path(self, path: str):
-        """设置墙体纹理路径"""
+        """Set wall texture path"""
         self.config["wall_blender_texture_path"] = path
-        print(f"📝 墙体纹理路径已更新: {path}")
+        print(f"📝 Wall texture path updated: {path}")
 
     def set_floor_blender_texture_path(self, path: str):
-        """设置地板纹理路径"""
+        """Set floor texture path"""
         self.config["floor_blender_texture_path"] = path
-        print(f"📝 地板纹理路径已更新: {path}")
+        print(f"📝 Floor texture path updated: {path}")
 
     def set_ceiling_blender_texture_path(self, path: str):
-        """设置天花板纹理路径"""
+        """Set ceiling texture path"""
         self.config["ceiling_blender_texture_path"] = path
-        print(f"📝 天花板纹理路径已更新: {path}")
+        print(f"📝 Ceiling texture path updated: {path}")
 
     def set_hdri_path(self, path: str):
-        """设置 HDRI 环境贴图路径"""
+        """Set HDRI environment map path"""
         self.config["hdri_path"] = path
-        print(f"📝 HDRI 路径已更新: {path}")
+        print(f"📝 HDRI path updated: {path}")
 
     def set_blender_samples(self, samples: int):
-        """设置 Blender 渲染采样数"""
+        """Set Blender render sample count"""
         self.config["blender_samples"] = samples
         if self.scene and hasattr(self.scene, "cycles"):
             self.scene.cycles.samples = samples
-        print(f"📝 Blender 渲染采样数已更新: {samples}")
+        print(f"📝 Blender render sample count updated: {samples}")
 
     def _get_or_create_asset_collection(self, asset_id: int, model_paths: List[str]):
-        """获取或创建资产的母版 Collection (用于实例化)"""
+        """Get or create master asset Collection (for instancing)"""
         if asset_id in self.asset_cache:
             return self.asset_cache[asset_id]
         
-        # 1. 创建一个新的独立 Collection
+        # 1. Create a new standalone Collection
         coll_name = f"AssetCollection_{asset_id}"
         if coll_name in bpy.data.collections:
             self.asset_cache[asset_id] = bpy.data.collections[coll_name]
             return self.asset_cache[asset_id]
             
         new_coll = bpy.data.collections.new(coll_name)
-        # 暂时链接到场景以允许导入
+        # Temporarily link to scene to allow import
         self.scene.collection.children.link(new_coll)
         
-        # 2. 设置为活动集合并导入
-        # 注意：Blender 的某些导入操作依赖于 active_collection
+        # 2. Set as active collection and import
+        # Note: some Blender import ops depend on active_collection
         orig_collection = bpy.context.view_layer.active_layer_collection
         
-        # 递归寻找目标 layer_collection
+        # Recursively find target layer_collection
         def find_layer_collection(layer_coll, name):
             if layer_coll.name == name: return layer_coll
             for child in layer_coll.children:
@@ -495,17 +496,17 @@ class BpySceneCtx:
         if target_layer_coll:
             bpy.context.view_layer.active_layer_collection = target_layer_coll
             
-        # 3. 导入模型
-        # 我们稍微修改逻辑，直接在 util_bpy.load_mesh_to_origin 中导入
-        # 注意：load_mesh_to_origin 内部会把对象放到场景主集合中
-        # 我们需要在导入后把它们移到我们的 new_coll 中
+        # 3. Import model
+        # Import via util_bpy.load_mesh_to_origin
+        # Note: load_mesh_to_origin places objects in the scene main collection
+        # Move imported objects into new_coll after import
         mesh_root = util_bpy.load_mesh_to_origin(asset_id, model_paths)
         
         if mesh_root:
-            # 将 mesh_root 及其所有子对象移入新集合
+            # Move mesh_root and all children into new collection
             objs_to_move = [mesh_root] + list(mesh_root.children_recursive)
             
-            # --- [优化] 预先计算母版包围盒并存入缓存 ---
+            # --- [Optimization] Precompute master bounds and cache ---
             master_bounds = util_bpy._get_combined_bounds(objs_to_move)
             self.asset_bounds[asset_id] = master_bounds
             
@@ -514,13 +515,13 @@ class BpySceneCtx:
                     coll.objects.unlink(obj)
                 new_coll.objects.link(obj)
             
-            # 导入成功后，从主场景 Collection 中移除这个资产母版 Collection (保持在数据块中即可)
+            # After import, unlink master Collection from scene (keep datablock)
             self.scene.collection.children.unlink(new_coll)
             self.asset_cache[asset_id] = new_coll
-            print(f"📦 [母版加载] {asset_id} 加载成功并存入缓存 (Size: {master_bounds[1]-master_bounds[0] if master_bounds else 'None'})")
+            print(f"📦 [Master load] {asset_id} loaded successfully and cached (Size: {master_bounds[1]-master_bounds[0] if master_bounds else 'None'})")
             return new_coll
         else:
-            # 导入失败，清理
+            # Import failed; clean up
             self.scene.collection.children.unlink(new_coll)
             bpy.data.collections.remove(new_coll)
             self.asset_cache[asset_id] = None
@@ -528,20 +529,20 @@ class BpySceneCtx:
 
     def export_wall_ssl(self, output_dir: str):
         """
-        导出墙体SSL格式文件 (包含 Room 和所有 Wall)
-        包含边界墙和内部隔断墙
+        Export wall SSL file (Room and all Walls).
+        Includes boundary and partition walls
         """
         output_path = os.path.join(output_dir, 'wall_ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
         
         lines = []
         
-        # 生成 room_id
+        # Generate room_id
         room_id = util.generate_unique_id()
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 直接从 context["walls"] 导出所有墙体（包括边界和隔断）
+        # Export all walls from context["walls"] (boundary and partitions)
         all_walls = self.context["walls"]
         for wall_id, wall in all_walls.items():
             p = list(wall["s"]) + [0.0]
@@ -549,65 +550,65 @@ class BpySceneCtx:
             height = wall["height"]
             lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
         
-        # 写入文件
+        # Write file
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 墙体SSL已导出: {output_path} ({len(all_walls)} 面墙)")
+        print(f"✅ Wall SSL exported: {output_path} ({len(all_walls)} walls)")
         return output_path
 
     def export_wall_hole_ssl(self, output_dir: str):
         """
-        导出墙体和门窗SSL格式文件 (包含 Room, Wall, Door, Window)
-        包含边界墙和内部隔断墙
+        Export wall and opening SSL file (Room, Wall, Door, Window).
+        Includes boundary and partition walls
         """
         output_path = os.path.join(output_dir, 'wall_hole_ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
         
         lines = []
         
-        # 生成 room_id
+        # Generate room_id
         room_id = util.generate_unique_id()
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 遍历所有墙体及其携带的门窗
+        # Iterate all walls and their doors/windows
         for wall_id, wall in self.context["walls"].items():
             p = list(wall["s"]) + [0.0]
             q = list(wall["e"]) + [0.0]
             height = wall["height"]
             lines.append(f'Wall(id="{wall_id}", room_id="{room_id}", p={p}, q={q}, height={height})')
             
-            # 导出该墙体上的门
+            # Export doors on this wall
             for door_id, door in wall.get("doors", {}).items():
                 lines.append(f'Door(id="{door_id}", wall_id="{wall_id}", center={door["center"]}, width={door["width"]}, height={door["height"]})')
             
-            # 导出该墙体上的窗
+            # Export windows on this wall
             for window_id, window in wall.get("windows", {}).items():
                 lines.append(f'Window(id="{window_id}", wall_id="{wall_id}", center={window["center"]}, width={window["width"]}, height={window["height"]})')
         
-        # 写入文件
+        # Write file
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 墙体和门窗SSL已导出: {output_path}")
+        print(f"✅ Wall and door/window SSL exported: {output_path}")
         return output_path
 
     def export_ssl(self, output_dir: str):
         """
-        导出完整SSL格式文件 (包含 Room, Wall, Door, Window, Bbox)
+        Export full SSL file (Room, Wall, Door, Window, Bbox)
         """
         output_path = os.path.join(output_dir, 'ssl.txt')
         os.makedirs(output_dir, exist_ok=True)
         
         lines = []
         
-        # 生成 room_id
+        # Generate room_id
         room_id = util.generate_unique_id()
         room_type = self.context["meta"]["scene_type"]
         lines.append(f'Room(id="{room_id}", room_type="{room_type}")')
         
-        # 导出所有墙体及门窗
+        # Export all walls and openings
         for wall_id, wall in self.context["walls"].items():
             p = list(wall["s"]) + [0.0]
             q = list(wall["e"]) + [0.0]
@@ -620,7 +621,7 @@ class BpySceneCtx:
             for window_id, window in wall.get("windows", {}).items():
                 lines.append(f'Window(id="{window_id}", wall_id="{wall_id}", center={window["center"]}, width={window["width"]}, height={window["height"]})')
         
-        # 导出所有家具 (Bbox)
+        # Export all furniture (Bbox)
         for box_id, box in self.context["boxes"].items():
             label = box.get("label", box.get("class", "unknown"))
             center = box["center"]
@@ -633,27 +634,27 @@ class BpySceneCtx:
             bbox_str += ')'
             lines.append(bbox_str)
         
-        # 写入文件
+        # Write file
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(lines))
         
-        print(f"✅ 完整SSL已导出: {output_path}")
+        print(f"✅ Full SSL exported: {output_path}")
         return output_path
 
-    # ==================== 纯 bpy 几何体创建（替代 util 中的 trimesh 函数）====================
+    # ==================== Pure bpy geometry creation (replaces trimesh helpers in util) ====================
     # helper functions now live in util_bpy
 
-    # ==================== 场景构建（与 scenebuilder.py 逻辑完全一致）====================
+    # ==================== Scene construction (logic identical to scenebuilder.py) ====================
     
     def construct_floor(self, show_wall=True, show_window=True, show_door=True, show_ceiling=True, align_height: bool = True):
-        """构建地板和墙体（与 scenebuilder.py 完全一致的逻辑）"""
-        # 注意：这里不创建 self.scene = pyrender.Scene()，而是使用已有的 bpy scene
+        """Build floor and walls (logic identical to scenebuilder.py)"""
+        # Note: does not create pyrender.Scene(); uses existing bpy scene
         vertices = self.context["meta"]["vertices"]
 
         if len(vertices) < 3:
             return
 
-        # 创建地板
+        # Create floor
         bounds = self.context["meta"]["bounds"]
         z_max = self.context["meta"]["z_max"]
         wall_thickness = self.config.get("wall_thickness", 0.1)
@@ -673,10 +674,10 @@ class BpySceneCtx:
 
         floor_obj = util_bpy.create_floor_mesh_bpy(self.scene_collection, floor_vertices, texture_scale=f_scale)
         if floor_obj is None:
-            print("⚠️ 地板几何体创建失败，跳过后续处理")
+            print("⚠️ Floor geometry creation failed, skipping subsequent processing")
             return
 
-        # 加载纹理
+        # Load texture
         texture_path = self.config["floor_blender_texture_path"]
         if texture_path and os.path.exists(texture_path):
             mat = util_bpy.create_material_with_texture("Floor_Material", texture_path)
@@ -685,36 +686,36 @@ class BpySceneCtx:
         if mat:
             floor_obj.data.materials.append(mat)
         
-        self.mesh_nodes["floor"] = {"node": floor_obj, "mesh": floor_obj}  # 保存引用
+        self.mesh_nodes["floor"] = {"node": floor_obj, "mesh": floor_obj}  # Keep reference
 
-        # 创建墙体
+        # Create walls
         if show_wall:
             wall_color = self.config["wall_color"]
             wall_texture_path = self.config["wall_blender_texture_path"]
 
-            # --- 预计算 Miter Joint (斜接) 偏移 ---
+            # --- Precompute miter joint offsets ---
             wall_outer_points = util_bpy.calculate_miter_joints(self.context["walls"], wall_thickness)
 
-            # --- 收集所有生成的墙体对象，用于后续布尔合并 ---
+            # --- Collect all wall objects for optional boolean merge ---
             all_wall_objs = []
 
             for wall_id, wall in self.context["walls"].items():
                 is_partition = wall.get("is_partition", False)
                 
-                # 收集门窗信息
+                # Collect door/window openings
                 openings = []
                 for door in wall.get("doors", {}).values():
                     openings.append((door, "door"))
                 for window in wall.get("windows", {}).values():
                     openings.append((window, "window"))
                 
-                # 获取预计算的偏移点
+                # Get precomputed offset points
                 outer_s, outer_e = wall_outer_points.get(wall_id, (None, None))
 
-                # 墙体高度
+                # Wall height
                 wall_h = z_max if align_height else wall["height"]
 
-                # 对于隔断墙，检查端点是否连接在其他墙上，决定是否延长
+                # For partitions, check if endpoints connect to other walls to decide extension
                 extend_s, extend_e = False, False
                 if is_partition:
                     s_pt = tuple(wall["s"])
@@ -726,7 +727,7 @@ class BpySceneCtx:
                         if util.point_on_segment(e_pt, tuple(other_wall["s"]), tuple(other_wall["e"])):
                             extend_e = True
 
-                # 创建墙体mesh
+                # Create wallsmesh
                 wall_obj = util_bpy.create_single_wall_mesh_bpy(
                     self.scene_collection,
                     wall["s"], wall["e"], wall_h, wall["orientation"],
@@ -743,7 +744,7 @@ class BpySceneCtx:
                 )
 
                 if wall_obj:
-                    # 应用纹理或颜色
+                    # Apply texture or color
                     if wall_texture_path and os.path.exists(wall_texture_path):
                         mat = util_bpy.create_material_with_texture(f"Wall_{wall_id}_Material", wall_texture_path)
                     else:
@@ -756,13 +757,13 @@ class BpySceneCtx:
                         "wall_data": wall
                     }
 
-            # 注意：bpy 版本暂不实现边缘线条（可选功能）
+            # Note: bpy version does not implement edge lines (optional feature)
         else:
-            print("🚫 跳过墙体创建 (show_wall=False)")
+            print("🚫 Skipping wall creation (show_wall=False)")
         
-        # 添加门窗
+        # Add doors and windows
         if show_door or show_window:
-            print(f"🚪 开始处理门窗 (按 asset_id 加载)...")
+            print(f"🚪 Processing doors and windows (loading by asset_id)...")
             wall_thickness = self.config.get("wall_thickness", 0.1)
             
             hole_paths = self._asset_search_paths("model_hole_path")
@@ -776,22 +777,22 @@ class BpySceneCtx:
                     continue
 
                 wall_dir = wall_vec / wall_len
-                # orientation 是指向内部的法线
+                # orientation is inward-facing normal
                 is_partition = wall.get("is_partition", False)
                 orientation = np.array(wall["orientation"])
                 
-                # 策略 B：为隔断墙构造一个稳定的虚拟法线，用于保证模型正反面一致性
+                # Strategy B: build stable virtual normal for partitions for consistent front/back
                 if is_partition and np.linalg.norm(orientation) < 1e-4:
-                    # 取墙体走向的垂直向量 [-dy, dx]
+                    # Perpendicular to wall direction [-dy, dx]
                     outward_normal = np.array([-wall_dir[1], wall_dir[0]])
                 else:
-                    # 外墙：指向内部的法线取取反即为向外偏移的方向
+                    # Exterior wall: negate inward normal for outward offset direction
                     outward_normal = -orientation
 
-                # 计算墙的旋转角度 (角度制)
+                # Compute wall rotation angle (degrees)
                 wall_angle_deg = np.degrees(np.arctan2(wall_dir[1], wall_dir[0]))
 
-                # 定义要处理的类型列表
+                # Types to process
                 types_to_process = []
                 if show_door:
                     types_to_process.append(("door", "doors"))
@@ -804,29 +805,29 @@ class BpySceneCtx:
                         if not asset_id:
                             continue
 
-                        # 计算真实中心
+                        # Compute actual center
                         inner_center = np.array(item["center"])
                         real_center = inner_center.copy()
                         
-                        # 只有外墙需要向外侧偏移一半厚度，隔断墙模型直接放在中心线上
+                        # Only exterior walls offset outward by half thickness; partitions sit on centerline
                         if not is_partition:
                             real_center[0] += outward_normal[0] * (wall_thickness / 2)
                             real_center[1] += outward_normal[1] * (wall_thickness / 2)
 
-                        # 构造 box 格式的数据
+                        # Build box-format data
                         item_box_data = {
                             "center": real_center.tolist(),
-                            # 门窗模型的厚度通常由模型自身决定，但这里传入 wall_thickness 作为参考
+                            # Opening thickness usually from model; wall_thickness passed as reference
                             "scale": [item["width"], wall_thickness, item["height"]],
                             "angle_z": wall_angle_deg,
                             "asset_id": asset_id
                         }
 
-                        # 仿照 bbox 添加逻辑
-                        # --- [优化] 门窗实例化 ---
+                        # Same pattern as bbox placement
+                        # --- [Optimization] Door/window instancing ---
                         asset_coll = self._get_or_create_asset_collection(asset_id, hole_paths)
                         if asset_coll:
-                            # 创建实例
+                            # Create instance
                             instance_name = f"Instance_{item_type}_{item_id[:4]}"
                             instance_obj = bpy.data.objects.new(instance_name, None)
                             instance_obj.instance_type = 'COLLECTION'
@@ -834,12 +835,12 @@ class BpySceneCtx:
                             self.scene_collection.objects.link(instance_obj)
                             
                             try:
-                                # 应用变换 (与家具逻辑一致)
-                                # [优化] 传入预计算的 master_bounds
+                                # Apply transform (same as furniture logic)
+                                # [Optimization] Pass precomputed master_bounds
                                 master_b = self.asset_bounds.get(asset_id)
                                 success_transform = util_bpy.apply_box_transform(instance_obj, item_box_data, master_bounds=master_b)
                             except Exception as e:
-                                print(f"  ❌ {item_type} {item_id[:4]} 实例化变换异常: {e}")
+                                print(f"  ❌ {item_type} {item_id[:4]} instancing transform error: {e}")
                                 success_transform = False
 
                             if success_transform:
@@ -848,18 +849,18 @@ class BpySceneCtx:
                                     "mesh": instance_obj,
                                     f"{item_type}_data": dict(item),
                                 }
-                                # print(f"  ✅ {item_type} {item_id[:4]} (asset_id={asset_id}) 实例化成功")
+                                # print(f"  ✅ {item_type} {item_id[:4]} (asset_id={asset_id}) instancing succeeded")
                             else:
-                                print(f"  ❌ {item_type} {item_id[:4]} 变换失败")
-                                # 如果变换失败，清理
+                                print(f"  ❌ {item_type} {item_id[:4]} transform failed")
+                                # Clean up on transform failure
                                 bpy.data.objects.remove(instance_obj, do_unlink=True)
                         else:
-                            print(f"  ❌ {item_type} {item_id[:4]} (asset_id={asset_id}) 母版加载失败")
+                            print(f"  ❌ {item_type} {item_id[:4]} (asset_id={asset_id}) master load failed")
         else:
-            print("🚫 跳过门窗创建 (show_door=False, show_window=False)")
+            print("🚫 Skipping door/window creation (show_door=False, show_window=False)")
         
-        # 创建天花板
-        # 室外场景（所有墙高度为0）不构建天花板，即使 show_ceiling=True
+        # Create ceiling
+        # Outdoor scene (all wall heights 0): skip ceiling even if show_ceiling=True
         wall_max_height = max((w["height"] for w in self.context["walls"].values()), default=0)
         if show_ceiling and wall_max_height > 0:
             z_max = self.context["meta"]["z_max"]
@@ -876,30 +877,30 @@ class BpySceneCtx:
                     ceiling_obj.data.materials.append(mat)
 
                 self.mesh_nodes["ceiling"] = {"node": ceiling_obj, "mesh": ceiling_obj}
-                print(f"✅ 已添加天花板 (高度: {z_max:.2f}m)")
+                print(f"✅ Ceiling added (height: {z_max:.2f}m)")
             else:
-                print("⚠️ 天花板几何体创建失败")
+                print("⚠️ Ceiling geometry creation failed")
         else:
             if not show_ceiling:
-                print("🚫 跳过天花板 (show_ceiling=False)")
+                print("🚫 Skipping ceiling (show_ceiling=False)")
             else:
-                print("🏞️ 跳过天花板 (室外场景，墙体最大高度为0)")
+                print("🏞️ Skipping ceiling (outdoor scene, max wall height is 0)")
 
     def construct_scene(self, show_wall: bool = True, show_window: bool = True, 
                        show_door: bool = True, show_ceiling: bool = True,
                        geometry_mode: str = "gltf", align_height: bool = True,
                        rebuild: bool = False):
         """
-        构建完整场景。
+        Build the full scene.
         
         Args:
-            show_wall, show_window, show_door, show_ceiling: 是否渲染对应的结构
-            geometry_mode: 几何体模式，可选:
-                - "gltf": 仅加载 GLTF 模型，若无 asset_id 或文件不存在则跳过该物体
-                - "mixed": 优先加载 GLTF 模型，若失败则回退到 bbox 几何体
-                - "bbox": 所有物体均强制使用 bbox 几何体表示
-            align_height: 是否对齐墙体高度到 z_max
-            rebuild: 是否重新构建场景（清空当前所有物体）
+            show_wall, show_window, show_door, show_ceiling: Whether to render each structure type
+            geometry_mode: Geometry mode, one of:
+                - "gltf": Load GLTF only; skip objects without asset_id or missing files
+                - "mixed": Prefer GLTF; fall back to bbox geometry on failure
+                - "bbox": Force bbox geometry for all objects
+            align_height: Align wall heights to z_max
+            rebuild: Rebuild scene (clear all current objects)
         """
         if rebuild:
             self.clear_scene()
@@ -910,7 +911,7 @@ class BpySceneCtx:
         self.construct_floor(show_wall=show_wall, show_window=show_window, 
                              show_door=show_door, show_ceiling=show_ceiling, align_height=align_height)
 
-        print(f"📦 加载家具 ({len(self.context['boxes'])} 个物体, 模式: {geometry_mode})...")
+        print(f"📦 Loading furniture ({len(self.context['boxes'])} objects, mode: {geometry_mode})...")
         success_count = 0
         load_time = 0
         transform_time = 0
@@ -920,7 +921,7 @@ class BpySceneCtx:
         for box_id, box in self.context["boxes"].items():
             asset_id = box.get("asset_id")
             
-            # --- 模式判断逻辑 ---
+            # --- Mode selection logic ---
             should_load_gltf = False
             should_fallback_bbox = False
             
@@ -936,18 +937,18 @@ class BpySceneCtx:
                 else:
                     should_fallback_bbox = True
             
-            # --- 执行加载 ---
+            # --- Load execution ---
             mesh_root = None
             if should_load_gltf:
                 load_start = time.perf_counter()
                 
-                # --- [优化] 使用实例化 (Collection Instance) ---
+                # --- [Optimization] Use Collection Instance ---
                 asset_coll = self._get_or_create_asset_collection(asset_id, model_paths)
                 load_time += time.perf_counter() - load_start
                 
                 if asset_coll:
                     transform_start = time.perf_counter()
-                    # 创建实例 (Empty 对象)
+                    # Create instance (Empty object)
                     instance_name = f"Instance_{asset_id}_{box_id[:4]}"
                     instance_obj = bpy.data.objects.new(instance_name, None)
                     instance_obj.instance_type = 'COLLECTION'
@@ -955,11 +956,11 @@ class BpySceneCtx:
                     self.scene_collection.objects.link(instance_obj)
                     
                     try:
-                        # [优化] 传入预计算的 master_bounds
+                        # [Optimization] Pass precomputed master_bounds
                         master_b = self.asset_bounds.get(asset_id)
                         success_transform = util_bpy.apply_box_transform(instance_obj, box, master_bounds=master_b)
                     except Exception as e:
-                        print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) 实例化变换异常: {e}")
+                        print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) instancing transform error: {e}")
                         success_transform = False
                     transform_time += time.perf_counter() - transform_start
                     
@@ -969,14 +970,14 @@ class BpySceneCtx:
                         }
                         success_count += 1
                         name = box.get('label', box.get('class', 'unknown'))
-                        # print(f"  ✅ {name} (asset_id={asset_id}) 实例化成功")
+                        # print(f"  ✅ {name} (asset_id={asset_id}) instancing succeeded")
                         continue
                 
-                # 如果 gltf 加载失败，判断是否需要回退
+                # On GLTF load failure, decide whether to fall back
                 if geometry_mode == "mixed":
                     should_fallback_bbox = True
                 else:
-                    print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) 导入失败且未开启混合模式，跳过")
+                    print(f"  ❌ {box.get('class', 'unknown')} (asset_id={asset_id}) import failed and hybrid mode not enabled, skipping")
                     continue
 
             if should_fallback_bbox:
@@ -990,17 +991,17 @@ class BpySceneCtx:
                     }
                     success_count += 1
                     name = box.get('label', box.get('class', 'unknown'))
-                    print(f"  ✅ {name} (bbox几何体) 添加成功")
+                    print(f"  ✅ {name} (bbox geometry) added successfully")
                 except Exception as e:
                     name = box.get('label', box.get('class', 'unknown'))
-                    print(f"  ❌ {name} (bbox几何体): {e}")
+                    print(f"  ❌ {name} (bbox geometry): {e}")
 
         total_time = time.perf_counter() - total_start
-        print(f"✅ 场景构建完成! 成功添加 {success_count}/{len(self.context['boxes'])} 个物体")
-        print(f"   构建耗时: {total_time:.2f}s (加载: {load_time:.2f}s, 变换: {transform_time:.2f}s)")
+        print(f"✅ Scene build complete! Successfully added {success_count}/{len(self.context['boxes'])} objects")
+        print(f"   Build time: {total_time:.2f}s (load: {load_time:.2f}s, transform: {transform_time:.2f}s)")
 
     def export_glb(self, output_path: str, rebuild: bool = False, **construct_kwargs):
-        """导出当前 Blender 场景为 GLB 文件。"""
+        """Export current Blender scene as GLB."""
         if rebuild or self.mesh_nodes["floor"] is None:
             self.construct_scene(rebuild=rebuild, **construct_kwargs)
 
@@ -1013,14 +1014,14 @@ class BpySceneCtx:
                 export_format='GLB',
             )
         except TypeError:
-            # 兼容少数 Blender 版本的参数差异，.glb 后缀仍会导出二进制 glTF。
+            # Handle parameter differences across Blender versions; .glb still exports binary glTF.
             bpy.ops.export_scene.gltf(filepath=output_path)
 
-        print(f"✅ GLB 已导出: {output_path}")
+        print(f"✅ GLB exported: {output_path}")
         return output_path
 
     def export_point_cloud(self, output_dir: str, rebuild: bool = False, **construct_kwargs):
-        """按场景对象分别采样表面点云并导出为彩色 PLY。"""
+        """Sample surface point clouds per scene object and export as colored PLY."""
         wall_max_height = max((w["height"] for w in self.context["walls"].values()), default=0)
         need_ceiling = wall_max_height > 0
         if rebuild or self.mesh_nodes["floor"] is None or (need_ceiling and self.mesh_nodes["ceiling"] is None):
@@ -1054,7 +1055,7 @@ class BpySceneCtx:
                 use_ses=use_ses,
             )
             if len(points) == 0:
-                print(f"⚠️ 点云采样跳过空对象: {category}/{object_id}")
+                print(f"⚠️ Point cloud sampling skipped empty object: {category}/{object_id}")
                 return
 
             path = os.path.join(output_dir, filename)
@@ -1111,11 +1112,11 @@ class BpySceneCtx:
         with open(metadata_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
 
-        print(f"✅ 点云已导出: {output_dir}")
+        print(f"✅ Point cloud exported: {output_dir}")
         return output_dir
 
     def export_voxel(self, output_dir: str, rebuild: bool = False, **construct_kwargs):
-        """导出全场景 256³ 彩色占用体素（不做视锥裁剪）。"""
+        """Export full-scene 256³ colored occupancy voxels (no frustum clipping)."""
         wall_max_height = max((w["height"] for w in self.context["walls"].values()), default=0)
         need_ceiling = wall_max_height > 0
         if rebuild or self.mesh_nodes["floor"] is None or (need_ceiling and self.mesh_nodes["ceiling"] is None):
@@ -1131,7 +1132,7 @@ class BpySceneCtx:
         bpy.context.view_layer.update()
         triangles, colors = self._collect_scene_triangle_colors()
         if len(triangles) == 0:
-            print("⚠️ 体素导出跳过：场景没有三角形")
+            print("⚠️ Voxel export skipped: scene has no triangles")
             return None
 
         world_up = [0.0, 0.0, 1.0]
@@ -1157,7 +1158,7 @@ class BpySceneCtx:
         panoramic: bool = False,
         view_image_path: Optional[str] = None,
     ):
-        """导出可见几何：mask 可见比例 + 视锥裁剪；写 visibility.json。"""
+        """Export visible geometry: mask visibility ratio + frustum clip; write visibility.json."""
         bpy.context.view_layer.update()
         width, height = self._render_resolution()
         visibility_records: List[Dict[str, Any]] = []
@@ -1169,7 +1170,7 @@ class BpySceneCtx:
             visibility_records = self._legacy_visibility_records_from_entries(visible_entries)
         else:
             if not view_image_path:
-                raise ValueError("export_visible_geometry 需要 view_image_path（用于语义 mask）")
+                raise ValueError("export_visible_geometry requires view_image_path (for semantic mask)")
             semantic_rgb, semantic_objects, overall_pixels_map = self.render_semantic_bundle(
                 view_image_path,
                 save_artifacts=False,
@@ -1187,7 +1188,7 @@ class BpySceneCtx:
         self._write_visibility_json(output_dir, visibility_records, width, height)
 
         if not visible_entries:
-            print("⚠️ 当前视角没有检测到可见几何")
+            print("⚠️ No visible geometry detected from current view")
             return
 
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
@@ -1207,11 +1208,11 @@ class BpySceneCtx:
         export_point_cloud: bool = False,
         export_voxel: bool = False,
     ):
-        """多相机合并导出：任意视角可见则保留，视锥裁剪取各视角并集。"""
+        """Multi-camera merged export: keep if visible from any view; frustum clip is union across views."""
         bpy.context.view_layer.update()
         visible_entries = self._visible_geometry_entries_multi(camera_states)
         if not visible_entries:
-            print("⚠️ 多视角序列没有检测到可见几何")
+            print("⚠️ No visible geometry detected in multi-view sequence")
             return
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
@@ -1230,11 +1231,11 @@ class BpySceneCtx:
         export_point_cloud: bool = False,
         export_voxel: bool = False,
     ):
-        """多全景相机合并导出：任意相机无遮挡可见则保留完整几何，不做视锥裁切。"""
+        """Multi-panorama merged export: keep full geometry if unobstructed from any camera; no frustum clip."""
         bpy.context.view_layer.update()
         visible_entries = self._visible_geometry_entries_pano_multi(camera_states)
         if not visible_entries:
-            print("⚠️ 多视角全景没有检测到可见几何")
+            print("⚠️ No visible geometry detected in multi-view panorama")
             return
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
@@ -1260,7 +1261,7 @@ class BpySceneCtx:
         transparent_objects: Optional[set] = None,
         panoramic: bool = False,
     ):
-        """导出平面内表面顶点 JSON 与连线 overlay（随 --ply 默认启用）。"""
+        """Export planar inner-surface vertex JSON and line overlay (enabled by default with --ply)."""
         try:
             from . import planar_faces
         except ImportError:
@@ -1305,7 +1306,7 @@ class BpySceneCtx:
         return None
 
     def build_planar_vertex_occlusion_fn(self, camera_obj, transparent_objects: Optional[set] = None):
-        """返回 (category, obj_id, point)->0/1，与可见几何相同的射线遮挡判定。"""
+        """Return (category, obj_id, point)->0/1 using same ray occlusion as visible geometry."""
         transparent_objects = transparent_objects or set()
         depsgraph = bpy.context.evaluated_depsgraph_get()
         target_cache: Dict[Tuple[str, str], set] = {}
@@ -1388,7 +1389,7 @@ class BpySceneCtx:
                 temp_objects.append(obj)
 
             if not temp_objects:
-                print("⚠️ scene_visible.glb 跳过：裁剪后没有几何")
+                print("⚠️ scene_visible.glb skipped: no geometry after clipping")
                 return
             bpy.context.view_layer.objects.active = temp_objects[0]
             bpy.context.view_layer.update()
@@ -1400,7 +1401,7 @@ class BpySceneCtx:
                 )
             except TypeError:
                 bpy.ops.export_scene.gltf(filepath=output_path, use_selection=True)
-            print(f"✅ 可见 GLB 已导出: {output_path}")
+            print(f"✅ Visible GLB exported: {output_path}")
             ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
             self._export_glb_opencv_copy(output_path, ref_camera, temp_objects)
         finally:
@@ -1488,8 +1489,8 @@ class BpySceneCtx:
         with open(os.path.join(output_dir, "metadata_visible.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
         if opencv_ply_count:
-            print(f"✅ OpenCV 点云副本: {opencv_ply_count} 个文件")
-        print(f"✅ 可见点云已导出: {output_dir}")
+            print(f"✅ OpenCV point cloud copies: {opencv_ply_count} files")
+        print(f"✅ Visible point cloud exported: {output_dir}")
 
     def _triangle_rgb_at_centroid(self, tri, color_source, tri_uv=None):
         base_color = color_source.get("base_color", np.array([160, 160, 160], dtype=np.uint8))
@@ -1558,7 +1559,7 @@ class BpySceneCtx:
 
         triangles, colors = self._collect_visible_triangle_colors(visible_entries)
         if len(triangles) == 0:
-            print("⚠️ 体素导出跳过：可见几何没有三角形")
+            print("⚠️ Voxel export skipped: visible geometry has no triangles")
             return
 
         world_up = [0.0, 0.0, 1.0]
@@ -1605,7 +1606,7 @@ class BpySceneCtx:
         path = os.path.join(output_dir, "visibility.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
-        print(f"✅ 可见性统计: {path} ({len(records)} 个元素)")
+        print(f"✅ Visibility stats: {path} ({len(records)} elements)")
 
     def _legacy_visibility_records_from_entries(
         self, visible_entries: List[Dict[str, Any]]
@@ -1723,7 +1724,7 @@ class BpySceneCtx:
         return entries, visibility_records
 
     def _visible_geometry_entries_pano(self, camera_obj, transparent_objects: Optional[set] = None):
-        """全景可见几何：只做遮挡判断，不做透影视锥裁切，保持原始坐标。"""
+        """Panorama visible geometry: occlusion only, no perspective frustum clip, original coordinates."""
         transparent_objects = transparent_objects or set()
         entries = []
         for category, object_id, node, visible_ply in self._iter_point_cloud_nodes(visible_suffix=True):
@@ -1749,7 +1750,7 @@ class BpySceneCtx:
         return entries
 
     def _visible_geometry_entries_pano_multi(self, camera_states: List[Tuple[Any, set]]):
-        """多全景相机：遮挡任意可见则保留完整 records，不做视锥裁切。"""
+        """Multi-panorama: keep full records if visible from any camera; no frustum clip."""
         entries = []
         for category, object_id, node, visible_ply in self._iter_point_cloud_nodes(visible_suffix=True):
             records = self._collect_bpy_mesh_records(node, use_ses=category in ("boxes", "doors", "windows"))
@@ -1782,7 +1783,7 @@ class BpySceneCtx:
         return entries
 
     def _visible_geometry_entries_multi(self, camera_states: List[Tuple[Any, set]]):
-        """多相机：遮挡任意可见则保留；视锥裁剪合并各相机保留部分。"""
+        """Multi-camera: keep if visible from any; frustum clip merges kept parts across cameras."""
         entries = []
         for category, object_id, node, visible_ply in self._iter_point_cloud_nodes(visible_suffix=True):
             records = self._collect_bpy_mesh_records(node, use_ses=category in ("boxes", "doors", "windows"))
@@ -1958,7 +1959,7 @@ class BpySceneCtx:
         camera_obj,
         clip_mats=None,
     ):
-        """用 Blender 渲染投影矩阵裁剪视锥外的三角形部分。"""
+        """Clip triangle parts outside frustum using Blender render projection matrix."""
         if clip_mats is None:
             clip_mats = self._render_frustum_clip_mats(camera_obj)
         clipped_records = []
@@ -2013,7 +2014,7 @@ class BpySceneCtx:
         return (-margin <= u <= 1.0 + margin) and (-margin <= v <= 1.0 + margin)
 
     def _triangle_fully_in_render_view(self, triangle: np.ndarray, camera_obj, margin: float = 0.002) -> bool:
-        """三顶点都在渲染视口内才算该面片在视锥内（用于 cutted 统计）。"""
+        """Triangle in frustum only if all three vertices are inside render viewport (for cutted stats)."""
         tri = np.asarray(triangle, dtype=float)
         return all(self._vertex_in_render_view(p, camera_obj, margin=margin) for p in tri)
 
@@ -2035,7 +2036,7 @@ class BpySceneCtx:
         camera_obj,
         in_view_ratio: float = FRUSTUM_IN_VIEW_RATIO,
     ) -> bool:
-        """严格统计三顶点均在视口内的面片占比；低于阈值才为 cutted。"""
+        """Strict ratio of triangles with all three vertices in viewport; cutted only below threshold."""
         return self._records_frustum_in_view_ratio(records, camera_obj) < in_view_ratio
 
     def _sample_visible_records(self, records: List[Dict[str, Any]], camera_obj, sample_count: int):
@@ -2113,8 +2114,8 @@ class BpySceneCtx:
         return False
 
     def _collect_visibility_sample_points(self, records, max_points: int = 128):
-        """收集遮挡判定采样点。用三角形重心而非顶点：地板/天花板 n-gon 顶点全在外轮廓上，
-        仅用顶点会把图像中可见的内侧区域整片误判为不可见（天花板同理；与 scenebuilder.py 一致）。"""
+        """Collect occlusion sample points. Use triangle centroids not vertices: floor/ceiling n-gon vertices lie on outer contour;
+        vertex-only sampling falsely marks visible interior as occluded (same for ceiling; matches scenebuilder.py)."""
         points = []
         for record in records:
             tris = np.asarray(record["triangles"], dtype=float)
@@ -2169,7 +2170,7 @@ class BpySceneCtx:
         return False
 
     def _records_visible_from_camera(self, records, camera_obj, target_objects: set, transparent_objects: set):
-        """至少有一个采样点无遮挡则视为可见（部分或全部可见）。"""
+        """Visible if at least one sample point is unobstructed (partially or fully visible)."""
         points = self._collect_visibility_sample_points(records)
         if len(points) == 0:
             return False
@@ -2782,7 +2783,7 @@ class BpySceneCtx:
 
     @staticmethod
     def _write_ply(path: str, points: np.ndarray, colors: np.ndarray, normals: Optional[np.ndarray] = None):
-        """写 binary PLY：xyz + nx/ny/nz + rgb。"""
+        """Write binary PLY: xyz + nx/ny/nz + rgb."""
         payload = BpySceneCtx._write_ply_binary_payload(points, colors, normals)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "wb") as f:
@@ -2852,7 +2853,7 @@ class BpySceneCtx:
         *,
         quiet: bool = False,
     ):
-        """主 PLY：世界/规范化 SSL；*_opencv.ply：OpenCV 相机系（均 binary）。"""
+        """Main PLY: world/normalized SSL; *_opencv.ply: OpenCV camera frame (both binary)."""
         self._write_ply(path, points, colors, normals)
         if camera_obj is None:
             return
@@ -2866,10 +2867,10 @@ class BpySceneCtx:
         nrm_o = geo_cv.transform_normals_to_opencv(normals, pose)
         self._write_ply(opencv_path, pts_o, colors, nrm_o)
         if not quiet:
-            print(f"✅ OpenCV 点云副本: {opencv_path}")
+            print(f"✅ OpenCV point cloud copy: {opencv_path}")
 
     def _export_glb_opencv_copy(self, output_path: str, camera_obj, bpy_objects=None) -> None:
-        """从已导出的 world GLB 生成 OpenCV 副本（trimesh 变换，避免第二次 Blender glTF 导出）。"""
+        """Build OpenCV GLB copy from exported world GLB (trimesh transform, avoids second Blender glTF export)."""
         if camera_obj is None or not os.path.isfile(output_path):
             return
         try:
@@ -2883,13 +2884,13 @@ class BpySceneCtx:
                       lighting_type: Literal["area", "array", "none"] = "array",
                       ambient_light_color: list = None,
                       ambient_strength: float = 2.0):
-        """设置场景光照，支持单盏大面积区域光、阵列光或不设置"""
+        """Set scene lighting: single large area light, array lights, or none"""
         if self.if_set_lights:
-            print("⚠️  光照已设置，跳过重复设置")
+            print("⚠️  Lighting already set, skipping duplicate setup")
             return
         
         if lighting_type == "none":
-            print("🌑 已选择 'none' 模式，不添加人造灯光")
+            print("🌑 'none' mode selected, no artificial lights added")
             self.if_set_lights = True
             return
 
@@ -2897,10 +2898,10 @@ class BpySceneCtx:
         z_max = self.context["meta"]["z_max"]
         span = self.context["meta"]["span"]
         
-        # 柔和黄白色 (Soft Warm White)
+        # Soft warm white
         warm_white = [1.0, 0.95, 0.8]
 
-        # 1. 设置环境光
+        # 1. Set ambient/world lighting
         world = self.scene.world
         if not world:
             world = bpy.data.worlds.new("World")
@@ -2910,25 +2911,25 @@ class BpySceneCtx:
         bg_node = world.node_tree.nodes.get('Background')
         if bg_node:
             if ambient_light_color is None:
-                # 真实的自然环境光通常带一点点蓝色 (Daylight Blue)
+                # Natural ambient light often has a slight daylight blue tint
                 ambient_light_color = [0.95, 0.97, 1.0, 1.0]
             elif len(ambient_light_color) == 3:
                 ambient_light_color = ambient_light_color + [1.0]
             bg_node.inputs['Color'].default_value = ambient_light_color
             bg_node.inputs['Strength'].default_value = ambient_strength
         
-        # 2. 添加室内人造灯 (高度在 z_max - 0.1)
+        # 2. Add indoor artificial lights (height at z_max - 0.1)
         light_z = z_max - 0.1
         
-        # 更加符合摄影感的室内暖白光 (Warm White ~3500K)
-        # 这种颜色与环境光的淡蓝色对比会产生非常真实的室内氛围
+        # Photographic indoor warm white (~3500K)
+        # Contrast with bluish ambient light yields realistic indoor mood
         realistic_warm = [1.0, 0.88, 0.75]
         
         if lighting_type == "area":
-            # 方案一：单盏大面积区域光
+            # Option 1: single large area light
             light_data = bpy.data.lights.new(name="MainAreaLight", type='AREA')
             light_data.shape = 'RECTANGLE'
-            # 覆盖房间 80% 的面积
+            # Cover 80% of room area
             light_data.size = span[0] * 0.8
             light_data.size_y = span[1] * 0.8
             light_data.energy = intensity
@@ -2937,15 +2938,15 @@ class BpySceneCtx:
             light_obj = bpy.data.objects.new(name="MainAreaLight", object_data=light_data)
             self.scene_collection.objects.link(light_obj)
             light_obj.location = (center[0], center[1], light_z)
-            print(f"💡 已添加单盏大面积区域光 (Intensity={intensity})")
+            print(f"💡 Added single large area light (Intensity={intensity})")
             
         elif lighting_type == "array":
-            # 方案二：阵列区域光 (筒灯风格)
-            # 每隔 1.5 米布置一盏，且避开边缘
+            # Option 2: array area lights (downlight style)
+            # One every 1.5m, inset from edges
             nx = int(span[0] / 1.5)
             ny = int(span[1] / 1.5)
             
-            # 计算 X 轴坐标 (居中排布)
+            # Compute X coordinates (centered layout)
             if nx <= 1:
                 x_coords = [center[0]]
                 nx = 1
@@ -2953,7 +2954,7 @@ class BpySceneCtx:
                 total_w = (nx - 1) * 1.5
                 x_coords = np.linspace(center[0] - total_w/2, center[0] + total_w/2, nx)
                 
-            # 计算 Y 轴坐标 (居中排布)
+            # Compute Y coordinates (centered layout)
             if ny <= 1:
                 y_coords = [center[1]]
                 ny = 1
@@ -2961,7 +2962,7 @@ class BpySceneCtx:
                 total_h = (ny - 1) * 1.5
                 y_coords = np.linspace(center[1] - total_h/2, center[1] + total_h/2, ny)
             
-            # 每个光源使用恒定强度，确保大房间亮度自动增加
+            # Constant per-light intensity so larger rooms get proportionally brighter
             each_intensity = self.config.get("array_light_intensity", 50.0)
             count = 0
             for x in x_coords:
@@ -2970,14 +2971,14 @@ class BpySceneCtx:
                     l_name = f"ArrayLight_{count}"
                     l_data = bpy.data.lights.new(name=l_name, type='AREA')
                     l_data.shape = 'DISK'
-                    l_data.size = 0.3  # 直径 0.3 米的圆盘
+                    l_data.size = 0.3  # 0.3m diameter disk
                     l_data.energy = each_intensity
                     l_data.color = realistic_warm
                     
                     l_obj = bpy.data.objects.new(name=l_name, object_data=l_data)
                     self.scene_collection.objects.link(l_obj)
                     l_obj.location = (x, y, light_z)
-            print(f"💡 已添加加密阵列区域光 x{count} (Each Intensity={each_intensity}, Total={each_intensity*count})")
+            print(f"💡 Added dense array area lights x{count} (Each Intensity={each_intensity}, Total={each_intensity*count})")
         
         self.if_set_lights = True
 
@@ -3154,7 +3155,7 @@ class BpySceneCtx:
                 bg.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
                 bg.inputs["Strength"].default_value = 0.0
 
-        # 关闭抗锯齿/降噪，保证语义 PNG 像素与 JSON color 精确一致
+        # Disable AA/denoising so semantic PNG pixels match JSON colors exactly
         cycles = getattr(self.scene, "cycles", None)
         if cycles is not None:
             backup["cycles"] = {
@@ -3230,13 +3231,13 @@ class BpySceneCtx:
 
     @contextmanager
     def _semantic_render_engine(self):
-        """语义 / 隔离 mask 渲染：透视用 EEVEE；equirectangular 全景必须用 Cycles。"""
+        """Semantic / isolated mask rendering: EEVEE for perspective; equirectangular panorama requires Cycles."""
         render = self.scene.render
         prev_engine = render.engine
         if self._is_equirectangular_camera(self.scene):
             cycles_engine = "CYCLES"
             if prev_engine != cycles_engine:
-                print("🎨 全景语义渲染使用 Cycles（EEVEE 不支持 EQUIRECTANGULAR 投影）")
+                print("🎨 Panoramic semantic rendering uses Cycles (EEVEE does not support EQUIRECTANGULAR projection)")
                 render.engine = cycles_engine
             try:
                 yield
@@ -3293,7 +3294,7 @@ class BpySceneCtx:
         self,
         temp_dir: Optional[str] = None,
     ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
-        """渲染全场景语义图（调用方应已切换 EEVEE）。"""
+        """Render full-scene semantic image (caller should have switched to EEVEE)."""
         import imageio
         import tempfile
 
@@ -3363,7 +3364,7 @@ class BpySceneCtx:
         mask_path: str,
         temp_dir: str,
     ) -> int:
-        """仅渲染 target_node，保存二值 mask 并返回像素数。"""
+        """Render target_node only, save binary mask, return pixel count."""
         if target_node is None or color is None:
             return 0
         try:
@@ -3453,7 +3454,7 @@ class BpySceneCtx:
         *,
         save_artifacts: bool = True,
     ) -> Tuple[np.ndarray, List[Dict[str, Any]], Dict[Tuple[str, str], int]]:
-        """全场景 semantic + 每物体隔离 mask；透视用 EEVEE，全景 equirectangular 用 Cycles。"""
+        """Full-scene semantic + per-object isolated masks; EEVEE for perspective, Cycles for equirectangular panorama."""
         try:
             from . import visibility_mask as vm
         except ImportError:
@@ -3508,9 +3509,9 @@ class BpySceneCtx:
                 json.dump(self._semantic_metadata(objects), f, indent=2, ensure_ascii=False)
             bbox_overlay_path = util.save_bbox_2d_overlay_png(output_path, objects)
             if bbox_overlay_path:
-                print(f"✅ 检测框可视化: {bbox_overlay_path}")
-            print(f"✅ 语义图已导出: {semantic_path}")
-            print(f"✅ 语义 mask 已导出: {masks_dir} ({len(index_objects)} 个)")
+                print(f"✅ Bounding box visualization: {bbox_overlay_path}")
+            print(f"✅ Semantic map exported: {semantic_path}")
+            print(f"✅ Semantic masks exported: {masks_dir} ({len(index_objects)} items)")
 
         result = (semantic_rgb, objects, overall_pixels_map)
         self._semantic_view_cache[cache_key] = result
@@ -3544,9 +3545,9 @@ class BpySceneCtx:
         write_ssl: bool = True,
         **kwargs,
     ):
-        """像素对齐俯视图：平移 SSL 使图像左上角对应地面 (0,0)，输出 topdown.png / camera_para.json。
+        """Pixel-aligned top-down view: translate SSL so image top-left maps to floor (0,0); outputs topdown.png / camera_para.json.
 
-        align 已提供时跳过二次平移（场景已在 pixel-aligned SSL 下）；write_ssl=False 时不写 ssl.txt。
+        Skip second translation when align is provided (scene already in pixel-aligned SSL); no ssl.txt when write_ssl=False.
         """
         for key in (
             "export_glb", "export_point_cloud", "export_voxel", "visible_geometry",
@@ -3594,7 +3595,7 @@ class BpySceneCtx:
         if use_HDRI:
             hdri_path = self.config.get("hdri_path")
             if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
-                print(f"🌇 使用 HDRI 环境光: {hdri_path}")
+                print(f"🌇 Using HDRI environment lighting: {hdri_path}")
 
         camera_position = np.array(align["camera_position_ssl"], dtype=float)
         look_at_target = np.array(align["look_at_target_ssl"], dtype=float)
@@ -3668,7 +3669,7 @@ class BpySceneCtx:
 
         depth_scale = None
         try:
-            print(f"🎬 像素对齐俯视图渲染 ({width}x{height})...")
+            print(f"🎬 Pixel-aligned top-down view rendering ({width}x{height})...")
             if render_depth:
                 depth_path = os.path.join(output_dir, "topdown_depth.png")
                 depth_scale = util_bpy.render_color_and_depth_png(
@@ -3714,7 +3715,7 @@ class BpySceneCtx:
             align["look_at_target_ssl"],
             [0.0, 0.0, 1.0],
         )
-        print(f"✅ 像素对齐俯视图完成: {output_dir}")
+        print(f"✅ Pixel-aligned top-down view complete: {output_dir}")
 
     def topdown_view(self, output_path: str, width: int = 1024, height: int = 1024,
                      geometry_mode: str = "gltf", show_wall: bool = True, 
@@ -3739,7 +3740,7 @@ class BpySceneCtx:
                      skip_render: bool = False,
                      write_ssl: bool = True,
                      write_camera_para: bool = True):
-        """俯视图渲染：output_path 为目录时在 {output}/topdown/topdown.png 输出单帧及附属产物。"""
+        """Top-down render: when output_path is a directory, write single frame and artifacts to {output}/topdown/topdown.png."""
         output_path = self._resolve_topdown_output_path(output_path)
         view_dir = os.path.dirname(output_path) or "."
         total_start = time.perf_counter()
@@ -3770,7 +3771,7 @@ class BpySceneCtx:
                 )
                 construct_time = time.perf_counter() - construct_start
 
-            # 设置阴影可见性
+            # Set shadow visibility
             for wall_info in self.mesh_nodes["walls"].values():
                 wall_obj = wall_info.get("node")
                 if wall_obj:
@@ -3792,9 +3793,9 @@ class BpySceneCtx:
             if use_HDRI:
                 hdri_path = self.config.get("hdri_path")
                 if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
-                    print(f"🌇 使用 HDRI 环境光: {hdri_path}")
+                    print(f"🌇 Using HDRI environment lighting: {hdri_path}")
                 else:
-                    print(f"⚠️ HDRI 文件不可用或未配置: {hdri_path}")
+                    print(f"⚠️ HDRI file unavailable or not configured: {hdri_path}")
 
             center = self.context["meta"]["center"]
             span = self.context["meta"]["span"]
@@ -3867,7 +3868,7 @@ class BpySceneCtx:
                     self.context["walls"]
                 )
                 if transparent_wall_ids:
-                    print(f"🔍 检测到 {len(transparent_wall_ids)} 面遮挡墙体，设为透明...")
+                    print(f"🔍 Detected {len(transparent_wall_ids)} occluding walls, setting to transparent...")
                     for wall_id in transparent_wall_ids:
                         wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
                         replacements = util_bpy.apply_wall_transparency(wall_obj, transparent_alpha)
@@ -3893,7 +3894,7 @@ class BpySceneCtx:
             self.scene.render.filepath = output_path
             self.scene.render.image_settings.color_mode = 'RGBA'
 
-            print(f"🎬 渲染中 ({width}x{height})..." if not skip_render else "⏭️  跳过 Cycles 渲染（主帧产物已存在）")
+            print(f"🎬 Rendering ({width}x{height})..." if not skip_render else "⏭️  Skipping Cycles render (main frame output already exists)")
             depth_scale = None
             transparent_objects = {
                 self.mesh_nodes["walls"].get(wall_id, {}).get("node")
@@ -3933,11 +3934,11 @@ class BpySceneCtx:
                     if not export_glb:
                         skipped_geom.append("GLB")
                     if not do_visible_ply:
-                        skipped_geom.append("点云")
+                        skipped_geom.append("point cloud")
                     if not export_voxel:
-                        skipped_geom.append("体素")
+                        skipped_geom.append("voxel")
                     if skipped_geom:
-                        print(f"⏭️  跳过可见几何导出（已存在）: {', '.join(skipped_geom)}")
+                        print(f"⏭️  Skipping visible geometry export (already exists): {', '.join(skipped_geom)}")
                 if render_semantic or visible_geometry:
                     self.render_semantic_bundle(output_path, save_artifacts=True)
                 if visible_geometry and (export_glb or do_visible_ply or export_voxel):
@@ -3999,12 +4000,12 @@ class BpySceneCtx:
             save_time = time.perf_counter() - save_start
 
             total_time = time.perf_counter() - total_start
-            print(f"✅ 渲染完成! 保存至: {output_path}")
-            print(f"   构建: {construct_time:.2f}s, 设置: {setup_time:.2f}s, 渲染: {render_time:.2f}s, 保存: {save_time:.2f}s, 总耗时: {total_time:.2f}s")
+            print(f"✅ Render complete! Saved to: {output_path}")
+            print(f"   Build: {construct_time:.2f}s, Setup: {setup_time:.2f}s, Render: {render_time:.2f}s, Save: {save_time:.2f}s, Total: {total_time:.2f}s")
 
     @staticmethod
     def _is_nested_point_list(values) -> bool:
-        """是否为「列表套列表」：[[x,y,z], ...]；单个 [x,y,z] 返回 False。"""
+        """True for nested list [[x,y,z], ...]; single [x,y,z] returns False."""
         if not isinstance(values, (list, tuple)) or len(values) == 0:
             return False
         first = values[0]
@@ -4016,7 +4017,7 @@ class BpySceneCtx:
         return self._is_nested_point_list(values)
 
     def _is_view_sequence(self, camera_position, look_at_target=None, up_vector=None) -> bool:
-        """camera / look_at / up 任一侧为多层列表即走序列渲染。"""
+        """Sequence rendering when camera / look_at / up is a nested list on any side."""
         if self._is_nested_point_list(camera_position):
             return True
         if look_at_target is not None and self._is_nested_point_list(look_at_target):
@@ -4030,20 +4031,20 @@ class BpySceneCtx:
         return path.lower().endswith((".png", ".jpg", ".jpeg", ".exr", ".webp"))
 
     def _resolve_view_output_path(self, output_path: str, view_dir_name: Optional[str] = None) -> str:
-        """单相机：output_path 为目录时分配 {view_dir_name 或 dir_stamp}/{image_stamp}.png。"""
+        """Single camera: when output_path is a directory, use {view_dir_name or dir_stamp}/{image_stamp}.png."""
         if self._is_image_output_path(output_path):
             return output_path
         return util.resolve_view_image_path(output_path, view_dir_name=view_dir_name)
 
     def _resolve_topdown_output_path(self, output_path: str) -> str:
-        """俯视图：output_path 为目录时在 {output}/topdown/topdown.png 输出单帧。"""
+        """Top-down: when output_path is a directory, write single frame to {output}/topdown/topdown.png."""
         if self._is_image_output_path(output_path):
             return output_path
         return util.resolve_topdown_image_path(output_path)
 
     @staticmethod
     def _camera_para_path(output_path: str) -> str:
-        """与主图同名前缀：{image_basename}_camera_para.json"""
+        """Same basename prefix as main image: {image_basename}_camera_para.json"""
         view_dir = os.path.dirname(output_path) or "."
         base = os.path.splitext(os.path.basename(output_path))[0]
         return os.path.join(view_dir, f"{base}_camera_para.json")
@@ -4055,7 +4056,7 @@ class BpySceneCtx:
         ref_look_at,
         ref_world_up=None,
     ) -> str:
-        """导出 ``ssl_opencv.txt``（OpenCV 相机系，参考相机为 ref_*）。"""
+        """Export ``ssl_opencv.txt`` (OpenCV camera frame; reference camera ref_*)."""
         from . import ssl_opencv
 
         return ssl_opencv.write_opencv_ssl(
@@ -4072,11 +4073,10 @@ class BpySceneCtx:
         look_at_target=None,
         up_vector=None,
     ) -> Tuple[list, list, list]:
-        """展开序列参数：多层列表侧定帧数；单层 [x,y,z] 向对侧广播（多对一 / 一对多 / 一对一）。"""
+        """Expand sequence args: nested list sets frame count; flat [x,y,z] broadcasts (many-to-one / one-to-many / one-to-one)."""
         center = self.context["meta"]["center"]
         z_max = self.context["meta"]["z_max"]
         default_look_at = [center[0], center[1], z_max / 2]
-        default_up = [0.0, 0.0, 1.0]
 
         cam_is_seq = self._is_nested_point_list(camera_position)
         look_is_seq = look_at_target is not None and self._is_nested_point_list(look_at_target)
@@ -4091,11 +4091,11 @@ class BpySceneCtx:
             seq_lengths.append(len(up_vector))
 
         if not seq_lengths:
-            raise ValueError("序列模式需要 camera_position / look_at_target / up_vector 至少一侧为多层列表")
+            raise ValueError("Sequence mode requires at least one of camera_position / look_at_target / up_vector to be a nested list")
 
         if len(set(seq_lengths)) != 1:
             raise ValueError(
-                f"多层列表的 camera_position / look_at_target / up_vector 长度须一致: {seq_lengths}"
+                f"Nested lists for camera_position / look_at_target / up_vector must have the same length: {seq_lengths}"
             )
         n = seq_lengths[0]
 
@@ -4112,7 +4112,10 @@ class BpySceneCtx:
             look_ats = [list(look_at_target)] * n
 
         if up_vector is None:
-            ups = [default_up] * n
+            ups = [
+                geo_cv.resolve_render_view_up_vector(cam, look)
+                for cam, look in zip(cam_positions, look_ats)
+            ]
         elif up_is_seq:
             ups = [list(p) for p in up_vector]
         else:
@@ -4134,8 +4137,9 @@ class BpySceneCtx:
 
         if look_at_target is None:
             look_at_target = [center[0], center[1], z_max / 2]
-        if up_vector is None:
-            up_vector = [0.0, 0.0, 1.0]
+        up_vector = geo_cv.resolve_render_view_up_vector(
+            camera_position, look_at_target, up_vector
+        )
 
         camera_position = np.array(camera_position, dtype=float)
         look_at_target = np.array(look_at_target, dtype=float)
@@ -4197,10 +4201,10 @@ class BpySceneCtx:
             camera_data.type = 'PANO'
             pano_settings = camera_data if hasattr(camera_data, "panorama_type") else getattr(camera_data, "cycles", None)
             if pano_settings is None:
-                raise RuntimeError("当前 Blender 相机不支持全景设置，无法导出 equirectangular 全景图")
+                raise RuntimeError("Current Blender camera does not support panorama settings, cannot export equirectangular panorama")
             pano_settings.panorama_type = 'EQUIRECTANGULAR'
             if getattr(pano_settings, "panorama_type", None) != 'EQUIRECTANGULAR':
-                raise RuntimeError("无法将 Blender 全景相机设置为 EQUIRECTANGULAR")
+                raise RuntimeError("Failed to set Blender panorama camera to EQUIRECTANGULAR")
             if hasattr(pano_settings, "longitude_min"):
                 pano_settings.longitude_min = -np.pi
             if hasattr(pano_settings, "longitude_max"):
@@ -4219,7 +4223,7 @@ class BpySceneCtx:
 
     @staticmethod
     def _is_equirectangular_camera(scene=None) -> bool:
-        """当前 scene.camera 是否为 Cycles equirectangular 全景相机。"""
+        """Whether scene.camera is a Cycles equirectangular panorama camera."""
         scene = scene or bpy.context.scene
         camera_obj = getattr(scene, "camera", None)
         camera_data = getattr(camera_obj, "data", None) if camera_obj is not None else None
@@ -4288,7 +4292,7 @@ class BpySceneCtx:
         width, height = self._pano_dimensions(pano_resolution)
         prev_engine = self.scene.render.engine
         if prev_engine != 'CYCLES':
-            print(f"🔄 全景渲染切换到 Cycles equirectangular (原引擎: {prev_engine})")
+            print(f"🔄 Panorama rendering switched to Cycles equirectangular (previous engine: {prev_engine})")
             self.scene.render.engine = 'CYCLES'
             if hasattr(self.scene, "cycles"):
                 self.scene.cycles.samples = self.config.get("blender_samples", 32)
@@ -4301,7 +4305,7 @@ class BpySceneCtx:
             camera_obj, camera_data, prev_camera = self._create_render_camera(
                 camera_matrix, float(np.pi), width, height, panoramic=True
             )
-            print(f"🎬 全景渲染中 ({width}x{height}, EQUIRECTANGULAR 360x180)...")
+            print(f"🎬 Panorama rendering ({width}x{height}, EQUIRECTANGULAR 360x180)...")
             self.scene.render.filepath = pano_output_path
             render = self.scene.render
             render.image_settings.color_mode = 'RGBA'
@@ -4367,7 +4371,7 @@ class BpySceneCtx:
                 opencv_ref_look if opencv_ref_look is not None else world_look_w,
                 opencv_ref_up if opencv_ref_up is not None else world_up_w,
             )
-            print(f"✅ 全景渲染完成! 保存至: {pano_output_path}")
+            print(f"✅ Panorama render complete! Saved to: {pano_output_path}")
             return pano_output_path
         finally:
             self._destroy_render_camera(camera_obj, camera_data, prev_camera, self.scene)
@@ -4376,7 +4380,7 @@ class BpySceneCtx:
 
     @staticmethod
     def _remove_camera_blocks(camera_obj, camera_data):
-        """删除临时相机；object 移除后 data 可能已被 Blender 连带删除。"""
+        """Remove temporary camera; data may already be removed with the object."""
         data_name = camera_data.name if camera_data else None
         if camera_obj and camera_obj.name in bpy.data.objects:
             bpy.data.objects.remove(camera_obj, do_unlink=True)
@@ -4403,7 +4407,7 @@ class BpySceneCtx:
             self.context["walls"]
         )
         if transparent_wall_ids:
-            print(f"🔍 检测到 {len(transparent_wall_ids)} 面遮挡墙体，设为透明...")
+            print(f"🔍 Detected {len(transparent_wall_ids)} occluding walls, setting to transparent...")
             for wall_id in transparent_wall_ids:
                 wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
                 replacements = util_bpy.apply_wall_transparency(wall_obj, transparent_alpha)
@@ -4482,9 +4486,9 @@ class BpySceneCtx:
         write_ssl: bool = True,
         write_camera_para: bool = True,
     ):
-        """多相机序列：所有帧写入同一序列目录；可见几何在该目录合并导出一份（多相机并集）。
+        """Multi-camera sequence: all frames in one sequence directory; visible geometry merged once there (multi-camera union).
 
-        目录名默认为 ``{timestamp}_seq``；``view_dir_name`` 可指定固定名（如 ``auto_path_0008_seq``）。
+        Default directory ``{timestamp}_seq``; ``view_dir_name`` can fix the name (e.g. ``auto_path_0008_seq``).
         """
         total_start = time.perf_counter()
         seq_dir, dir_stamp = util.allocate_sequence_view_output_dir(output_root, view_dir_name)
@@ -4523,10 +4527,10 @@ class BpySceneCtx:
             if use_HDRI:
                 hdri_path = self.config.get("hdri_path")
                 if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
-                    print(f"🌇 使用 HDRI 环境光: {hdri_path}")
+                    print(f"🌇 Using HDRI environment lighting: {hdri_path}")
                     self.scene.render.film_transparent = hdri_transparent_background
                 else:
-                    print(f"⚠️ HDRI 文件不可用或未配置: {hdri_path}")
+                    print(f"⚠️ HDRI file unavailable or not configured: {hdri_path}")
 
             z_max = self.context["meta"]["z_max"]
             frame_states = []
@@ -4560,12 +4564,12 @@ class BpySceneCtx:
                 if skip_render and frame_idx < len(existing_frames):
                     output_path = existing_frames[frame_idx]
                     image_stamp = os.path.splitext(os.path.basename(output_path))[0]
-                    print(f"⏭️  跳过序列帧 {frame_idx + 1}/{n_frames} Cycles 渲染 -> {output_path}")
+                    print(f"⏭️  Skipping sequence frame {frame_idx + 1}/{n_frames} Cycles render -> {output_path}")
                 else:
                     image_stamp = util.allocate_millis_stamp(exclude=used_frame_stamps)
                     used_frame_stamps.add(image_stamp)
                     output_path = os.path.join(seq_dir, f"{image_stamp}.png")
-                    print(f"🎬 序列帧 {frame_idx + 1}/{n_frames} -> {output_path}")
+                    print(f"🎬 Sequence frame {frame_idx + 1}/{n_frames} -> {output_path}")
                 view_dir = seq_dir
 
                 camera_position, look_at_target, camera_matrix, fov_y = self._build_view_camera_matrix_and_fov(
@@ -4753,7 +4757,7 @@ class BpySceneCtx:
                 self.write_opencv_ssl_for_view(pano_ssl_dir, world_cam0, world_look0, world_up0)
 
         total_time = time.perf_counter() - total_start
-        print(f"✅ 序列渲染完成 ({n_frames} 帧), 序列目录: {seq_dir}, 总耗时: {total_time:.2f}s")
+        print(f"✅ Sequence render complete ({n_frames} frames), sequence dir: {seq_dir}, total time: {total_time:.2f}s")
 
     def render_view(self, output_path: str, camera_position: list, look_at_target: list = None, 
                     width: int = 1024, height: int = 1024, up_vector: list = None, 
@@ -4831,7 +4835,9 @@ class BpySceneCtx:
         else:
             world_look_w = list(look_at_target)
         world_cam_w = list(camera_position)
-        world_up_raw = up_vector if up_vector is not None else [0.0, 0.0, 1.0]
+        world_up_raw = geo_cv.resolve_render_view_up_vector(
+            world_cam_w, world_look_w, up_vector
+        )
 
         total_start = time.perf_counter()
 
@@ -4869,18 +4875,19 @@ class BpySceneCtx:
             if use_HDRI:
                 hdri_path = self.config.get("hdri_path")
                 if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
-                    print(f"🌇 使用 HDRI 环境光: {hdri_path}")
+                    print(f"🌇 Using HDRI environment lighting: {hdri_path}")
                     self.scene.render.film_transparent = hdri_transparent_background
                 else:
-                    print(f"⚠️ HDRI 文件不可用或未配置: {hdri_path}")
+                    print(f"⚠️ HDRI file unavailable or not configured: {hdri_path}")
             setup_time = time.perf_counter() - setup_start
 
             bounds = self.context["meta"]["bounds"]
 
             if look_at_target is None:
                 look_at_target = [center[0], center[1], z_max / 2]
-            if up_vector is None:
-                up_vector = [0.0, 0.0, 1.0]
+            up_vector = geo_cv.resolve_render_view_up_vector(
+                camera_position, look_at_target, up_vector
+            )
             camera_position = np.array(camera_position, dtype=float)
             look_at_target = np.array(look_at_target, dtype=float)
             up_vector = np.array(up_vector, dtype=float)
@@ -4939,7 +4946,7 @@ class BpySceneCtx:
                     self.context["walls"]
                 )
                 if transparent_wall_ids:
-                    print(f"🔍 检测到 {len(transparent_wall_ids)} 面遮挡墙体，设为透明...")
+                    print(f"🔍 Detected {len(transparent_wall_ids)} occluding walls, setting to transparent...")
                     for wall_id in transparent_wall_ids:
                         wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
                         replacements = util_bpy.apply_wall_transparency(wall_obj, transparent_alpha)
@@ -4969,7 +4976,7 @@ class BpySceneCtx:
             render.image_settings.color_mode = 'RGBA'
             render.film_transparent = hdri_transparent_background
 
-            print(f"🎬 渲染中 ({width}x{height})..." if not skip_render else "⏭️  跳过 Cycles 渲染（主帧产物已存在）")
+            print(f"🎬 Rendering ({width}x{height})..." if not skip_render else "⏭️  Skipping Cycles render (main frame output already exists)")
             depth_scale = None
             transparent_objects = {
                 self.mesh_nodes["walls"].get(wall_id, {}).get("node")
@@ -5009,11 +5016,11 @@ class BpySceneCtx:
                     if not export_glb:
                         skipped_geom.append("GLB")
                     if not do_visible_ply:
-                        skipped_geom.append("点云")
+                        skipped_geom.append("point cloud")
                     if not export_voxel:
-                        skipped_geom.append("体素")
+                        skipped_geom.append("voxel")
                     if skipped_geom:
-                        print(f"⏭️  跳过可见几何导出（已存在）: {', '.join(skipped_geom)}")
+                        print(f"⏭️  Skipping visible geometry export (already exists): {', '.join(skipped_geom)}")
                 if render_semantic or visible_geometry:
                     self.render_semantic_bundle(output_path, save_artifacts=True)
                 if visible_geometry and (export_glb or do_visible_ply or export_voxel):
@@ -5064,10 +5071,10 @@ class BpySceneCtx:
                         reference_frame=True,
                     )
                 total_time = time.perf_counter() - total_start
-                print(f"✅ 渲染完成! 保存至: {output_path}")
-                print(f"   构建: {construct_time:.2f}s, 设置: {setup_time:.2f}s, 渲染: {render_time:.2f}s, 总耗时: {total_time:.2f}s")
+                print(f"✅ Render complete! Saved to: {output_path}")
+                print(f"   Build: {construct_time:.2f}s, Setup: {setup_time:.2f}s, Render: {render_time:.2f}s, Total: {total_time:.2f}s")
             except Exception as e:
-                print(f"❌ 渲染失败: {e}")
+                print(f"❌ Render failed: {e}")
                 raise
             finally:
                 for wall_id, slots in wall_transparency_records.items():
@@ -5100,28 +5107,28 @@ class BpySceneCtx:
             if write_ssl:
                 self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
     
-# ==================== 测试代码 ====================
+# ==================== Test code ====================
 
 
 
 
 if __name__ == "__main__":
     print("="*60)
-    print("🔍 检查 Blender Python 环境")
+    print("🔍 Checking Blender Python environment")
     print("="*60)
-    print(f"✅ bpy 版本: {bpy.app.version_string}")
-    print(f"✅ Blender 版本: {'.'.join(map(str, bpy.app.version))}")
+    print(f"✅ bpy version: {bpy.app.version_string}")
+    print(f"✅ Blender version: {'.'.join(map(str, bpy.app.version))}")
     print()
     
-    # 显示渲染设备
-    print("🖥️  可用的渲染设备:")
+    # List render devices
+    print("🖥️  Available render devices:")
     prefs = bpy.context.preferences.addons['cycles'].preferences
     for device in prefs.get_devices_for_type('CUDA'):
-        status = "✅ 已启用" if device.use else "⚪ 未启用"
+        status = "✅ Enabled" if device.use else "⚪ Disabled"
         print(f"   - {device.name} (type: {device.type}) {status}")
     print()
     
-    # 测试场景渲染
+    # Test scene rendering
     line = 15
     jsonl_path = '/data-nas/data/experiments/mushui/datasets/manycore/spatiallm_raw.jsonl'
     base_dir = os.path.join(os.path.dirname(__file__), '..', '..')
@@ -5131,7 +5138,7 @@ if __name__ == "__main__":
     
     try:
         data = util.read_jsonl_line(jsonl_path, line)
-        print(f"📁 加载场景: {data['room']['room_type']} ({len(data['bbox'])} 个物体)")
+        print(f"📁 Loading scene: {data['room']['room_type']} ({len(data['bbox'])} objects)")
         
         ctx = BpySceneCtx(data['room']['room_type'])
         ctx.add_walls(data['wall'])
@@ -5140,7 +5147,7 @@ if __name__ == "__main__":
         ctx.add_boxes(data['bbox'])
         
         print("\n" + "="*60)
-        print("渲染俯视图")
+        print("Rendering top-down view")
         print("="*60)
         ctx.topdown_view(topdown_path, geometry_mode="gltf",
                         show_wall=True, show_window=True, show_door=True, show_ceiling=False, auto_fov=True, auto_transparent=False, use_HDRI=True, render_depth=True)
@@ -5156,9 +5163,9 @@ if __name__ == "__main__":
         ]
         for view_name, camera_pos in views:
             output_file = os.path.join(test_dir, f'scene_view_{view_name}.png')
-            print(f"\n📷 渲染 {view_name} 视角...")
-            print(f"   相机位置: {camera_pos}")
-            print(f"   看向目标: {look_at}")
+            print(f"\n📷 Rendering {view_name} view...")
+            print(f"   Camera position: {camera_pos}")
+            print(f"   Look-at target: {look_at}")
             ctx.render_view(
                 output_path=output_file,
                 camera_position=camera_pos,
@@ -5177,10 +5184,10 @@ if __name__ == "__main__":
                 render_depth=False
             )
         
-        print("\n✅ 全部完成!")
+        print("\n✅ All done!")
         print(ctx.get_context())
         
     except Exception as e:
-        print(f"\n❌ 失败: {e}")
+        print(f"\n❌ Failed: {e}")
         import traceback
         traceback.print_exc()

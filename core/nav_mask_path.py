@@ -1,4 +1,4 @@
-"""基于俯视图深度的 nav mask 地板闭环路径采样。"""
+"""Top-down depth-based nav mask floor closed-loop path sampling."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _normalize_category(name: str) -> str:
 
 
 def _build_semantic_palette(meta: Dict[str, Any]) -> Tuple[np.ndarray, List[str]]:
-    """构建语义调色板（含 background），用于最近邻像素归属。"""
+    """Build semantic palette (including background) for nearest-neighbor pixel assignment."""
     palette: List[Tuple[int, int, int]] = []
     categories: List[str] = []
     seen: set[Tuple[Tuple[int, int, int], str]] = set()
@@ -79,10 +79,10 @@ def build_semantic_category_masks(
     semantic_png_path: str,
     semantic_json_path: str,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
-    """从语义图提取墙/门/窗 mask 与地板 mask。
+    """Extract wall/door/window mask and floor mask from semantic image.
 
-    语义图在 Cycles 下边界会有抗锯齿中间色，不能用精确 RGB 匹配；
-    对每个像素取 JSON 调色板中的最近邻颜色再按 category 归类。
+    Cycles semantic boundaries have anti-aliased intermediate colors; exact RGB match fails.
+    Assign each pixel to nearest palette color from JSON, then group by category.
     """
     if not os.path.isfile(semantic_png_path):
         raise FileNotFoundError(semantic_png_path)
@@ -96,7 +96,7 @@ def build_semantic_category_masks(
     rgb = img[..., :3] if img.ndim == 3 else np.stack([img] * 3, axis=-1)
     palette, categories = _build_semantic_palette(meta)
     if len(palette) <= 1:
-        raise RuntimeError("语义 JSON 缺少有效 entity 颜色")
+        raise RuntimeError("Semantic JSON missing valid entity colors")
 
     h, w = rgb.shape[:2]
     pixels = rgb.reshape(-1, 3).astype(np.float32)
@@ -128,7 +128,7 @@ def build_semantic_category_masks(
 
 
 def _clean_category_mask(mask: np.ndarray, *, min_component_area: int = 16) -> np.ndarray:
-    """去掉分类 mask 中面积过小的孤立像素（抗锯齿误归属）。"""
+    """Remove tiny isolated pixels from category mask (anti-aliasing mis-assignment)."""
     labeled, count = ndimage.label(mask)
     if count <= 0:
         return mask.astype(bool)
@@ -145,7 +145,7 @@ def combine_nav_mask(
     structure_mask: np.ndarray,
     floor_mask: np.ndarray,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """最终 nav mask = (depth_mask - structure_mask) ∪ floor_mask。"""
+    """Final nav mask = (depth_mask - structure_mask) ∪ floor_mask."""
     depth_mask = depth_mask.astype(bool)
     structure_mask = structure_mask.astype(bool)
     floor_mask = floor_mask.astype(bool)
@@ -162,7 +162,7 @@ def combine_nav_mask(
 
 
 def _reference_floor_depth_m(camera_para: Dict[str, Any]) -> float:
-    """俯视图相机到地面 look_at 的距离（米），即期望地板深度。"""
+    """Distance (m) from top-down camera to ground look_at, i.e. expected floor depth."""
     cam = np.asarray(camera_para["camera_position"], dtype=float)
     look = np.asarray(camera_para["look_at_target"], dtype=float)
     return float(np.linalg.norm(cam - look))
@@ -174,12 +174,12 @@ def build_nav_mask_from_depth(
     *,
     tolerance_m: float = DEFAULT_DEPTH_TOLERANCE_M,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """深度在「相机到地面距离 ± tolerance」内的像素视为可行走区域。"""
+    """Pixels with depth within camera-to-ground distance ± tolerance are walkable."""
     if not os.path.isfile(depth_png_path):
         raise FileNotFoundError(depth_png_path)
     depth_scale = camera_para.get("depth_scale")
     if depth_scale is None:
-        raise ValueError("camera_para.json 缺少 depth_scale，需先渲染 topdown_depth.png")
+        raise ValueError("camera_para.json missing depth_scale; render topdown_depth.png first")
 
     try:
         from . import util
@@ -227,11 +227,11 @@ def _contour_to_xy(contour_yx: np.ndarray) -> np.ndarray:
 
 
 def _mask_to_polygon_with_holes(mask: np.ndarray) -> Optional[Polygon]:
-    """从二值 mask 构建带洞 polygon（外轮廓 + 内部孔洞）。"""
+    """Build polygon with holes from binary mask (outer contour + interior holes)."""
     try:
         from skimage.measure import find_contours
     except ImportError as exc:
-        raise RuntimeError("需要 scikit-image (skimage.measure.find_contours)") from exc
+        raise RuntimeError("scikit-image required (skimage.measure.find_contours)") from exc
 
     contours = find_contours(mask.astype(float), 0.5)
     contours_xy = [_contour_to_xy(c) for c in contours if len(c) >= 3]
@@ -271,10 +271,10 @@ def _inset_boundary_ring(
     poly: Polygon,
     inset_px: float,
 ) -> Tuple[LineString, Dict[str, Any]]:
-    """带洞 polygon 向内 offset，得到单条贴边内绕闭合线。"""
+    """Inset a polygon with holes inward to get a single boundary-following closed loop."""
     meta: Dict[str, Any] = {"inset_px": float(inset_px)}
     if poly.is_empty or poly.area <= 1e-6:
-        raise ValueError("nav mask polygon 无效")
+        raise ValueError("nav mask polygon invalid")
 
     meta["boundary_length_px"] = float(poly.exterior.length)
     meta["boundary_area_px2"] = float(poly.area)
@@ -292,7 +292,7 @@ def _inset_boundary_ring(
         inset_geom = max(inset_geom.geoms, key=lambda g: g.area)
         meta["inset_multipolygon_largest_only"] = True
     if inset_geom.geom_type != "Polygon":
-        raise ValueError(f"内偏移结果类型异常: {inset_geom.geom_type}")
+        raise ValueError(f"Unexpected inset geometry type: {inset_geom.geom_type}")
 
     ring = LineString(inset_geom.exterior.coords)
     meta["inset_ring_length_px"] = float(ring.length)
@@ -325,7 +325,7 @@ def _segment_in_mask(p0: List[int], p1: List[int], mask: np.ndarray) -> bool:
     try:
         from skimage.draw import line as sk_line
     except ImportError as exc:
-        raise RuntimeError("需要 scikit-image (skimage.draw.line)") from exc
+        raise RuntimeError("scikit-image required (skimage.draw.line)") from exc
 
     rr, cc = sk_line(int(p0[1]), int(p0[0]), int(p1[1]), int(p1[0]))
     h, w = mask.shape
@@ -358,7 +358,7 @@ def _ring_arc_in_mask(
     p0: List[int],
     p1: List[int],
 ) -> List[List[int]]:
-    """沿 ring 走弧连接 p0→p1，优先选完全落在 mask 内的方向。"""
+    """Walk ring arc from p0→p1; prefer direction that stays fully inside mask."""
     length = float(ring.length)
     if length <= 1e-9:
         return [p0, p1]
@@ -523,10 +523,10 @@ def sample_path_on_nav_mask(
     point_spacing_m: float = DEFAULT_POINT_SPACING_M,
     min_points: int = MIN_PATH_POINTS,
 ) -> Tuple[List[List[int]], List[List[int]], np.ndarray, Dict[str, Any]]:
-    """在 largest 连通 mask 内采样闭环路径（waypoints + 严格 mask 内 trajectory）。"""
+    """Sample closed loop path in largest connected mask (waypoints + trajectory strictly inside mask)."""
     ratio = float(pixel2real_ratio)
     if ratio <= 0:
-        raise ValueError("pixel2real_ratio 必须 > 0")
+        raise ValueError("pixel2real_ratio must be > 0")
 
     mask, comp_meta = _largest_component(nav_mask.astype(bool))
     sample_meta: Dict[str, Any] = {"component": comp_meta}
@@ -565,7 +565,7 @@ def sample_path_on_nav_mask(
     sample_meta["ring_length_m"] = ring_len * ratio
 
     if not traj_check["valid"]:
-        raise RuntimeError(f"trajectory 未完全落在 nav mask 内: {traj_check}")
+        raise RuntimeError(f"trajectory not fully inside nav mask: {traj_check}")
 
     return waypoints, trajectory, mask, sample_meta
 
@@ -580,7 +580,7 @@ def run_nav_mask_floor_path(
     output_dir: str,
     config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """在归一化俯视图目录上基于深度+语义 nav mask 采样地板闭环路径。"""
+    """Sample floor closed-loop path on normalized top-down dir using depth+semantic nav mask."""
     config = config or {}
     image_path = os.path.join(output_dir, "topdown.png")
     camera_para_path = os.path.join(output_dir, "camera_para.json")
@@ -601,7 +601,7 @@ def run_nav_mask_floor_path(
     spacing_m = float(config.get("nav_mask_point_spacing_m", DEFAULT_POINT_SPACING_M))
     tol_m = float(config.get("nav_mask_depth_tolerance_m", DEFAULT_DEPTH_TOLERANCE_M))
     print(
-        f"🗺️  深度+语义 nav mask 路径: inset={inset_m}m, spacing={spacing_m}m, "
+        f"🗺️  Depth+semantic nav mask path: inset={inset_m}m, spacing={spacing_m}m, "
         f"depth_tol=±{tol_m}m, pixel2real_ratio={ratio:.6f}"
     )
 
@@ -635,7 +635,7 @@ def run_nav_mask_floor_path(
     )
     if len(points_px) < MIN_PATH_POINTS:
         raise RuntimeError(
-            f"nav mask 采样失败: 仅 {len(points_px)} 点 (至少需要 {MIN_PATH_POINTS})"
+            f"nav mask sampling failed: only {len(points_px)} points (minimum {MIN_PATH_POINTS} required)"
         )
 
     points_ssl = pixel_points_to_ssl_ground(points_px, ratio)
@@ -687,7 +687,7 @@ def run_nav_mask_floor_path(
         image_path, points_px, overlay_path, trajectory_px=trajectory_px
     )
     print(
-        f"✅ 深度地板路径: {len(points_px)} waypoints, "
+        f"✅ Depth floor path: {len(points_px)} waypoints, "
         f"{len(trajectory_px)} trajectory pts → {json_path}"
     )
     return result

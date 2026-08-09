@@ -1,5 +1,5 @@
 """
-Blender 版本的辅助工具函数，供 scenebuilder_bpy.py 使用。
+Blender helper utilities for scenebuilder_bpy.py.
 """
 
 import os
@@ -21,7 +21,7 @@ import numpy as np
 
 
 def _preload_bpy() -> None:
-    """静默预加载 bpy，压制 NumPy 1.x/2.x ABI 的无害 Swig 报错。"""
+    """Silently preload bpy, suppressing harmless Swig ABI warnings from NumPy 1.x/2.x."""
     import sys
     import warnings
 
@@ -83,7 +83,7 @@ def create_floor_mesh_bpy(scene_collection, vertices, thickness=0.1, name="Floor
     mesh.from_pydata(verts, [], faces)
     mesh.update()
 
-    # 添加地板 UV 坐标 (x, y)
+    # Add floor UV coordinates (x, y)
     uv_layer = mesh.uv_layers.new(name="UVMap")
     for poly in mesh.polygons:
         for loop_index in poly.loop_indices:
@@ -168,25 +168,25 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
         return None
 
     wall_dir = wall_vec / wall_length
-    # normal 指向房间内部
+    # normal points into the room interior
     normal = np.array(orientation, dtype=float)[:2]
     
-    # 如果是隔断且没有有效法向量，构造一个
+    # For partitions without a valid normal, construct one
     if is_partition and np.linalg.norm(normal) < 1e-4:
         normal = np.array([-wall_dir[1], wall_dir[0]])
 
-    # 处理端点延长逻辑：如果端点有连接，向外延伸半个厚度以嵌入相邻墙体
+    # Endpoint extension: if an endpoint connects, extend outward by half thickness to embed into adjacent walls
     s_base = s_arr - wall_dir * (wall_thickness / 2.0) if extend_s else s_arr
     e_base = e_arr + wall_dir * (wall_thickness / 2.0) if extend_e else e_arr
 
     if is_partition:
-        # 隔断墙：居中模式，向法线正负方向各偏移一半厚度
+        # Partition wall: centered mode, offset half thickness along both normal directions
         inner_s_p = s_base + normal * (wall_thickness / 2.0)
         inner_e_p = e_base + normal * (wall_thickness / 2.0)
         outer_s_p = s_base - normal * (wall_thickness / 2.0)
         outer_e_p = e_base - normal * (wall_thickness / 2.0)
     else:
-        # 外墙：单向偏移模式（内侧在中心线上，外侧向外偏移）
+        # Exterior wall: one-sided offset (inner face on centerline, outer face offset outward)
         inner_s_p = s_base
         inner_e_p = e_base
         outward_normal = -normal
@@ -204,7 +204,7 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
     obj = bpy.data.objects.new(name, mesh)
     scene_collection.objects.link(obj)
 
-    # 顶点定义：0-3 为一侧，4-7 为另一侧
+    # Vertices: 0-3 on one side, 4-7 on the other
     verts = [
         (inner_s_p[0], inner_s_p[1], 0.0),        # 0
         (inner_e_p[0], inner_e_p[1], 0.0),        # 1
@@ -216,29 +216,29 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
         (outer_s_p[0], outer_s_p[1], height),     # 7
     ]
 
-    # 定义 6 个面
+    # Define 6 faces
     faces = [
-        (0, 3, 2, 1), # 侧面 A
-        (4, 5, 6, 7), # 侧面 B
-        (3, 7, 6, 2), # 顶面
-        (0, 1, 5, 4), # 底面
-        (0, 4, 7, 3), # 端面 S
-        (1, 2, 6, 5), # 端面 E
+        (0, 3, 2, 1), # side A
+        (4, 5, 6, 7), # side B
+        (3, 7, 6, 2), # top
+        (0, 1, 5, 4), # bottom
+        (0, 4, 7, 3), # end S
+        (1, 2, 6, 5), # end E
     ]
 
     mesh.from_pydata(verts, [], faces)
     mesh.update()
 
-    # 添加墙体 UV 坐标
+    # Add wall UV coordinates
     uv_layer = mesh.uv_layers.new(name="UVMap")
     for f_idx, poly in enumerate(mesh.polygons):
         for loop_index in poly.loop_indices:
             v_idx = mesh.loops[loop_index].vertex_index
             vx, vy, vz = verts[v_idx]
-            if f_idx == 0: # 侧面 A
+            if f_idx == 0: # side A
                 u = np.dot(np.array([vx, vy]) - inner_s_p, wall_dir)
                 uv_layer.data[loop_index].uv = (u * texture_scale, vz * texture_scale)
-            elif f_idx == 1: # 侧面 B
+            elif f_idx == 1: # side B
                 u = np.dot(np.array([vx, vy]) - outer_s_p, wall_dir)
                 uv_layer.data[loop_index].uv = (u * texture_scale, vz * texture_scale)
             else:
@@ -262,7 +262,7 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
 
 
 def calculate_miter_joints(walls: Dict[str, Any], wall_thickness: float) -> Dict[str, Any]:
-    """预计算所有外墙的斜接（Miter Joint）偏移点。"""
+    """Precompute miter-joint offset points for all exterior walls."""
     from . import util
     return util.calculate_miter_joints(walls, wall_thickness)
 
@@ -275,17 +275,17 @@ def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_heigh
     width = opening["width"]
     height = opening["height"]
 
-    # 基础投影点
+    # Base projection point
     proj = wall_s + wall_dir * np.dot(center[:2] - wall_s, wall_dir)
     
     if is_partition:
-        # 隔断墙洞口：完全居中，厚度加大以确保两边切透
+        # Partition opening: fully centered, extra thickness to cut through both sides
         final_center_2d = proj
         cutter_thickness = wall_thickness * 2.0
     else:
-        # 外墙洞口：原有的逻辑
+        # Exterior wall opening: original logic
         outward_normal = -np.array(normal)
-        # 洞口中心稍微向外偏移
+        # Slightly offset opening center outward
         if opening_type == "door":
             center_offset = outward_normal * (wall_thickness / 2.0) * 0.90
             cutter_thickness = wall_thickness * 2
@@ -304,7 +304,7 @@ def create_opening_box_bpy(opening, wall_s, wall_e, wall_dir, normal, wall_heigh
     
     final_z = (z_bottom + z_top) / 2
     if opening_type == "door":
-        final_z -= 0.01  # 门洞略下移，保证墙底切透
+        final_z -= 0.01  # Lower door opening slightly so wall base is fully cut
     box_obj.location = (final_center_2d[0], final_center_2d[1], final_z)
     angle = np.arctan2(wall_dir[1], wall_dir[0])
     box_obj.rotation_euler = (0, 0, angle)
@@ -422,7 +422,7 @@ def create_ceiling_mesh_bpy(scene_collection, vertices, z_max, thickness=0.2, na
     mesh.from_pydata(verts, [], faces)
     mesh.update()
 
-    # 添加天花板 UV 坐标 (x, y)
+    # Add ceiling UV coordinates (x, y)
     uv_layer = mesh.uv_layers.new(name="UVMap")
     for poly in mesh.polygons:
         for loop_index in poly.loop_indices:
@@ -511,7 +511,7 @@ def create_bbox_geometry(center, scale, angle_z, color=None):
 
 
 def _get_combined_bounds(objects: List[Any]):
-    """返回对象列表的联合包围盒（最小/最大点）"""
+    """Return combined bounding box (min/max corners) for a list of objects."""
     if Vector is None or not objects:
         return None, None
 
@@ -542,7 +542,7 @@ def _get_combined_bounds(objects: List[Any]):
 
 
 def _calculate_center(objects: List[Any]):
-    """计算对象包围盒中点"""
+    """Compute the center of an object's bounding box."""
     bounds = _get_combined_bounds(objects)
     if not bounds or bounds[0] is None or bounds[1] is None:
         return None
@@ -551,13 +551,13 @@ def _calculate_center(objects: List[Any]):
 
 def load_mesh_to_origin(asset_id: int, model_root: Union[str, List[str]]):
     """
-    导入指定 asset_id 的 GLTF/GLB 模型，并将几何体中心移至原点。
-    支持从多个根目录中查找。
+    Import the GLTF/GLB model for the given asset_id and move geometry center to origin.
+    Supports lookup across multiple root directories.
     """
     if bpy is None or Vector is None or not model_root:
         return None
 
-    # 统一转换为列表处理
+    # Normalize to list for uniform handling
     if isinstance(model_root, str):
         roots = [model_root]
     else:
@@ -572,10 +572,10 @@ def load_mesh_to_origin(asset_id: int, model_root: Union[str, List[str]]):
         if not os.path.exists(candidate):
             continue
 
-        # 记录导入前场景中已有对象的指针，导入完成后用来识别新加入的对象
+        # Record object pointers before import to identify newly added objects afterward
         before_ids = {obj.as_pointer() for obj in bpy.data.objects}
         try:
-            # 抑制 Blender 内部的 glTF 导入日志
+            # Suppress Blender internal glTF import logs
             with contextlib.redirect_stdout(None), contextlib.redirect_stderr(None):
                 bpy.ops.import_scene.gltf(
                     filepath=candidate,
@@ -590,27 +590,27 @@ def load_mesh_to_origin(asset_id: int, model_root: Union[str, List[str]]):
         if not new_objects:
             continue
 
-        # 首先计算新对象的几何中心（在设置parent之前）
+        # Compute geometry center of new objects first (before setting parent)
         bounds = _get_combined_bounds(new_objects)
         if bounds and bounds[0] is not None and bounds[1] is not None:
             center = (bounds[0] + bounds[1]) / 2
         else:
             center = Vector((0.0, 0.0, 0.0))
         
-        # 创建一个空的容器对象作为本次导入网格的根节点
+        # Create an empty container as the root for this imported mesh
         container = bpy.data.objects.new(f"mesh_{asset_id}_root", None)
         bpy.context.scene.collection.objects.link(container)
 
         
         for obj in new_objects:
             obj.parent = container
-        # 设置parent关系，使用默认的parent inverse（让子对象跟随容器移动）
-        # 整体逻辑: container 默认的 location 为 0, 在这种情况下导入的子节点相对于子节点原本的位置没有位移
-        # 现在我们可以在挂载子节点前/后均可, 进入如下操作: 
-        # 让container的位置为-center, 这样导入的子节点相对于子节点原本的位置有-center的位移
-        # 因此可以保证导入的子节点bbox 的几何中心在原点
+        # Set parent with default parent inverse (children follow container movement)
+        # Overall logic: container defaults to location 0, so imported children have no displacement relative to their original positions
+        # Parent can be set before or after; then:
+        # Set container location to -center so children shift by -center relative to their original positions
+        # This ensures imported child bbox geometric center is at the origin
         container.location = -center
-        # 更改节点属性后要强制更新场景，确保变换生效
+        # Force scene update after changing node properties so transforms take effect
         bpy.context.view_layer.update()
         
         return container
@@ -620,8 +620,8 @@ def load_mesh_to_origin(asset_id: int, model_root: Union[str, List[str]]):
 
 def apply_box_transform(container_obj: Any, box: Dict, master_bounds: Optional[tuple] = None):
     """
-    对导入的 mesh 根节点（或实例对象）依次执行 scale、rotation、translation。
-    master_bounds: 如果提供，则直接使用该包围盒进行缩放计算，不再扫描子对象。
+    Apply scale, rotation, and translation to an imported mesh root (or instance object).
+    master_bounds: if provided, use this bbox directly for scaling instead of scanning children.
     """
     if bpy is None or Vector is None or container_obj is None:
         return False
@@ -629,14 +629,14 @@ def apply_box_transform(container_obj: Any, box: Dict, master_bounds: Optional[t
     if master_bounds and master_bounds[0] is not None:
         min_corner, max_corner = master_bounds
     else:
-        # 如果是 Collection Instance 且未提供 master_bounds，尝试从其 instance_collection 获取
+        # Collection instance without master_bounds: try instance_collection
         if container_obj.instance_type == 'COLLECTION' and container_obj.instance_collection:
             child_objects = [obj for obj in container_obj.instance_collection.objects if obj.parent is None]
         else:
             child_objects = list(container_obj.children)
             
         if not child_objects:
-            # 容错：如果还是没有子对象，但本身是 MESH
+            # Fallback: no children but object itself is MESH
             if container_obj.type == 'MESH':
                 child_objects = [container_obj]
             else:
@@ -648,7 +648,7 @@ def apply_box_transform(container_obj: Any, box: Dict, master_bounds: Optional[t
         min_corner, max_corner = bounds
 
     extent = np.array((max_corner - min_corner), dtype=float)
-    # ... 后续逻辑保持不变 ...
+    # ... remaining logic unchanged ...
     current_center = (min_corner + max_corner) / 2
     extent = np.where(extent == 0.0, 1.0, extent)
 
@@ -666,13 +666,13 @@ def apply_box_transform(container_obj: Any, box: Dict, master_bounds: Optional[t
                          float(target_center[1]),
                          float(target_center[2])))
 
-    # 调试输出
-    # print(f"    [调试] 物体 Label: {box.get('label', 'unknown')}")
-    # print(f"    [调试] 当前几何中心: ({current_center[0]:.3f}, {current_center[1]:.3f}, {current_center[2]:.3f})")
-    # print(f"    [调试] 当前extent: ({extent[0]:.3f}, {extent[1]:.3f}, {extent[2]:.3f})")
-    # print(f"    [调试] 目标center: ({target_center[0]:.3f}, {target_center[1]:.3f}, {target_center[2]:.3f})")
-    # print(f"    [调试] 目标scale: ({target_scale[0]:.3f}, {target_scale[1]:.3f}, {target_scale[2]:.3f})")
-    # print(f"    [调试] 底部z (min): {min_corner[2]:.3f}, 顶部z (max): {max_corner[2]:.3f}")
+    # Debug output
+    # print(f"    [debug] object label: {box.get('label', 'unknown')}")
+    # print(f"    [debug] current geometry center: ({current_center[0]:.3f}, {current_center[1]:.3f}, {current_center[2]:.3f})")
+    # print(f"    [debug] current extent: ({extent[0]:.3f}, {extent[1]:.3f}, {extent[2]:.3f})")
+    # print(f"    [debug] target center: ({target_center[0]:.3f}, {target_center[1]:.3f}, {target_center[2]:.3f})")
+    # print(f"    [debug] target scale: ({target_scale[0]:.3f}, {target_scale[1]:.3f}, {target_scale[2]:.3f})")
+    # print(f"    [debug] bottom z (min): {min_corner[2]:.3f}, top z (max): {max_corner[2]:.3f}")
 
     rotation_mat = Matrix.Rotation(theta, 4, 'Z')
     # rotation_mat_fixed = Matrix.Rotation(np.radians(-90), 4, 'X')
@@ -685,22 +685,22 @@ def apply_box_transform(container_obj: Any, box: Dict, master_bounds: Optional[t
     previous_matrix = container_obj.matrix_world.copy()
     container_obj.matrix_world = stage2_transform @ previous_matrix
     
-    # 强制更新场景，让变换立即生效
+    # Force scene update so transforms take effect immediately
     bpy.context.view_layer.update()
     
-    # 验证最终位置（仅针对非实例化对象或已定义 child_objects 的对象）
+    # Verify final position (non-instanced objects or those with child_objects defined)
     if 'child_objects' in locals() and child_objects:
         final_bounds = _get_combined_bounds(child_objects)
         if final_bounds and final_bounds[0] is not None:
             final_center = (final_bounds[0] + final_bounds[1]) / 2
-            # print(f"    [调试] 变换后几何中心: ({final_center[0]:.3f}, {final_center[1]:.3f}, {final_center[2]:.3f})")
+            # print(f"    [debug] geometry center after transform: ({final_center[0]:.3f}, {final_center[1]:.3f}, {final_center[2]:.3f})")
             
-            # 检查是否有浮空问题
+            # Check for floating (height mismatch)
             expected_bottom = target_center[2] - target_scale[2] / 2
             actual_bottom = final_bounds[0][2]
             height_diff = actual_bottom - expected_bottom
-            if abs(height_diff) > 0.01:  # 超过1cm的偏差
-                print(f"    ⚠️  高度偏差: 底部应该在 {expected_bottom:.3f}m，实际在 {actual_bottom:.3f}m，偏差 {height_diff:.3f}m")
+            if abs(height_diff) > 0.01:  # deviation over 1 cm
+                print(f"    ⚠️  Height mismatch: bottom should be at {expected_bottom:.3f}m, actual {actual_bottom:.3f}m, delta {height_diff:.3f}m")
     
     return True
 
@@ -711,7 +711,7 @@ def append_material_from_blend(blend_path):
 
     abs_path = os.path.abspath(blend_path)
     if not os.path.isfile(abs_path):
-        raise FileNotFoundError(f"Blend 文件不存在：{abs_path}")
+        raise FileNotFoundError(f"Blend file not found: {abs_path}")
 
     loaded_names = []
     with bpy.data.libraries.load(abs_path, link=False) as (data_from, data_to):
@@ -753,11 +753,11 @@ def create_material_with_texture(name, texture_path):
     mix_shader = nodes.new('ShaderNodeAddShader')
 
     if texture_path and os.path.exists(texture_path):
-        # [优化] 检查是否已经加载过该纹理
+        # [optimization] skip if texture already loaded
         img_name = os.path.basename(texture_path)
         img = bpy.data.images.get(img_name)
         
-        # 即使名字相同，也检查路径是否一致
+        # Even with same name, verify filepath matches
         if img and (not hasattr(img, 'filepath') or bpy.path.abspath(img.filepath) != bpy.path.abspath(texture_path)):
             img = None
             
@@ -1138,7 +1138,7 @@ def _load_depth_exr(path: str) -> np.ndarray:
 
 
 def _load_rgb_exr_via_bpy(path: str) -> np.ndarray:
-    """用 Blender 内置 EXR 解码（不依赖 OpenEXR Python 包）。"""
+    """Decode EXR with Blender built-in decoder (no OpenEXR Python package required)."""
     if bpy is None:
         raise RuntimeError("bpy unavailable for EXR load")
     img = bpy.data.images.load(path, check_existing=False)
@@ -1153,7 +1153,7 @@ def _load_rgb_exr_via_bpy(path: str) -> np.ndarray:
             rgb = planes[..., :3]
         else:
             rgb = np.stack([planes[..., 0]] * 3, axis=-1)
-        # Blender pixels 自底向上存储，翻转为与 PNG/深度图一致的从上到下
+        # Blender pixels are bottom-up; flip to top-down to match PNG/depth maps
         return rgb[::-1, :, :]
     finally:
         bpy.data.images.remove(img)
@@ -1195,7 +1195,7 @@ def _load_rgb_exr(path: str) -> np.ndarray:
 
 
 def _add_cycles_exr_output(tree, render_layers, socket_name: str, aov_dir: str, file_name: str):
-    """向合成器添加单个 AOV 的 EXR 文件输出节点。"""
+    """Add a compositor file-output node for a single AOV EXR."""
     output = tree.nodes.new("CompositorNodeOutputFile")
     aov_dir = aov_dir if aov_dir.endswith(os.sep) else aov_dir + os.sep
     is_normal = socket_name == "Normal"
@@ -1224,7 +1224,7 @@ def _add_cycles_exr_output(tree, render_layers, socket_name: str, aov_dir: str, 
 
 
 def _prepare_cycles_aov_compositor(scene, aov_dir: str):
-    """Cycles 合成器：同一次渲染输出 Depth + Normal EXR。"""
+    """Cycles compositor: output Depth + Normal EXR in one render."""
     render = scene.render
     render.use_compositing = True
     tree = _get_compositor_tree(scene, create=True)
@@ -1246,7 +1246,7 @@ def _prepare_cycles_aov_compositor(scene, aov_dir: str):
 
 
 def _prepare_cycles_depth_compositor(scene, depth_dir: str):
-    """兼容旧名：等价于 _prepare_cycles_aov_compositor。"""
+    """Legacy alias: equivalent to _prepare_cycles_aov_compositor."""
     _prepare_cycles_aov_compositor(scene, depth_dir)
 
 
@@ -1282,7 +1282,7 @@ def _cycles_depth_to_metric(depth_raw: np.ndarray, clip_end: float) -> np.ndarra
 
 
 def _encode_opencv_normal_png_from_cycles_exr(normal_exr: np.ndarray, scene) -> np.ndarray:
-    """Cycles Normal pass（世界系）→ OpenCV 相机系 → uint8 RGB PNG。"""
+    """Cycles Normal pass (world frame) → OpenCV camera frame → uint8 RGB PNG."""
     try:
         from . import util
         from . import geometry_opencv as geo_cv
@@ -1301,7 +1301,7 @@ def _encode_opencv_normal_png_from_cycles_exr(normal_exr: np.ndarray, scene) -> 
             flat_cam[valid] = geo_cv.transform_normals_to_opencv(flat[valid], pose)
         arr = flat_cam.reshape(arr.shape[0], arr.shape[1], 3)
     else:
-        print("⚠️ 场景无相机，法线图仍按世界系导出")
+        print("⚠️ Scene has no camera; normal map still exported in world coordinates")
     return util.encode_normal_directions_uint8_png(arr)
 
 
@@ -1380,34 +1380,34 @@ def render_color_and_depth_png(
         depth_u16 = util.encode_depth_uint16(depth_m, depth_scale)
         imageio.imwrite(depth_path, depth_u16)
         print(
-            f"✅ 深度图已导出: {depth_path} "
+            f"✅ Depth map exported: {depth_path} "
             f"(uint16, depth_m * {depth_scale:.6f}, Cycles Z pass)"
         )
 
         normal_files = sorted(glob.glob(os.path.join(temp_dir, "normal*.exr")))
         if not normal_files:
-            print("⚠️ 未找到 Cycles normal EXR，跳过法线导出")
+            print("⚠️ Cycles normal EXR not found; skipping normal export")
         else:
             try:
                 normal_raw = _load_rgb_exr(normal_files[-1])
                 normal_u8 = _encode_opencv_normal_png_from_cycles_exr(normal_raw, scene)
                 imageio.imwrite(normal_path, normal_u8)
                 print(
-                    f"✅ 法线图已导出: {normal_path} "
+                    f"✅ Normal map exported: {normal_path} "
                     f"(uint8 RGB, OpenCV camera normal, Cycles Normal pass)"
                 )
             except Exception as normal_exc:
-                print(f"⚠️ 法线 EXR 读取/写入失败，已跳过法线导出: {normal_exc}")
+                print(f"⚠️ Normal EXR read/write failed; skipped normal export: {normal_exc}")
 
         return depth_scale
     except Exception as exc:
-        print(f"⚠️ Cycles Z pass 深度失败，回退逐像素 ray_cast: {exc}")
+        print(f"⚠️ Cycles Z pass depth failed; falling back to per-pixel ray_cast: {exc}")
         if not os.path.exists(color_path):
             render.filepath = color_path
             image_settings.file_format = "PNG"
             image_settings.color_mode = "RGBA"
             bpy.ops.render.render(write_still=True)
-        print("⚠️ ray_cast 回退路径不导出法线图（仅 Cycles Normal pass 可用）")
+        print("⚠️ ray_cast fallback path does not export normal map (Cycles Normal pass only)")
         return render_depth_png(scene, depth_path, skip_objects=skip_objects)
     finally:
         view_layer.use_pass_z = prev_view_pass_z
@@ -1486,7 +1486,7 @@ def render_depth_png(scene, depth_path: str, skip_objects=None):
     depth_u16 = util.encode_depth_uint16(depth_m, depth_scale)
     imageio.imwrite(depth_path, depth_u16)
     print(
-        f"✅ 深度图已导出: {depth_path} "
+        f"✅ Depth map exported: {depth_path} "
         f"(uint16, depth_m * {depth_scale:.6f}, bpy ray_cast fallback)"
     )
     return depth_scale
@@ -1503,7 +1503,7 @@ def get_class_color(class_name: Optional[str]):
 
 
 def build_render_frustum_clip_mats(scene, camera_obj, width: int, height: int):
-    """与可见几何一致：Blender calc_matrix_camera 投影 + 相机 modelview。"""
+    """Same as visible geometry: Blender calc_matrix_camera projection + camera modelview."""
     depsgraph = bpy.context.evaluated_depsgraph_get()
     render = scene.render
     pct = float(render.resolution_percentage) / 100.0
@@ -1527,7 +1527,7 @@ def build_render_frustum_clip_mats(scene, camera_obj, width: int, height: int):
 
 
 def render_frustum_clip_planes():
-    """Blender clip space 视锥半空间（与 scenebuilder_bpy 可见几何一致）。"""
+    """Blender clip-space frustum half-spaces (consistent with scenebuilder_bpy visible geometry)."""
     eps = 1e-5
     return [
         (np.array([0.0, 0.0, 0.0, 1.0], dtype=float), eps),
@@ -1564,7 +1564,7 @@ def _clip_homogeneous_polygon_against_plane(polygon, plane_normal, plane_offset:
 
 
 def clip_polygon_to_render_frustum(vertices, proj, modelview):
-    """在齐次 clip space 裁剪平面多边形，沿边插值 world 坐标（保持共面）。"""
+    """Clip a planar polygon in homogeneous clip space, interpolating world coords along edges (keeps coplanarity)."""
     poly = [np.asarray(v, dtype=float) for v in vertices]
     if len(poly) < 3:
         return np.empty((0, 3), dtype=float)

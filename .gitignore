@@ -2,4 +2,6 @@
 /scenebuilder.egg-info/
 /manycore/
 /build/
+/scripts/
 /core/__pycache__/
+.vscode/

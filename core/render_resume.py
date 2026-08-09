@@ -1,7 +1,7 @@
-"""render_ssl 断点续跑：按逻辑视角名检测产物是否完整，跳过已完成项。
+"""render_ssl resume: detect complete artifacts by logical view name and skip finished items.
 
-时间戳仅出现在视角目录内的 PNG 文件名；目录名对 preset / auto 视角固定为
-``front``、``left_seq``、``auto_path_0004`` 等，便于 resume。
+Timestamps appear only in PNG filenames inside view dirs; directory names for preset/auto views are fixed
+(e.g. ``front``, ``left_seq``, ``auto_path_0004``) for resume.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ _MILLIS_SEQ_DIR_RE = re.compile(r"^\d{10,16}_seq$")
 
 
 def view_dir_name_for(view_name: str) -> str:
-    """逻辑视角 → 输出子目录名（与 worker 中 view_dir_name 一致）。"""
+    """Logical view → output subdirectory name (same as view_dir_name in worker)."""
     return view_name
 
 
@@ -69,7 +69,7 @@ def _is_primary_png(name: str) -> bool:
 
 
 def list_primary_frames(view_dir: str) -> List[str]:
-    """返回带 ``*_camera_para.json`` 的主渲染 PNG 路径列表。"""
+    """Return primary render PNG paths that have a matching ``*_camera_para.json``."""
     if not os.path.isdir(view_dir):
         return []
     frames: List[str] = []
@@ -265,7 +265,7 @@ def missing_view_artifacts(
     auto_spec: Optional[Dict[str, Any]] = None,
     progress: Optional[Dict[str, Any]] = None,
 ) -> set:
-    """返回该视角仍缺失的产物键：render / glb / ply / planar / voxel / ssl / pano。"""
+    """Return artifact keys still missing for this view: render / glb / ply / planar / voxel / ssl / pano."""
     missing: set = set()
     semantic = bool(job.get("semantic"))
     depth = bool(job.get("depth"))
@@ -313,7 +313,7 @@ def missing_view_artifacts(
         missing.add("planar")
     if visible_geometry and export_voxel and not _voxel_ok(view_dir):
         missing.add("voxel")
-    # topdown 视角 worker 会 pop pano，从不产出 pano 目录
+    # topdown view worker pops pano and never produces a pano directory
     if pano and view_name != "topdown" and not _pano_complete(
         view_dir, semantic=semantic, depth=depth
     ):
@@ -322,7 +322,7 @@ def missing_view_artifacts(
 
 
 def apply_partial_resume_to_kwargs(job: Dict[str, Any], missing: set) -> Dict[str, Any]:
-    """按缺失产物生成 partial render kwargs（含 skip_render 等）。"""
+    """Build partial render kwargs from missing artifacts (includes skip_render, etc.)."""
     visible_geometry = bool(job.get("visible_geometry"))
     want_glb = bool(job.get("export_glb"))
     want_ply = bool(job.get("export_point_cloud"))
@@ -374,7 +374,7 @@ def is_view_complete(
     auto_spec: Optional[Dict[str, Any]] = None,
     progress: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """检测单个逻辑视角是否已按当前 job 开关完整渲染。"""
+    """Check whether a single logical view is fully rendered per current job flags."""
     if view_name != "topdown":
         view_dir = view_dir_for(y_dir, view_name, progress)
         if not os.path.isdir(view_dir):
@@ -522,7 +522,7 @@ def filter_views_to_run(
     *,
     resume: bool,
 ) -> Tuple[List[str], List[str]]:
-    """返回 (待渲染, 已跳过)。"""
+    """Return (views to render, views skipped)."""
     if not resume:
         return list(view_names), []
     progress = load_progress(y_dir)

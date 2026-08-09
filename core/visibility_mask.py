@@ -1,4 +1,4 @@
-"""2D mask 可见比例：整体投影 mask（无视遮挡） vs 语义可见 mask。"""
+"""2D mask visibility ratio: full projection mask (no occlusion) vs semantic visible mask."""
 
 from __future__ import annotations
 
@@ -44,11 +44,11 @@ def binary_mask_from_isolated_semantic(
     background: Tuple[int, int, int] = (0, 0, 0),
     max_dist_sq: float = 0,
 ) -> np.ndarray:
-    """从单物体隔离语义图提取二值 mask（黑底 + 单色 emission）。
+    """Extract binary mask from isolated per-object semantic image (black background + single emission color).
 
-    EEVEE 会在物体边缘产生抗锯齿混色；film dither 也可能让背景出现 1–2 级灰度。
-    用「背景 / 目标色」双色最近邻划分：背景噪点归黑，边缘混色仍归物体。
-    max_dist_sq>0 时丢弃离最近色过远的像素（兼容旧逻辑，默认 0 表示不启用）。
+    EEVEE anti-aliases object edges; film dither may add 1–2 gray levels to background.
+    Two-color nearest-neighbor split (background / target): background noise → black, edge blend → object.
+    When max_dist_sq>0, drop pixels too far from nearest color (legacy compat; default 0 disables).
     """
     rgb = np.asarray(semantic_rgb[..., :3], dtype=np.uint8)
     h, w = rgb.shape[:2]
@@ -88,7 +88,7 @@ def visibility_settings(config: Optional[Dict[str, Any]] = None) -> Dict[str, fl
 def build_entity_color_map(
     semantic_objects: Sequence[Dict[str, Any]],
 ) -> Dict[Tuple[str, str], Tuple[int, int, int]]:
-    """(category, object_id) -> RGB，与 semantic pass 颜色一致。"""
+    """(category, object_id) -> RGB, matching semantic pass colors."""
     mapping: Dict[Tuple[str, str], Tuple[int, int, int]] = {}
     for obj in semantic_objects:
         category = str(obj.get("category", ""))
@@ -148,7 +148,7 @@ def _clip_triangle_to_screen_tris(
     height: int,
     world_depth_fn: Callable[[np.ndarray], float],
 ) -> List[Tuple[Tuple[float, float, float], Tuple[float, float, float], Tuple[float, float, float]]]:
-    """clip space 裁剪 + clip 投影像素 + world_to_camera_view 深度（与 semantic 对齐）。"""
+    """Clip-space cull + clip projection to pixels + world_to_camera_view depth (aligned with semantic)."""
     from .util_bpy import _clip_homogeneous_polygon_against_plane, render_frustum_clip_planes
 
     tri = np.asarray(triangle, dtype=float)
@@ -195,7 +195,7 @@ def _clip_polygon_2d_to_image_rect(
     width: int,
     height: int,
 ) -> List[Tuple[float, float, float]]:
-    """将带深度的 2D 多边形裁剪到 [0, width] x [0, height]。"""
+    """Clip a depth-aware 2D polygon to [0, width] x [0, height]."""
     if len(points) < 3:
         return []
 
@@ -333,9 +333,9 @@ def rasterize_overall_mask(
     clip_mats: Tuple[np.ndarray, np.ndarray],
     world_depth_fn: Callable[[np.ndarray], float],
 ) -> np.ndarray:
-    """单物体 Z-buffer 投影 mask：与 semantic 同源 mesh，无视其他物体遮挡。
+    """Per-object Z-buffer projection mask: same mesh as semantic, ignores occlusion by other objects.
 
-    像素/深度投影与 Blender 一致：clip 投影像素 + world_to_camera_view 深度。
+    Pixel/depth projection matches Blender: clip projection + world_to_camera_view depth.
     """
     if width <= 0 or height <= 0:
         return np.zeros((max(height, 0), max(width, 0)), dtype=bool)
@@ -357,7 +357,7 @@ def rasterize_triangle_pixel_count(
     clip_mats: Tuple[np.ndarray, np.ndarray],
     world_depth_fn: Callable[[np.ndarray], float],
 ) -> int:
-    """将视锥内三角形投影到图像平面，返回占用像素数（无视其他物体遮挡）。"""
+    """Project in-frustum triangles to image plane; return occupied pixel count (ignores occlusion by other objects)."""
     return int(np.count_nonzero(rasterize_overall_mask(
         records, width, height, clip_mats=clip_mats, world_depth_fn=world_depth_fn,
     )))
@@ -385,9 +385,9 @@ def evaluate_visibility(
     ratio_if_visible: float,
     min_overall_pixels: int,
 ) -> Dict[str, Any]:
-    """in_frustum：clip space 裁切后仍有几何（与 README 附录 B 视锥裁剪一致）。
+    """in_frustum: geometry remains after clip-space cull (same as README appendix B frustum clip).
 
-    min_overall_pixels 仅用于可见比例 / 导出阈值，不再定义 in_frustum。
+    min_overall_pixels is only for visibility ratio / export thresholds; it no longer defines in_frustum.
     """
     has_projection = overall_pixels >= min_overall_pixels
     if not in_frustum or not has_projection or overall_pixels <= 0:

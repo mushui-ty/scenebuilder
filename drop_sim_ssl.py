@@ -1,7 +1,7 @@
 """
-物理掉落仿真：读取带 supported_by 的 SSL，执行重力仿真，导出更新后的 SSL。
+Physics drop simulation: read SSL with supported_by, run gravity sim, export updated SSL.
 
-用法：
+Usage:
     from scenebuilder.drop_sim_ssl import drop_sim_ssl
     new_ssl = drop_sim_ssl(ssl_text, asset_dir="/path/to/assets")
 """
@@ -24,46 +24,46 @@ def drop_sim_ssl(
     asset_dir: Optional[str] = None,
     sim_time: float = 1.0,
 ) -> str:
-    """执行物理掉落仿真，返回更新后的 SSL 文本。
+    """Run physics drop simulation and return updated SSL text.
 
-    流程：
-      1. 解析 SSL（含 supported_by 属性）
-      2. 判断 active：supported_by 不在 {floor, wall, ceiling} 且不是 chip → active
-      3. 如果没有 active 物体 → 直接返回原 SSL（去掉 supported_by）
-      4. 构建场景 + 执行 drop_sim
-      5. 导出更新后的 SSL（不含 supported_by）
+    Steps:
+      1. Parse SSL (including supported_by attributes)
+      2. Mark active: supported_by not in {floor, wall, ceiling} and not a chip → active
+      3. If no active objects → return original SSL (strip supported_by)
+      4. Build scene + run drop_sim
+      5. Export updated SSL (without supported_by)
 
     Args:
-        ssl_text: 带 supported_by 属性的 SSL 文本
-        asset_dir: 资产目录（GLB 文件所在目录）
-        sim_time: 仿真时长（秒）
+        ssl_text: SSL text with supported_by attributes
+        asset_dir: Asset directory (GLB files)
+        sim_time: Simulation duration (seconds)
 
     Returns:
-        更新后的 SSL 文本（不含 supported_by，z 已修正）
+        Updated SSL text (no supported_by, z corrected)
     """
-    # 1. 解析
+    # 1. Parse
     scene_json = parse_ssl_to_json(ssl_text)
 
-    # 2. 判断 active
+    # 2. Determine active
     has_active = False
     for bbox in scene_json["bbox"]:
         supported_by = bbox.get("supported_by", "floor")
-        # chip 物体（门窗嵌墙）永远 passive
-        is_chip = bbox.get("scale", [1, 1, 1])[1] == 0  # b=0 是 chip 的特征
+        # Chip objects (doors/windows embedded in walls) are always passive
+        is_chip = bbox.get("scale", [1, 1, 1])[1] == 0  # b=0 marks a chip
         if supported_by not in PASSIVE_SUPPORTS and not is_chip:
             bbox["active"] = True
             has_active = True
         else:
             bbox["active"] = False
 
-    # 3. 没有 active → 直接返回去掉 supported_by 的 SSL
+    # 3. No active objects → return SSL with supported_by stripped
     if not has_active:
-        print("⚡ drop_sim_ssl: 没有 active 物体，跳过物理仿真")
+        print("⚡ drop_sim_ssl: no active objects; skipping physics simulation")
         return _strip_supported_by(ssl_text)
 
-    print(f"⚡ drop_sim_ssl: 发现 {sum(1 for b in scene_json['bbox'] if b.get('active'))} 个 active 物体")
+    print(f"⚡ drop_sim_ssl: found {sum(1 for b in scene_json['bbox'] if b.get('active'))} active object(s)")
 
-    # 4. 构建场景
+    # 4. Build scene
     try:
         from .core.scenebuilder_bpy import BpySceneCtx
     except (ImportError, ValueError):
@@ -78,8 +78,8 @@ def drop_sim_ssl(
     if scene_json["window"]:
         ctx.add_windows(scene_json["window"])
 
-    # add_boxes 会读取 active 属性
-    # 同时需要把 supported_by 传进去给 drop_sim 穿透检测用
+    # add_boxes reads active flag
+    # Also pass supported_by into drop_sim penetration checks
     for bbox in scene_json["bbox"]:
         ctx.add_box(
             center=bbox["center"],
@@ -90,21 +90,21 @@ def drop_sim_ssl(
             asset_id=bbox.get("asset_id"),
             active=bbox.get("active", False),
         )
-        # 把 supported_by 存到 context 的 box_data 里，给 drop_sim 穿透检测用
-        # add_box 返回 box_id，最后一个加入的就是最新的
+        # Store supported_by in context box_data for drop_sim penetration checks
+        # add_box returns box_id; the last added is the newest
         last_box_id = list(ctx.context["boxes"].keys())[-1]
         if bbox.get("supported_by"):
             ctx.context["boxes"][last_box_id]["supported_by"] = bbox["supported_by"]
 
-    # 构建场景几何体
+    # Build scene geometry
     geometry_mode = "gltf" if asset_dir else "bbox"
     ctx.construct_scene(geometry_mode=geometry_mode, show_ceiling=False)
 
-    # 5. 执行物理仿真
+    # 5. Run physics simulation
     ctx.drop_sim(sim_time=sim_time)
 
-    # 6. 导出更新后的 SSL
-    #    export_ssl 写文件，我们读回来返回
+    # 6. Export updated SSL
+    #    export_ssl writes to file; read back and return
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         ctx.export_ssl(tmpdir)
@@ -116,6 +116,6 @@ def drop_sim_ssl(
 
 
 def _strip_supported_by(ssl_text: str) -> str:
-    """从 SSL 文本中移除 supported_by 属性。"""
-    # 匹配 , supported_by="xxx" 或 supported_by="xxx",
+    """Remove supported_by attributes from SSL text."""
+    # Match , supported_by="xxx" or supported_by="xxx",
     return re.sub(r',?\s*supported_by="[^"]*"', '', ssl_text)

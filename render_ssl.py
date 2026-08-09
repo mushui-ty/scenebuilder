@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-使用 SSL 或 JSON 场景数据渲染 - 支持 BPY 和 Pyrender 双后端。
-每视角独立子进程渲染。
+Render from SSL or JSON scene data — supports BPY and Pyrender backends.
+Each view is rendered in an independent subprocess.
 
-命令行用法:
+CLI usage:
     python scenebuilder/render_ssl.py --ssl path/to/ssl.txt --views topdown left_seq --output out_dir
     python scenebuilder/render_ssl.py --help
 """
@@ -29,7 +29,7 @@ def _load_util_data_module():
     util_path = os.path.join(_PKG_ROOT, "core", "util_data.py")
     spec = importlib.util.spec_from_file_location("scenebuilder_util_data", util_path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"无法加载 util_data: {util_path}")
+        raise ImportError(f"Failed to load util_data: {util_path}")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -51,7 +51,7 @@ except (ImportError, ValueError):
 
 
 def resolve_output_dir(output_root: str, normalized_topdown: bool) -> str:
-    """确定唯一输出根目录 Y：规范化时 ``{output}_normalized``，否则 ``{output}``。"""
+    """Resolve the unique output root Y: ``{output}_normalized`` when normalized, else ``{output}``."""
     return normalized_output_dir(output_root) if normalized_topdown else output_root
 
 
@@ -65,7 +65,7 @@ TOPDOWN_NORMALIZED_SUBDIR = "topdown_normalized"
 
 
 def _resolve_views_to_run(views: ViewsSpec, view_cameras: dict) -> List[str]:
-    """将 views 参数解析为待渲染视角名列表。None / [] → 不渲染；auto 由上层单独处理。"""
+    """Parse views into a list of view names to render. None / [] → skip; auto handled upstream."""
     if not views or views == "auto":
         return []
     names: List[str] = []
@@ -76,7 +76,7 @@ def _resolve_views_to_run(views: ViewsSpec, view_cameras: dict) -> List[str]:
         elif name in view_cameras and name not in names:
             names.append(name)
         elif name not in view_cameras:
-            print(f"⚠️  未知视角 {name!r}，已跳过")
+            print(f"⚠️  Unknown view {name!r}, skipped")
     return names
 
 
@@ -87,7 +87,7 @@ def _run_auto_views_from_path(
     *,
     resume: bool = True,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
-    """根据地板路径生成 auto 视角 spec，并写入 auto_views.json。"""
+    """Build auto-view specs from the floor path and write auto_views.json."""
     if resume:
         try:
             from .core.render_resume import load_auto_views_manifest
@@ -95,7 +95,7 @@ def _run_auto_views_from_path(
             from core.render_resume import load_auto_views_manifest  # type: ignore
         specs, names = load_auto_views_manifest(y_dir)
         if specs:
-            print(f"📂 从已有 auto_views.json 加载 {len(names)} 个 auto 视角")
+            print(f"📂 Loaded {len(names)} auto views from existing auto_views.json")
             return specs, names
 
     try:
@@ -104,11 +104,11 @@ def _run_auto_views_from_path(
         from core.auto_views import build_auto_views_from_path, write_auto_views_manifest  # type: ignore
 
     if floor_result is None:
-        print("⚠️  无 floor_path 结果，auto 视角不可用")
+        print("⚠️  No floor_path result; auto views unavailable")
         return {}, []
     path_points = floor_result.get("path_points_ssl") or []
     if not path_points:
-        print("⚠️  path_points_ssl 为空，auto 视角不可用")
+        print("⚠️  path_points_ssl is empty; auto views unavailable")
         return {}, []
 
     specs, names = build_auto_views_from_path(path_points, context)
@@ -116,10 +116,159 @@ def _run_auto_views_from_path(
     n_path = len(path_points)
     n_single = sum(1 for n in names if not n.endswith("_seq"))
     print(
-        f"🎯 views=auto：路径 {n_path} 点 → "
-        f"{n_single} 个单帧视角 + 1 个三帧序列；manifest → {manifest}"
+        f"🎯 views=auto: {n_path} path points → "
+        f"{n_single} single-frame views + 1 three-frame sequence; manifest → {manifest}"
     )
     return specs, names
+
+
+def _is_camera_sequence(camera_position: Any) -> bool:
+    """Return True if camera_position is a multi-frame sequence ([[x,y,z], ...])."""
+    if not isinstance(camera_position, list) or not camera_position:
+        return False
+    first = camera_position[0]
+    return isinstance(first, (list, tuple)) and len(first) >= 3
+
+
+def _normalize_vec3(value: Any, name: str) -> List[float]:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        raise ValueError(f"{name} must be JSON in the form [x, y, z] or [[x,y,z], ...]")
+    return [float(value[0]), float(value[1]), float(value[2])]
+
+
+def _parse_camera_cli_arg(raw: Optional[str], arg_name: str) -> Any:
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{arg_name} must be valid JSON: {raw!r}") from exc
+
+
+def _apply_up_vector_to_spec(
+    spec: Dict[str, Any],
+    up_vector: Any,
+    n_frames: int,
+) -> None:
+    """Write optional up_vector into spec; omit when unset — render_view picks default up (falls back to [0,1,0] when collinear)."""
+    if up_vector is None:
+        return
+    if _is_camera_sequence(up_vector):
+        ups = [_normalize_vec3(p, "up_vector") for p in up_vector]
+        if len(ups) != n_frames:
+            raise ValueError(
+                f"up_vector sequence length ({len(ups)}) does not match camera frame count ({n_frames})"
+            )
+        spec["up_vectors"] = ups
+    else:
+        up = _normalize_vec3(up_vector, "up_vector")
+        if n_frames == 1:
+            spec["up_vector"] = up
+        else:
+            spec["up_vectors"] = [up] * n_frames
+
+
+def _build_custom_view_spec(
+    camera_position: Any,
+    look_at: Any = None,
+    *,
+    up_vector: Any = None,
+    width: int = 1000,
+    height: int = 1000,
+    manual_fov: Optional[float] = None,
+) -> Tuple[str, Dict[str, Any]]:
+    """Build a single-frame or sequence view spec from camera_position / look_at. Returns (view_name, spec).
+
+    up_vector is optional: ``render_view`` defaults to ``[0,0,1]``; when the view axis is collinear (e.g. top-down), uses ``[0,1,0]``.
+    """
+    if camera_position is None:
+        raise ValueError("camera_position cannot be empty")
+
+    if _is_camera_sequence(camera_position):
+        cam_positions = [_normalize_vec3(p, "camera_position") for p in camera_position]
+        if look_at is None:
+            raise ValueError("look_at is required when camera_position is a sequence")
+        if _is_camera_sequence(look_at):
+            look_targets = [_normalize_vec3(p, "look_at") for p in look_at]
+            if len(look_targets) != len(cam_positions):
+                raise ValueError(
+                    f"look_at sequence length ({len(look_targets)}) does not match camera_position ({len(cam_positions)})"
+                )
+        else:
+            look_targets = [_normalize_vec3(look_at, "look_at")] * len(cam_positions)
+        spec = {
+            "type": "sequence",
+            "camera_positions": cam_positions,
+            "look_at_targets": look_targets,
+            "width": int(width),
+            "height": int(height),
+        }
+        if manual_fov is not None:
+            spec["manual_fov"] = float(manual_fov)
+        _apply_up_vector_to_spec(spec, up_vector, len(cam_positions))
+        return "custom_seq", spec
+
+    cam_pos = _normalize_vec3(camera_position, "camera_position")
+    look_target = _normalize_vec3(look_at, "look_at") if look_at is not None else None
+    spec = {
+        "type": "single",
+        "camera_position": cam_pos,
+        "look_at_target": look_target,
+        "width": int(width),
+        "height": int(height),
+    }
+    if manual_fov is not None:
+        spec["manual_fov"] = float(manual_fov)
+    _apply_up_vector_to_spec(spec, up_vector, 1)
+    return "custom", spec
+
+
+def _render_view_spec(
+    ctx,
+    output_dir: str,
+    spec: Dict[str, Any],
+    extra: dict,
+    view_dir_name: str,
+) -> None:
+    """Invoke render_view from a view spec (shared by auto / custom)."""
+    common = dict(
+        rebuild=True,
+        use_HDRI=False,
+        width=int(spec.get("width", 1000)),
+        height=int(spec.get("height", 1000)),
+        auto_transparent=True,
+        view_dir_name=view_dir_name,
+        **extra,
+    )
+    if spec.get("manual_fov") is not None:
+        common["manual_fov"] = float(spec["manual_fov"])
+        common["auto_fov"] = False
+    else:
+        common["auto_fov"] = True
+
+    if spec["type"] == "single":
+        single_kwargs = dict(
+            output_path=output_dir,
+            camera_position=spec["camera_position"],
+            look_at_target=spec.get("look_at_target"),
+            **common,
+        )
+        if "up_vector" in spec:
+            single_kwargs["up_vector"] = spec["up_vector"]
+        ctx.render_view(**single_kwargs)
+        return
+    if spec["type"] == "sequence":
+        seq_kwargs = dict(
+            output_path=output_dir,
+            camera_position=spec["camera_positions"],
+            look_at_target=spec["look_at_targets"],
+            **common,
+        )
+        if "up_vectors" in spec:
+            seq_kwargs["up_vector"] = spec["up_vectors"]
+        ctx.render_view(**seq_kwargs)
+        return
+    raise ValueError(f"Unknown view spec type: {spec.get('type')!r}")
 
 
 def _render_auto_view_spec(
@@ -129,41 +278,12 @@ def _render_auto_view_spec(
     extra: dict,
     view_dir_name: str,
 ) -> None:
-    """按 auto_view spec 调用 render_view；输出目录名为 view_dir_name（如 auto_path_0004_seq）。"""
-    common = dict(
-        rebuild=True,
-        use_HDRI=False,
-        width=int(spec.get("width", 1000)),
-        height=int(spec.get("height", 1000)),
-        manual_fov=float(spec["manual_fov"]),
-        auto_fov=False,
-        auto_transparent=True,
-        view_dir_name=view_dir_name,
-        **extra,
-    )
-    if spec["type"] == "single":
-        ctx.render_view(
-            output_path=output_dir,
-            camera_position=spec["camera_position"],
-            look_at_target=spec["look_at_target"],
-            up_vector=spec.get("up_vector", [0.0, 0.0, 1.0]),
-            **common,
-        )
-        return
-    if spec["type"] == "sequence":
-        ctx.render_view(
-            output_path=output_dir,
-            camera_position=spec["camera_positions"],
-            look_at_target=spec["look_at_targets"],
-            up_vector=spec.get("up_vectors", [0.0, 0.0, 1.0]),
-            **common,
-        )
-        return
-    raise ValueError(f"未知 auto_view type: {spec.get('type')!r}")
+    """Invoke render_view from an auto_view spec; output dir name is view_dir_name (e.g. auto_path_0004_seq)."""
+    _render_view_spec(ctx, output_dir, spec, extra, view_dir_name)
 
 
 # ---------------------------------------------------------------------------
-# 子进程 worker（每视角独立进程）
+# Subprocess workers (one process per view)
 # ---------------------------------------------------------------------------
 
 def _load_job(job_path: str) -> dict:
@@ -172,7 +292,7 @@ def _load_job(job_path: str) -> dict:
 
 
 def _instantiate_ctx(backend: str, room_type: str, asset_dir: Optional[str]):
-    """按 backend 创建 SceneCtx / BpySceneCtx。"""
+    """Create SceneCtx / BpySceneCtx for the given backend."""
     if backend == "pyrender":
         try:
             from .core.scenebuilder import SceneCtx
@@ -230,7 +350,7 @@ def _prepare_render_ctx(
 def _create_render_ctx(job: dict):
     scene_json = job["scene_json"]
     if job.get("normalized_topdown"):
-        print("   [worker] 使用 job 内已规范化的 scene_json（pixel-aligned SSL）")
+        print("   [worker] Using normalized scene_json from job (pixel-aligned SSL)")
     ctx = _instantiate_ctx(
         job.get("backend", "bpy"),
         scene_json["room"]["room_type"],
@@ -287,25 +407,37 @@ def worker_render_view(job_path: str, view_name: str) -> None:
         )
 
     auto_specs = job.get("auto_view_specs") or {}
-    auto_spec = auto_specs.get(view_name)
+    custom_specs = job.get("custom_view_specs") or {}
+    view_spec = auto_specs.get(view_name) or custom_specs.get(view_name)
     if job.get("resume", True) and is_view_complete(
-        output_dir, view_name, job, auto_spec=auto_spec
+        output_dir, view_name, job, auto_spec=view_spec
     ):
-        print(f"⏭️  跳过已完成视角: {view_name}")
+        print(f"⏭️  Skipping completed view: {view_name}")
         return
 
     if job.get("resume", True):
         missing = missing_view_artifacts(
-            output_dir, view_name, job, auto_spec=auto_spec
+            output_dir, view_name, job, auto_spec=view_spec
         )
         extra = apply_partial_resume_to_kwargs(job, missing)
         if missing:
-            print(f"🔧 补跑缺失产物 [{view_name}]: {', '.join(sorted(missing))}")
+            print(f"🔧 Re-running missing artifacts [{view_name}]: {', '.join(sorted(missing))}")
     else:
         extra = _job_render_kwargs(job)
 
     if view_name in auto_specs:
         _render_auto_view_spec(ctx, output_dir, auto_specs[view_name], extra, view_dir_name=view_name)
+        view_dir = view_dir_for(output_dir, view_name)
+        record_view_complete(
+            output_dir,
+            view_name,
+            view_dir=view_dir,
+            main_pngs=list_primary_frames(view_dir),
+        )
+        return
+
+    if view_name in custom_specs:
+        _render_view_spec(ctx, output_dir, custom_specs[view_name], extra, view_dir_name=view_name)
         view_dir = view_dir_for(output_dir, view_name)
         record_view_complete(
             output_dir,
@@ -337,7 +469,7 @@ def worker_render_view(job_path: str, view_name: str) -> None:
     look_at = job["look_at"]
     view_cameras = job["view_cameras"]
     if view_name not in view_cameras:
-        raise ValueError(f"未知视角: {view_name}")
+        raise ValueError(f"Unknown view: {view_name}")
 
     ctx.render_view(
         output_path=output_dir,
@@ -371,7 +503,7 @@ def worker_render_post(job_path: str) -> None:
         return
 
     if job.get("resume", True) and is_post_export_complete(output_dir, job):
-        print("⏭️  跳过全场景几何导出（已完成）")
+        print("⏭️  Skipping full-scene geometry export (already complete)")
         return
 
     ctx = _create_render_ctx(job)
@@ -382,23 +514,23 @@ def worker_render_post(job_path: str) -> None:
         try:
             ctx.export_glb(glb_path, rebuild=True, show_ceiling=True)
         except Exception as exc:
-            print(f"⚠️ GLB 导出失败: {exc}")
+            print(f"⚠️ GLB export failed: {exc}")
 
     if job.get("export_point_cloud"):
         point_cloud_dir = os.path.join(output_dir, "pointcloud")
         try:
             ctx.export_point_cloud(point_cloud_dir, rebuild=True, show_ceiling=True)
         except Exception as exc:
-            print(f"⚠️ 点云导出失败: {exc}")
+            print(f"⚠️ Point cloud export failed: {exc}")
 
     if job.get("export_voxel"):
         if hasattr(ctx, "export_voxel"):
             try:
                 ctx.export_voxel(output_dir, rebuild=True, show_ceiling=True)
             except Exception as exc:
-                print(f"⚠️ 体素导出失败: {exc}")
+                print(f"⚠️ Voxel export failed: {exc}")
         else:
-            print("⚠️ 当前后端不支持全场景体素导出")
+            print("⚠️ Current backend does not support full-scene voxel export")
 
     with open(os.path.join(output_dir, "data.json"), "w", encoding="utf-8") as f:
         json.dump(scene_json, f, indent=2, ensure_ascii=False)
@@ -423,7 +555,7 @@ def _spawn_worker_post(job_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 主入口
+# Main entry
 # ---------------------------------------------------------------------------
 
 def _run_normalized_topdown_phase(
@@ -436,13 +568,13 @@ def _run_normalized_topdown_phase(
     height: int = 1000,
     show_ceiling: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """在 Y/topdown_normalized/ 渲染 1000² 像素对齐俯视图，并可选采样地板路径。"""
+    """Render a 1000² pixel-aligned top-down view under Y/topdown_normalized/ and optionally sample the floor path."""
     if not hasattr(ctx, "normalized_topdown_view"):
-        raise RuntimeError("当前后端不支持 normalized_topdown_view")
+        raise RuntimeError("Current backend does not support normalized_topdown_view")
 
     topdown_norm_dir = os.path.join(output_dir, TOPDOWN_NORMALIZED_SUBDIR)
     os.makedirs(topdown_norm_dir, exist_ok=True)
-    print(f"🗺️  像素对齐俯视图 + 地板路径 → {topdown_norm_dir}")
+    print(f"🗺️  Pixel-aligned top-down view + floor path → {topdown_norm_dir}")
 
     ctx.normalized_topdown_view(
         topdown_norm_dir,
@@ -493,9 +625,9 @@ def render_normalized_topdown(
     export_glb: bool = False,
     export_point_cloud: bool = False,
 ) -> Union[str, Dict[str, Any]]:
-    """像素对齐模式：等价于 ``render_ssl(..., normalized_topdown=True, views=None)``。
+    """Pixel-aligned mode: equivalent to ``render_ssl(..., normalized_topdown=True, views=None)``.
 
-    唯一输出目录 Y = ``{output_dir}_normalized``；路径规划产物在 ``Y/topdown_normalized/``。
+    Output root Y = ``{output_dir}_normalized``; path-planning artifacts live under ``Y/topdown_normalized/``.
     """
     y_dir, _, floor_result = render_ssl(
         input_text,
@@ -565,19 +697,26 @@ def render_ssl(
     normalized_topdown_height: int = 1000,
     normalized_topdown_show_ceiling: bool = False,
     resume: bool = True,
+    camera_position: Any = None,
+    look_at: Any = None,
+    up_vector: Any = None,
 ):
-    """渲染场景。``input_text`` 可为标准 SSL 文本，或 JSON 字符串。
+    """Render a scene. ``input_text`` may be standard SSL text or a JSON string.
 
-    ``visible_geometry=True`` 时会强制 ``semantic=True``（可见比例依赖 semantic mask）。
+    ``visible_geometry=True`` forces ``semantic=True`` (visible ratio depends on semantic mask).
 
-    ``normalized_topdown=True`` 时：
-    - 唯一输出根目录 Y = ``{output_root}_normalized``（否则 Y = ``{output_root}``）
-    - 先对 SSL 做 pixel-aligned 规范化，后续所有渲染均基于该坐标系
-    - 自动在 ``Y/topdown_normalized/`` 渲染像素对齐俯视图 + 地板路径
-    - 再在 Y 下按 ``views`` 渲染 ``topdown/``、序列视角等（``views=None`` 时不渲染任何视角）
-    - ``views="auto"``：强制规范化 + 地板路径，随后渲染常规 topdown + 按路径自动生成视角
+    When ``normalized_topdown=True``:
+    - Output root Y = ``{output_root}_normalized`` (otherwise Y = ``{output_root}``)
+    - Apply pixel-aligned SSL normalization first; all subsequent rendering uses that frame
+    - Automatically render pixel-aligned top-down + floor path under ``Y/topdown_normalized/``
+    - Then render ``topdown/``, sequence views, etc. under Y per ``views`` (``views=None`` skips preset views)
+    - ``views="auto"``: force normalization + floor path, then render regular topdown + path-driven auto views
 
-    各视角在世界（或规范化）SSL 下渲染；可见几何主文件为世界 SSL，并写 ``*_opencv`` 副本。
+    When ``camera_position`` / ``look_at`` are provided, append a custom single frame (``custom/``)
+    or sequence (``custom_seq/``) after the ``views`` specified above finish.
+    ``up_vector`` is optional: ``render_view`` defaults to ``[0,0,1]``; uses ``[0,1,0]`` when collinear.
+
+    Each view renders in world (or normalized) SSL; visible-geometry primary files use world SSL with ``*_opencv`` copies.
     """
     if visible_geometry:
         semantic = True
@@ -592,7 +731,7 @@ def render_ssl(
     except (ImportError, ValueError):
         from core.util_data import get_mesh  # type: ignore
 
-    print(f"\n🚀 开始渲染 [后端: {backend}, 资产模式: {asset_mode}]")
+    print(f"\n🚀 Starting render [backend: {backend}, asset_mode: {asset_mode}]")
 
     scene_json = parse_scene_input(input_text)
 
@@ -624,7 +763,7 @@ def render_ssl(
 
     pixel_align: Optional[Dict[str, Any]] = None
     if normalized_topdown:
-        print(f"📐 Step 1: pixel-aligned SSL 规范化 → 输出根目录 Y = {y_dir}")
+        print(f"📐 Step 1: pixel-aligned SSL normalization → output root Y = {y_dir}")
         pixel_align = prepare_pixel_aligned_topdown_context(ctx.context)
         apply_scene_json_xy_translation(
             scene_json,
@@ -664,10 +803,10 @@ def render_ssl(
             )
         )
         if skip_norm:
-            print(f"⏭️  跳过 pixel-aligned topdown_normalized（已完成）→ {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
+            print(f"⏭️  Skipping pixel-aligned topdown_normalized (already complete) → {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
             floor_result = load_floor_result_from_disk(y_dir) if floor_path else None
         else:
-            print(f"📐 Step 2: topdown_normalized + 地板路径 → {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
+            print(f"📐 Step 2: topdown_normalized + floor path → {y_dir}/{TOPDOWN_NORMALIZED_SUBDIR}/")
             floor_result = _run_normalized_topdown_phase(
                 ctx,
                 y_dir,
@@ -683,7 +822,7 @@ def render_ssl(
     z_max = ctx.context["meta"]["z_max"]
     look_at = [center[0], center[1], z_max / 2]
     z_cam = z_max * 5 / 6
-    # 透视视角相机位置（改这里即可，子进程从 job 读取）
+    # Perspective view camera positions (edit here; subprocesses read from job)
     view_cameras = {
         "front": [center[0], center[1] - span[1] / 3, z_cam],
         "behind": [center[0], center[1] + span[1] / 3, z_cam],
@@ -702,13 +841,29 @@ def render_ssl(
     job_path = os.path.join(y_dir, ".render_job.json")
     auto_view_specs: Dict[str, Dict[str, Any]] = {}
     auto_view_names: List[str] = []
+    custom_view_specs: Dict[str, Dict[str, Any]] = {}
+    custom_view_names: List[str] = []
     if views == "auto":
         if backend != "bpy":
-            print("⚠️  views=auto 目前仅支持 backend=bpy，已跳过 auto 视角")
+            print("⚠️  views=auto currently only supports backend=bpy; skipped auto views")
         else:
             auto_view_specs, auto_view_names = _run_auto_views_from_path(
                 y_dir, floor_result, ctx.context, resume=resume
             )
+
+    if camera_position is not None:
+        custom_name, custom_spec = _build_custom_view_spec(
+            camera_position,
+            look_at,
+            up_vector=up_vector,
+        )
+        custom_view_specs[custom_name] = custom_spec
+        custom_view_names.append(custom_name)
+        print(
+            f"🎯 Custom view (appended): {custom_name} "
+            f"({'sequence' if custom_spec['type'] == 'sequence' else 'single frame'}, "
+            f"{len(custom_spec.get('camera_positions', [custom_spec.get('camera_position')]))} frames)"
+        )
 
     job = {
         "backend": backend,
@@ -732,6 +887,7 @@ def render_ssl(
         "look_at": look_at,
         "view_cameras": view_cameras,
         "auto_view_specs": auto_view_specs,
+        "custom_view_specs": custom_view_specs,
         "resume": resume,
     }
     with open(job_path, "w", encoding="utf-8") as f:
@@ -740,34 +896,38 @@ def render_ssl(
     views_to_run = _resolve_views_to_run(views, view_cameras)
     if views == "auto":
         if backend == "bpy":
-            # 常规 topdown（Y/topdown/，1024²）+ 路径驱动 auto 视角
+            # Regular topdown (Y/topdown/, 1024²) + path-driven auto views
             views_to_run = ["topdown"] + list(auto_view_names)
         else:
             views_to_run = []
+
+    for custom_name in custom_view_names:
+        if custom_name not in views_to_run:
+            views_to_run.append(custom_name)
 
     if views_to_run:
         views_to_run, skipped_views = filter_views_to_run(
             y_dir, views_to_run, job, resume=resume
         )
         if skipped_views:
-            print(f"⏭️  已跳过 {len(skipped_views)} 个已完成视角: {', '.join(skipped_views)}")
+            print(f"⏭️  Skipped {len(skipped_views)} completed views: {', '.join(skipped_views)}")
     if views_to_run:
         step = "Step 3: " if normalized_topdown else ""
-        print(f"🎨 {step}多视角渲染 → {y_dir} ({len(views_to_run)} 个子进程)")
+        print(f"🎨 {step}Multi-view rendering → {y_dir} ({len(views_to_run)} subprocesses)")
         for view_name in views_to_run:
-            print(f"🔄 子进程渲染: {view_name}")
+            print(f"🔄 Subprocess rendering: {view_name}")
             _spawn_worker_view(job_path, view_name)
     elif views == "auto":
-        print("⏭️  auto 视角未生成（backend 不支持 bpy）")
-    elif normalized_topdown:
-        print("⏭️  未指定 views，跳过多视角渲染")
+        print("⏭️  Auto views not generated (backend does not support bpy)")
+    elif not views_to_run and normalized_topdown:
+        print("⏭️  No views specified; skipping multi-view rendering")
 
     need_holo_post = holo_geometry and (export_glb or export_point_cloud or export_voxel)
     if need_holo_post:
-        print(f"🔄 子进程导出全场景几何 → {y_dir}")
+        print(f"🔄 Subprocess exporting full-scene geometry → {y_dir}")
         _spawn_worker_post(job_path)
 
-    print(f"✅ 渲染完成！输出目录: {os.path.abspath(y_dir)}")
+    print(f"✅ Render complete! Output directory: {os.path.abspath(y_dir)}")
     return y_dir, standard_ssl, floor_result
 
 
@@ -779,7 +939,7 @@ ALL_VIEWS = [
 
 
 def _prepare_ssl_and_dirs(args) -> tuple:
-    """读取 SSL/JSON 输入，解析输出目录与资产/贴图路径。"""
+    """Read SSL/JSON input and resolve output directory plus asset/texture paths."""
     output_dir = args.output
     if output_dir is None:
         output_dir = os.path.join(os.path.dirname(args.ssl), "render_output")
@@ -826,10 +986,10 @@ def _prepare_ssl_and_dirs(args) -> tuple:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="从 SSL/JSON 场景文件渲染多视角图像并导出 GLB/点云等",
+        description="Render multi-view images from SSL/JSON scene files and export GLB/point clouds, etc.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例（等价于 SpatialFactory/scripts/render_scene.py 的常用命令）:
+Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.py):
 
   python /data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/render_ssl.py \\
     --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt \\
@@ -839,40 +999,56 @@ def main() -> None:
     --ply --visible_geometry --semantic --depth --pano
 """,
     )
-    parser.add_argument("--ssl", required=True, help="SSL 或 JSON 场景文件路径")
-    parser.add_argument("--output", default=None, help="输出目录（默认: ssl 同目录下 render_output）")
+    parser.add_argument("--ssl", required=True, help="Path to SSL or JSON scene file")
+    parser.add_argument("--output", default=None, help="Output directory (default: render_output next to ssl file)")
     parser.add_argument(
         "--views", nargs="*", default=None, metavar="VIEW",
-        help=f"视角列表（{', '.join(ALL_VIEWS)}）；不指定则不渲染视角；"
-             f"指定 auto 则强制 normalized_topdown + 地板路径并按路径自动生成视角",
+        help=f"View list ({', '.join(ALL_VIEWS)}); omit to skip preset views; "
+             f"auto forces normalized_topdown + floor path and auto-generates views from path; "
+             f"--camera_position / --look_at append custom views after views finish",
     )
-    parser.add_argument("--backend", choices=["bpy", "pyrender"], default="bpy", help="渲染后端")
-    parser.add_argument("--texture", default=None, help="贴图目录")
-    parser.add_argument("--assets", default=None, help="3D 资产目录（未指定时尝试自动检测）")
-    parser.add_argument("--glb", action="store_true", help="导出 GLB")
-    parser.add_argument("--ply", action="store_true", help="导出彩色点云 PLY")
+    parser.add_argument(
+        "--camera_position",
+        default=None,
+        help="JSON: [x,y,z] for single frame, or [[x,y,z], ...] for sequence; appends custom/custom_seq after views",
+    )
+    parser.add_argument(
+        "--look_at",
+        default=None,
+        help="JSON: [x,y,z] or [[x,y,z], ...]; for sequences, a single point (shared) or same length as camera_position",
+    )
+    parser.add_argument(
+        "--up_vector",
+        default=None,
+        help="JSON: [x,y,z] or [[x,y,z], ...]; defaults to [0,0,1] in render_view; auto [0,1,0] when view axis is collinear",
+    )
+    parser.add_argument("--backend", choices=["bpy", "pyrender"], default="bpy", help="Render backend")
+    parser.add_argument("--texture", default=None, help="Texture directory")
+    parser.add_argument("--assets", default=None, help="3D asset directory (auto-detected if omitted)")
+    parser.add_argument("--glb", action="store_true", help="Export GLB")
+    parser.add_argument("--ply", action="store_true", help="Export colored point cloud PLY")
     parser.add_argument("--visible_geometry", action="store_true",
-                        help="各视角视锥内 GLB/PLY/体素（需配合 --glb、--ply 或 --voxel）")
+                        help="Per-view frustum GLB/PLY/voxel (requires --glb, --ply, or --voxel)")
     parser.add_argument("--holo_geometry", action="store_true",
-                        help="根目录全场景 GLB/点云/体素（需配合 --glb、--ply 或 --voxel）")
+                        help="Root-level full-scene GLB/point cloud/voxel (requires --glb, --ply, or --voxel)")
     parser.add_argument("--voxel", action="store_true",
-                        help="256³ 彩色占用体素（各视角需 --visible_geometry，根目录需 --holo_geometry）")
-    parser.add_argument("--semantic", action="store_true", help="导出语义分割图")
-    parser.add_argument("--depth", action="store_true", help="导出深度图与法线图")
+                        help="256³ colored occupancy voxel (per-view needs --visible_geometry, root needs --holo_geometry)")
+    parser.add_argument("--semantic", action="store_true", help="Export semantic segmentation map")
+    parser.add_argument("--depth", action="store_true", help="Export depth map and normal map")
     parser.add_argument("--pano", action="store_true",
-                        help="为 render_view 普通视角额外导出兄弟目录 {毫秒时间戳}_pano（topdown 不生成）")
+                        help="For render_view perspectives, also export sibling dir {millis_timestamp}_pano (not for topdown)")
     parser.add_argument("--pano_resolution", type=int, default=4096,
-                        help="全景图横向分辨率，仅 --pano 时生效；高度为横向分辨率的一半（默认: 4096，即 4096x2048）")
+                        help="Panorama horizontal resolution; only with --pano; height is half (default: 4096, i.e. 4096x2048)")
     parser.add_argument("--normalized_topdown", action="store_true",
-                        help="启用 pixel-aligned SSL：唯一输出 Y={output}_normalized，"
-                             "先 Y/topdown_normalized 路径规划，再渲染各 views")
+                        help="Enable pixel-aligned SSL: sole output Y={output}_normalized, "
+                             "Y/topdown_normalized path planning first, then render views")
     parser.add_argument("--no_floor_path", action="store_true",
-                        help="配合 --normalized_topdown：跳过 topdown_normalized 下的地板路径采样")
-    parser.add_argument("--samples", type=int, default=None, help="Blender 采样数")
+                        help="With --normalized_topdown: skip floor path sampling under topdown_normalized")
+    parser.add_argument("--samples", type=int, default=None, help="Blender sample count")
     parser.add_argument(
         "--no-resume",
         action="store_true",
-        help="禁用断点续跑，强制重新渲染所有视角与导出",
+        help="Disable resume; force re-render all views and exports",
     )
 
     args = parser.parse_args()
@@ -891,7 +1067,7 @@ def main() -> None:
         print("ℹ️  views=auto → normalized_topdown=True, floor_path=True")
     else:
         if "auto" in args.views:
-            parser.error("--views auto 不能与其它视角同时使用")
+            parser.error("--views auto cannot be combined with other views")
         views = list(args.views)
 
     render_kwargs = dict(
@@ -917,6 +1093,15 @@ def main() -> None:
     )
     if args.samples is not None:
         render_kwargs["samples"] = args.samples
+
+    if args.camera_position is not None or args.look_at is not None:
+        if args.camera_position is None:
+            parser.error("--camera_position is required when using --look_at")
+        render_kwargs["camera_position"] = _parse_camera_cli_arg(args.camera_position, "camera_position")
+        if args.look_at is not None:
+            render_kwargs["look_at"] = _parse_camera_cli_arg(args.look_at, "look_at")
+        if args.up_vector is not None:
+            render_kwargs["up_vector"] = _parse_camera_cli_arg(args.up_vector, "up_vector")
 
     y_dir, _, floor_result = render_ssl(input_text, **render_kwargs)
     print(f"Output: {y_dir}")

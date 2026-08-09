@@ -1,60 +1,59 @@
 
 
-#  1. pyrender配置
-# scenebuilder专用配置, 在 scenebuilder_bpy 中没有用到
-# 资产路径均相对 scenebuilder 包根目录 (与 config.yaml 同级)
+#  1. pyrender config
+# scenebuilder-specific settings (not used in scenebuilder_bpy)
+# Asset paths are relative to scenebuilder package root (same level as config.yaml)
 floor_texture_path: assets/textures/floor_texture2.png
 ceiling_texture_path: assets/textures/wall_texture3.png
 wall_texture_path: assets/textures/wall_texture3.png
 door_texture_path: assets/textures/door.png
 window_texture_path: assets/textures/window.png
-wall_color:  # 墙体颜色, 在 scenebuilder_bpy 中为材质不存在下的备选
+wall_color:  # Wall color; fallback in scenebuilder_bpy when material is missing
 - 1.2
 - 1.2
 - 1.2
 - 1.0
-wall_edge_enabled: true  # 是否显示墙体边缘线条让墙体看起来更明显
-wall_edge_color:  # 边缘线条颜色 [R, G, B, A]
+wall_edge_enabled: true  # Show wall edge lines for clearer wall appearance
+wall_edge_color:  # Edge line color [R, G, B, A]
 - 0.1
 - 0.1
 - 0.1
 - 1.0
-wall_edge_offset: 0.01  # 边缘线向房间内部偏移距离（米），避免相邻墙边缘重叠  
+wall_edge_offset: 0.01  # Edge line inset toward room interior (m), avoids overlapping adjacent wall edges  
     
     
-# 2. scenebuilder_bpy中使用的配置
+# 2. Config used in scenebuilder_bpy
 floor_blender_texture_path: assets/textures/oak_veneer_01_1k.blend/oak_veneer_01_1k.blend
 ceiling_blender_texture_path: assets/textures/polystyrene_1k.blend/polystyrene_1k.blend
 wall_blender_texture_path: assets/textures/polystyrene_1k.blend/polystyrene_1k.blend
 hdri_path: assets/HDRIs/qwantani_sunset_puresky_1k.exr
 
 
-model_path: /data-nas/data/dataset/qunhe/Manycore-Future/models # 原家具模型路径
-model_simplified_path: /data-nas/data/dataset/qunhe/Manycore-Future/simplified # 简化家具模型路径
-model_generate_path: /data-nas/data/dataset/qunhe/Manycore-Future/generate # 生成家具模型路径
-model_hole_path: /data-nas/data/dataset/qunhe/Manycore-Future/holes # 门窗模型路径
+model_path: /data-nas/data/dataset/qunhe/Manycore-Future/models # Original furniture model path
+model_simplified_path: /data-nas/data/dataset/qunhe/Manycore-Future/simplified # Simplified furniture model path
+model_generate_path: /data-nas/data/dataset/qunhe/Manycore-Future/generate # Generated furniture model path
+model_hole_path: /data-nas/data/dataset/qunhe/Manycore-Future/holes # Door/window model path
 
-# 渲染配置
-array_light_intensity: 20.0 # array 模式下每盏灯的强度
-blender_samples: 32 # Blender 渲染采样数
+# Render settings
+array_light_intensity: 20.0 # Light intensity per lamp in array mode
+blender_samples: 32 # Blender render sample count
 
 
 
-# 3. 通用配置
-wall_thickness: 0.2 # 墙体厚度
-wall_texture_scale: 0.5       # 墙体纹理：约 2m/次重复（接近 5px/cm @ 1K）
-floor_texture_scale: 0.25    # 地板纹理缩放系数
-ceiling_texture_scale: 0.5  # 天花板纹理缩放系数
-indoor_fov: 90  # 相机在房间内时的固定FOV（度）
-outdoor_fov_scale: 1.1  # 相机在房间外时FOV的缩放系数
+# 3. Shared config
+wall_thickness: 0.2 # Wall thickness
+wall_texture_scale: 0.5       # Wall texture: ~2m per repeat (~5px/cm @ 1K)
+floor_texture_scale: 0.25    # Floor texture scale factor
+ceiling_texture_scale: 0.5  # Ceiling texture scale factor
+indoor_fov: 90  # Fixed FOV (degrees) when camera is inside room
+outdoor_fov_scale: 1.1  # FOV scale factor when camera is outside room
 
-# 4. 归一化俯视图地板路径（深度 nav mask）
-nav_mask_depth_tolerance_m: 0.05  # 可行走深度：相机到地面距离 ± 此值（米）
-nav_mask_inset_m: 0.15           # 贴外边界向内偏移（米）
-nav_mask_point_spacing_m: 0.3    # 沿内边界采样点间距（米）
+# 4. Normalized top-down floor path (depth nav mask)
+nav_mask_depth_tolerance_m: 0.05  # Walkable depth: camera-to-ground distance ± this value (m)
+nav_mask_inset_m: 0.15           # Inset from outer boundary (m)
+nav_mask_point_spacing_m: 0.3    # Sample spacing along inner boundary (m)
 
-# 5. 可见几何 mask 判定
-ratio_if_visible: 0.1             # 可见 mask / 整体 mask 低于此比例视为 mostly_occluded
-min_overall_pixels: 16            # 整体 mask 像素数低于此值不参与可见比例判定与几何导出
-
+# 5. Visible geometry mask criteria
+ratio_if_visible: 0.1             # visible mask / overall mask below this → mostly_occluded
+min_overall_pixels: 16            # overall mask pixels below this skip visibility ratio and geometry export
 

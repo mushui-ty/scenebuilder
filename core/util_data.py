@@ -16,7 +16,7 @@ from PIL import Image
 
 
 def _import_core_util():
-    """兼容包内导入与 render_ssl 脚本通过 importlib 加载 util_data 的场景。"""
+    """Support package-relative imports and render_ssl loading util_data via importlib."""
     try:
         from . import util
         return util
@@ -106,11 +106,11 @@ def _create_orientation_agent():
     )
 
 def clean_str(content) -> str:
-    """将模型返回的原始 content 转换为带 Python 结构但换行符被还原的干净字符串。"""
+    """Convert raw model content to a clean string with Python structure and restored newlines."""
     if not content:
         return ""
     s = str(content)
-    # 还原转义字符，使其变为真实的换行和引号
+    # Restore escape sequences to real newlines and quotes
     return s.replace("\\n", "\n").replace('\\"', '"').replace("\\'", "'").replace("\\\\", "\\").strip()
 
 
@@ -120,7 +120,7 @@ def get_base64_data(image_path):
     base64_data = base64.b64encode(image_data).decode("utf-8")
     return base64_data
 async def run_conversation(agent, prompt, *image_paths) -> None:
-    """运行与模型的对话，支持传入多张图片。"""
+    """Run a conversation with the model; supports multiple input images."""
     from agentscope.message import Msg, ImageBlock, Base64Source, TextBlock
     contents = [
         ImageBlock(
@@ -241,16 +241,16 @@ def correct_single_asset(
     for p in rendered:
         print(p)
 
-    #! 第一轮,  给定前视图和俯视图, 通过判断哪个是物体的俯视图, 确定物体的 y 轴也就是 world_up(防止类似于地毯的物体立起来)
+    # Round 1: given front and top views, pick which is the top-down view to fix world_up (+Y) for flat objects like rugs
     agent = _create_orientation_agent()
 
     direction_prompt = Template('''
-    现在给你看两张图片, 依次是一个三维物体从两个方向看去的渲染图片, 请你从中找出一个最可能是从该物体的上方看过去的, 在你判断的过程中, 需要参考以下规则: 
-    - 所谓物体上方是指物体在自然摆放的时候的上方的位置, 例如一个桌子, 床, 椅子, 柜子, 衣架, 灯等家具
-    - 对于枕头等可以通过靠着床头立起来的物体, 也要将它在床上放平自然摆放后, 判定此时的上方, 也就是最大的那一面为上方
-    - 对于墙上的物体, 例如挂画, 门窗等比较薄的物体, 判断其上方的方式是其正常镶嵌在墙里或者挂在墙上时上方的位置, 也就是从上方看可能是一个细条或者一道线, 只有从正面看才能看到全貌
-    如果物体的 label 和 caption 不为 none, 你也可以作为参考, 否则请忽略, 该物体的 label 是 {{label}},  caption 是 {{caption}}.
-    你的输出结果是 1, 或者 2, 分别表示第一张图片和第二张图片中哪个是最可能是从该物体的上方看过去的, 请输出你的分析过程并最终严格按照三星号包裹的格式给出最终答案***1*** 或 ***2***.
+    You are shown two images in order: renderings of a 3D object from two different viewpoints. Pick the one that is most likely a top-down view of the object. Use these rules:
+    - "Top" means the natural upright top when the object is placed normally, e.g. tables, beds, chairs, cabinets, coat racks, lamps, and other furniture.
+    - For objects that can stand upright when leaned against a headboard, such as pillows, treat them as lying flat on the bed; the largest face in that pose is the top.
+    - For wall-mounted thin objects such as paintings, doors, and windows, "top" is the top edge when normally embedded in or hung on a wall; from above they may appear as a thin strip or line, while the full shape is visible from the front.
+    If the object's label and caption are not none, you may use them as reference; otherwise ignore them. Label={{label}}, caption={{caption}}.
+    Output 1 or 2, indicating which image is more likely the top-down view. Explain your reasoning, then give the final answer strictly in the format ***1*** or ***2***.
     ''').render(label=label, caption=caption)
 
 
@@ -297,7 +297,7 @@ def correct_single_asset(
     m = float(np.max(extent))
     x, y, z = center.tolist()
 
-    #! 第二轮: 通过前视图+侧视图, 判断物体的正面
+    # Round 2: use front + side views to determine the canonical front face
     camera_positions = {
         "front": np.array([x, y, z + 2*m], dtype=np.float64),
         "right": np.array([x + 2*m, y, z], dtype=np.float64),
@@ -334,16 +334,16 @@ def correct_single_asset(
         print(f"{idx}. {name}: {path}")
 
     front_prompt = Template('''
-    现在给你看两张图片, 依次是一个三维物体从两个方向看去的渲染图片。
-    请判断哪一张最可能是该物体的正面视角:
-    - 1 表示第一张
-    - 2 表示第二张
-    参考规则:
-    - 家具常见“正面”往往是功能面(门板/抽屉/屏幕/把手/开口)更明显的一侧
-    - 若两者都不明显, 则选择更宽的那一面作为正面, 如果两者宽度相同, 则选择更符合人类直觉“朝前”的一张, 并可说明不确定性
-    - L 形家具的正面应该正对着较宽的那条边
-    如果物体的 label 和 caption 不为 none, 可作为参考, 否则忽略。该物体 label={{label}}, caption={{caption}}。
-    最终答案必须严格是: ***1*** 或 ***2***.
+    You are shown two images in order: renderings of a 3D object from two different viewpoints.
+    Decide which image is most likely the canonical front view:
+    - 1 means the first image
+    - 2 means the second image
+    Rules:
+    - For furniture, the "front" is often the functional face with more visible doors/drawers/screens/handles/openings
+    - If neither is obvious, choose the wider face as the front; if both are equally wide, choose the one that feels more naturally "forward-facing" and note any uncertainty
+    - For L-shaped furniture, the front should face the wider leg
+    If label and caption are not none, you may use them as reference; otherwise ignore them. label={{label}}, caption={{caption}}.
+    The final answer must be exactly: ***1*** or ***2***.
     ''').render(label=label, caption=caption)
 
     max_retry = 20
@@ -391,10 +391,10 @@ def correct_single_asset(
     else:
         print("No rotation applied.")
 
-    #! 第三轮: 通过前视图+侧视图+俯视图, 判断物体三个方向是否有倾斜
+    # Round 3: use front + side + top views to estimate tilt on all three axes
 
     if correct_tilt:
-        # 第三轮处理
+        # Round 3 processing
         bounds = scene.bounds
         center = bounds.mean(axis=0)
         extent = bounds[1] - bounds[0]
@@ -437,24 +437,24 @@ def correct_single_asset(
             print(f"{idx}. {name}: {path}")
 
         tilt_prompt = Template('''
-        现在给你看同一个三维物体的 3 张渲染图，顺序固定为:
-        1) front: 从 z 轴正方向看向负方向
-        2) right: 从 x 轴正方向看向负方向
-        3) up: 从 y 轴正方向看向负方向
+        You are shown 3 renderings of the same 3D object, in this fixed order:
+        1) front: looking from +Z toward -Z
+        2) right: looking from +X toward -X
+        3) up: looking from +Y toward -Y
 
-        任务: 判断物体是否有“明显倾斜”。只有在倾斜非常明显时才给非零修正角，否则三个轴都输出 0。
-        角度定义:
-        - 正角度表示逆时针旋转可以摆正
-        - 负角度表示顺时针旋转可以摆正
-        - 单位是度
+        Task: decide whether the object is clearly tilted. Only output non-zero correction angles when the tilt is very obvious; otherwise output 0 on all three axes.
+        Angle convention:
+        - Positive angles mean counterclockwise rotation straightens the object
+        - Negative angles mean clockwise rotation straightens the object
+        - Units are degrees
 
-        请给出绕 x/y/z 三个轴的修正角(用于把物体摆正)。
-        如果你不确定，请保守输出 0，避免过度修正。
-        如果物体 label/caption 可用，可以参考: label={{label}}, caption={{caption}}。
+        Give correction angles around the x/y/z axes to upright the object.
+        If unsure, conservatively output 0 to avoid over-correction.
+        If label/caption are available, you may reference them: label={{label}}, caption={{caption}}.
 
-        最后必须严格输出如下格式(只允许一行):
+        You must output exactly one line in this format:
         ***X=<float>,Y=<float>,Z=<float>***
-        例如: ***X=0,Y=-12.5,Z=3***
+        Example: ***X=0,Y=-12.5,Z=3***
         ''').render(label=label, caption=caption)
 
         max_retry = 20
@@ -527,7 +527,7 @@ def correct_single_asset(
     else:
         print("Skip third-round tilt correction (correct_tilt=False).")
 
-    #! 第四轮处理：对比 asset 俯视图与 bbox crop，估计绕 y 轴的朝向修正角(主要是对齐图里面的内容, 防止前面的流程 orientation 判断错)
+    # Round 4: compare asset top view vs bbox crop to estimate yaw correction (align with scene crop, fix prior orientation errors)
     if bbox_cropped_path and os.path.exists(bbox_cropped_path):
         bounds = scene.bounds
         center = bounds.mean(axis=0)
@@ -558,27 +558,27 @@ def correct_single_asset(
             renderer.delete()
 
         compare_prompt = Template('''
-        在给定的俯视图设定中，已知 y 轴垂直于水平地面向上，x 轴在图片中水平向右，z 轴指向图片上方（但不是真正的水平面上方）。
-        现在给你两张图片：一张是目标资产的俯视图，一张是从目标场景俯视图中把目标资产裁剪出来的局部俯视图（尽管我们的视角在场景中心的正上方，但可能不在物体的正上方）。
-        - 第 1 张：从单个 3D asset 的正上方俯视渲染图（从 y 轴正方向看向负方向）。
-        - 第 2 张：原图里直接按 bbox 裁剪得到的目标局部图。原图是场景中心正上方 (x_center, y_camera, z_center) 看向场景地面中心 (x_center, 0, z_center) 的透视相机拍摄，图 2 是其中目标物体的裁剪区域。
+        In this top-down setup, the y axis points up from the horizontal ground, the x axis runs horizontally to the right in the image, and the z axis points toward the top of the image (not toward true horizontal "up").
+        You are given two images: a top-down view of the target asset, and a local top-down crop of that asset from the scene top-down view (although our viewpoint is directly above the scene center, it may not be directly above the object).
+        - Image 1: a top-down render of a single 3D asset (looking from +Y toward -Y).
+        - Image 2: a local crop of the target object from the original scene image. The original image is a perspective camera above the scene center (x_center, y_camera, z_center) looking at the floor center (x_center, 0, z_center); image 2 is the cropped region containing the target object.
 
-        重要：图 2 来自透视投影。当物体靠近画面边缘时，透视会导致物体与地面垂直的面在 2D 图像中看起来倾斜，但这不代表其真实 3D 朝向一定有偏差。此时应优先根据物体与支撑面接触处的底线在俯视平面上的投影与 x 轴的角度来判断物体是否真的有倾斜。例如：门朝向画面下方时，若门靠近边缘，透视会让门面在图中呈斜线，此时门真实朝向应根据门与地面相交的底线在俯视平面上的投影是否平行于 x 轴来判断, 或者根据物体的顶部纹理来判断(不能是侧面)。若物体没有清晰的底线（如柜子、桌子）, 也看不到物体顶部纹理，难以可靠判断时，输出 0。对于门窗等看不到顶部纹理的物体就只能通过底线判断了.
+        Important: image 2 comes from perspective projection. When an object is near the image edge, perspective can make faces perpendicular to the ground look slanted in 2D even if the true 3D orientation is fine. Prefer judging real tilt by the angle between the contact baseline projected onto the top-down plane and the x axis. For example, when a door faces downward in the image and sits near the edge, perspective may slant the door face; then infer the true orientation from whether the door-ground contact baseline projected onto the top-down plane is parallel to the x axis, or from top-surface texture (not side texture). If there is no clear baseline (e.g. cabinets, tables) and no visible top texture, output 0 when judgment is unreliable. For doors/windows without visible top texture, rely on the baseline only.
 
-        任务：判断 asset 的真实 3D 朝向与图 2 中物体的真实朝向是否一致；若不一致，需要绕 y 轴旋转多少度。
-        角度定义：
-        - 逆时针旋转为正角度
-        - 顺时针旋转为负角度
-        - 单位是度，可为小数
-        - 如果无法可靠判断，输出 0
-        - 如果两张图主朝向差异不明显（例如接近、模糊、近似对齐、对称导致难判断），一律输出 0
-        - 若图 2 中的倾斜很可能是透视变形造成（物体靠近边缘、仰视/俯视导致的投影变形），一律输出 0
-        - 只有当你能通过底线和顶部纹理明确区分「真实朝向偏差」与「透视造成的视觉倾斜」，且确认存在真实偏差时，才输出非 0 角度
+        Task: decide whether the asset's true 3D orientation matches the true orientation of the object in image 2; if not, how many degrees to rotate around the y axis.
+        Angle convention:
+        - Counterclockwise rotation is positive
+        - Clockwise rotation is negative
+        - Units are degrees; decimals allowed
+        - Output 0 if judgment is unreliable
+        - Output 0 if the main orientations are similar (close, blurry, nearly aligned, or hard to judge due to symmetry)
+        - Output 0 if the slant in image 2 is likely perspective distortion (object near edge, projection from oblique top/bottom views)
+        - Output a non-zero angle only when you can clearly separate real orientation error from perspective-induced visual tilt using baseline and top texture, and confirm a real mismatch
 
-        参考信息（若非 none）：label={{label}}, caption={{caption}}。
-        你可以先分析，但最终必须严格按以下格式输出（仅一行）：
+        Reference info (if not none): label={{label}}, caption={{caption}}.
+        You may analyze first, but the final output must be exactly one line:
         ***Y=<float>***
-        例如：***Y=90*** 或 ***Y=-22.5*** 或 ***Y=0***。
+        Examples: ***Y=90*** or ***Y=-22.5*** or ***Y=0***.
         ''').render(label=label, caption=caption)
 
         max_retry = 20
@@ -713,7 +713,7 @@ def _normalize_room(room: Any) -> Dict[str, Any]:
 
 
 def normalize_scene_json(obj: Dict[str, Any]) -> Dict[str, Any]:
-    """将外部 JSON 场景 dict 规范化为 render_ssl 使用的 scene_json 结构。"""
+    """Normalize an external JSON scene dict into the scene_json structure used by render_ssl."""
     walls = obj.get("wall")
     if walls is None:
         walls = obj.get("walls", [])
@@ -737,26 +737,26 @@ def normalize_scene_json(obj: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def parse_scene_input(scene_text: str) -> Dict[str, Any]:
-    """解析场景输入：支持标准 SSL 文本，或含 wall/door/window/bbox/room 的 JSON 字符串。"""
+    """Parse scene input: standard SSL text or a JSON string with wall/door/window/bbox/room fields."""
     stripped = (scene_text or "").strip()
     if not stripped:
-        raise ValueError("场景输入为空")
+        raise ValueError("Scene input is empty")
     if stripped.startswith("{") or stripped.startswith("["):
         try:
             payload = json.loads(stripped)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"JSON 场景解析失败: {exc}") from exc
+            raise ValueError(f"Failed to parse JSON scene: {exc}") from exc
         if isinstance(payload, dict):
             if any(k in payload for k in ("wall", "walls", "door", "doors", "window", "windows", "bbox", "bboxes", "boxes")):
                 return normalize_scene_json(payload)
-            raise ValueError("JSON 缺少 wall/door/window/bbox 等场景字段")
-        raise ValueError("JSON 场景必须是 object（dict）")
+            raise ValueError("JSON is missing scene fields such as wall/door/window/bbox")
+        raise ValueError("JSON scene must be an object (dict)")
     return parse_ssl_to_json(stripped)
 
 
 def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
     """
-    解析SSL格式场景描述并返回指定的JSON结构
+    Parse SSL-format scene description and return the target JSON structure.
     """
     data = {
         "wall": [],
@@ -766,7 +766,7 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
         "room": {"room_type": "unknown"}
     }
 
-    # 提取属性的正则辅助函数
+    # Regex helpers for attribute extraction
     def get_attr(pattern, text, default=None):
         match = re.search(pattern, text)
         return match.group(1) if match else default
@@ -781,14 +781,14 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
         if value is not None:
             target_dict[key] = value
 
-    # 存储解析出的 caption，以便后续匹配
+    # Parsed captions keyed by id for later matching
     captions_map = {}
 
     for line in ssl_text.strip().split('\n'):
         line = line.strip()
         if not line: continue
 
-        # 解析 Caption(id="...", caption="...")
+        # Parse Caption(id="...", caption="...")
         if line.startswith('Caption('):
             cid = get_attr(r'id="([^"]+)"', line)
             cval = get_attr(r'caption="([^"]+)"', line)
@@ -851,7 +851,7 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
             add_if_present(bbox_item, "bbox_2d", get_list_attr(r'bbox_2d=\[([^\]]+)\]', line))
             data["bbox"].append(bbox_item)
 
-    # 将独立的 Caption 匹配回对应的物体
+    # Attach standalone Caption entries to their objects
     for category in ["bbox", "door", "window"]:
         if category in data:
             for item in data[category]:
@@ -862,7 +862,7 @@ def parse_ssl_to_json(ssl_text: str) -> Dict[str, Any]:
     return data
 
 def _format_asset_prefix(mesh_id: Any, timestamp: str, label: str) -> str:
-    """基于分组 mesh_id 生成模型 asset_id 前缀: 三位mesh_id_时间戳"""
+    """Build model asset_id prefix from grouped mesh_id: {mesh_id:03d}_{timestamp}."""
     try:
         mesh_num = int(mesh_id)
     except (TypeError, ValueError):
@@ -880,12 +880,12 @@ def process_image_for_generation(
     output_dir: str,
 ) -> str:
     """
-    使用 nanobanana (edit_image_with_qunhe) 将裁剪后的俯视图转换为物体正视图。
+    Use nanobanana (edit_image_with_qunhe) to turn a cropped top-down view into a front-facing object image.
     """
-    # 检查目标文件是否已存在，如果存在则直接返回
+    # Skip if target file already exists
     final_output_path = os.path.join(output_dir, f"{generated_asset_id}_{label}.png")
     if os.path.exists(final_output_path):
-        print(f"⏭️ 跳过图像生成，已存在: {final_output_path}")
+        print(f"⏭️ Skipping image generation; already exists: {final_output_path}")
         return final_output_path
 
     input_tmp_path = os.path.join(output_dir, f"{generated_asset_id}_mask_cropped.png")
@@ -897,26 +897,26 @@ def process_image_for_generation(
         print("Warning: edit_image_with_qunhe not found, saving original.")
         return input_tmp_path if os.path.exists(input_tmp_path) else ""
 
-    # 构建 prompt
-    nano_prompt = f"现在是一幅从俯视图裁剪出来的物体图片, 请你根据描述中的物体形状补全残缺的部分并生成物体清晰的, 真实的, 带有丰富纹理细节的图像, 为了突出实体, 背景为黑色, 注意不能改变已有部分的形状, 只能补充缺失的部分并让纹理变得更加清晰 , 注意如果裁剪出的图片只能看到顶面, 对于一些立体物体, 请你将你视角往物体正前方偏移, 让生成的图片有立体感, (例如给定桌子/柜子/家具如果只能顶面看不到侧前方的话, 这时候对于桌子你需要让视角向物体正面偏移能够同时看到桌面和桌腿, 对于柜子/家具也是类似视角偏移与补全让图片更有立体感),对于一些薄片物体则不需要偏移(例如地毯, 画作等), 同时你必须保持原始裁剪图中的物体形状和细节不变,具有高度的一致性和整体性, 同时生成的图像只关注文本描述中的部分,注意不要在物体上留下黑洞, 例如桌面因为其他物体的分割导致出现的黑洞请补齐, 你生成的必须是完整的物体加上黑色背景, 物体不能超出图片边缘被截断,  后面我会给出该物体的文本描述, 但是你要注意文本描述只是对给定图片的补充和参考, 物体描述: \n 该物体是一个{label}, 具体描述为{caption}"
+    # Build prompt
+    nano_prompt = f"This is a top-down cropped image of an object. Based on the object shape in the description, complete missing parts and generate a clear, realistic image with rich texture detail. Use a black background to emphasize the object. Do not change the shape of existing visible parts; only fill in missing parts and sharpen textures. If the crop shows only the top surface, for volumetric objects shift the viewpoint toward the object's front so the result has depth (e.g. for a table/cabinet/furniture visible only from above, offset the view toward the front so you can see both the top and legs/front face; do the same for cabinets/furniture). Thin flat objects do not need viewpoint offset (e.g. rugs, paintings). Keep the object shape and details in the original crop unchanged, with high consistency and coherence. Focus only on the object described in the text. Do not leave black holes on the object; e.g. fill holes on a tabletop caused by segmentation of other objects. Output a complete object on a black background; the object must not be clipped at the image edge. I will provide a text description below, but treat it only as supplementary reference to the given image. Object description:\n This object is a {label}, described as: {caption}"
     
-    # 确保输出目录存在
+    # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
     
-    # 保存 caption 到 {asset_id}_{label}_caption.txt
+    # Save caption to {asset_id}_{label}_caption.txt
     caption_path = os.path.join(output_dir, f"{generated_asset_id}_{label}_caption.txt")
     with open(caption_path, "w", encoding="utf-8") as f:
         f.write(caption)
-    print(f"📄 Caption 已保存至: {caption_path}")
+    print(f"📄 Caption saved to: {caption_path}")
     
-    # 使用外层已保存好的 mask 裁剪图，若不存在则回退到 bbox 裁剪图
+    # Use saved mask crop if present; otherwise fall back to bbox crop
     if not os.path.exists(input_tmp_path):
         print(f"Warning: cropped input not found: {input_tmp_path}")
         return ""
     return_image_path = input_tmp_path
     
-    # 调用 nanobanana
-    print(f"🚀 调用 nanobanana 处理 {label}...")
+    # Call nanobanana
+    print(f"🚀 Calling nanobanana for {label}...")
     try:
         raw_res_path = edit_image_with_qunhe(
             prompt=nano_prompt,
@@ -925,12 +925,12 @@ def process_image_for_generation(
         )
         
         if raw_res_path and os.path.exists(raw_res_path):
-            # 复制并重命名到目标路径 (output_dir/{asset_id}_{label}.png)
+            # Copy and rename to target path (output_dir/{asset_id}_{label}.png)
             final_output_path = os.path.join(output_dir, f"{generated_asset_id}_{label}.png")
             shutil.copy2(raw_res_path, final_output_path)
-            print(f"✅ 结果已保存至: {final_output_path}")
+            print(f"✅ Result saved to: {final_output_path}")
             
-            # 安全删除 nano_gemini 产生的临时时间戳目录
+            # Safely remove temporary timestamp directory from nano_gemini
             try:
                 temp_dir = os.path.dirname(raw_res_path)
                 if temp_dir != output_dir and os.path.exists(temp_dir):
@@ -944,7 +944,7 @@ def process_image_for_generation(
             
     except Exception as e:
         print(f"Error calling nanobanana: {e}")
-        # 如果失败，尝试将输入图改名为标准前缀文件作为备份
+        # On failure, try renaming input image to standard prefix as fallback
         final_output_path = os.path.join(output_dir, f"{generated_asset_id}_{label}.png")
         if os.path.exists(input_tmp_path):
             if not os.path.exists(final_output_path):
@@ -953,7 +953,7 @@ def process_image_for_generation(
         else:
             return_image_path = input_tmp_path
     
-    # 最终分辨率检查：混元 API 要求最小 128
+    # Final resolution check: Hunyuan API requires minimum 128px
     if os.path.exists(return_image_path):
         try:
             with Image.open(return_image_path) as img:
@@ -964,7 +964,7 @@ def process_image_for_generation(
                     new_h = int(h * scale) + 1
                     img_resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
                     img_resized.save(return_image_path)
-                    print(f"📏 调整低分辨率图片: {w}x{h} -> {new_w}x{new_h}")
+                    print(f"📏 Upscaled low-resolution image: {w}x{h} -> {new_w}x{new_h}")
         except Exception as e:
             print(f"Error adjusting resolution: {e}")
 
@@ -984,21 +984,21 @@ def generate_3d_mesh(
     gen_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
 ) -> str:
     """
-    使用 nano_gen 生成 3D 资产，并将结果复制到目标路径并清理临时文件夹。
+    Generate a 3D asset via nano_gen, copy to target path, and clean up temp folders.
     """
-    print(f"📦 正在为图片 {image_path_for_gen} 生成 3D 资产 (scale={scale})...")
+    print(f"📦 Generating 3D asset for image {image_path_for_gen} (scale={scale})...")
     
-    # 确保输出目录存在
+    # Ensure output directory exists
     os.makedirs(gen_asset_dir, exist_ok=True)
     
-    # 最终路径
+    # Final output path
     final_glb_path = os.path.join(gen_asset_dir, f"{asset_id}.glb")
     
     max_retries = 5
     hunyuan_gen = _get_hunyuan_gen()
     for attempt in range(max_retries):
         try:
-            # 调用资产生成工具
+            # Call asset generation tool
             if hunyuan_gen is None:
                 print("Warning: hunyuan_gen not found.")
                 return ""
@@ -1006,7 +1006,7 @@ def generate_3d_mesh(
             glb_raw_path = hunyuan_gen(image_path=image_path_for_gen, output_dir=gen_asset_dir, model=gen_model)
             
             if glb_raw_path and os.path.exists(glb_raw_path):
-                # 先复制到最终路径，再调用新的位姿矫正流程
+                # Copy to final path first, then run pose correction pipeline
                 shutil.copy2(glb_raw_path, final_glb_path)
                 try:
                     correct_single_asset(
@@ -1016,30 +1016,30 @@ def generate_3d_mesh(
                         correct_tilt=correct_tilt,
                         bbox_cropped_path=bbox_cropped_path if correct_yaw else None,
                     )
-                    print(f"✅ 已使用新流程完成位姿矫正: {final_glb_path}")
+                    print(f"✅ Pose correction completed with new pipeline: {final_glb_path}")
                 except Exception as e:
-                    print(f"⚠️ 新位姿矫正失败，保留原始资产: {e}")
+                    print(f"⚠️ New pose correction failed; keeping original asset: {e}")
                 
-                # 删除 nano_gen 产生的时间戳中间文件夹
+                # Remove timestamp intermediate folder from nano_gen
                 temp_dir = os.path.dirname(glb_raw_path)
                 if temp_dir != gen_asset_dir and os.path.exists(temp_dir):
                     try:
                         shutil.rmtree(temp_dir)
                     except Exception as e:
-                        print(f"⚠️ 清理临时文件夹失败 (可能不为空): {e}")
+                        print(f"⚠️ Failed to clean temp folder (may not be empty): {e}")
                 
                 return final_glb_path
             else:
-                print(f"⚠️ 第 {attempt + 1}/{max_retries} 次生成失败: {image_path_for_gen}")
+                print(f"⚠️ Generation attempt {attempt + 1}/{max_retries} failed: {image_path_for_gen}")
                 if attempt < max_retries - 1:
-                    time.sleep(2) # 短暂等待后重试
+                    time.sleep(2)  # Brief wait before retry
                 
         except Exception as e:
             print(f"Error in generate_3d_mesh attempt {attempt + 1}: {e}")
             if attempt < max_retries - 1:
                 time.sleep(2)
 
-    print(f"❌ 经过 {max_retries} 次尝试后，资产 {asset_id} 生成最终失败。")
+    print(f"❌ Asset {asset_id} generation failed after {max_retries} attempts.")
     return ""
 
 def get_mesh(
@@ -1054,13 +1054,13 @@ def get_mesh(
     correct_yaw: bool = True,
 ) -> Dict[str, Any]:
     """
-    根据 asset_mode 处理资产并更新 scene_json
+    Process assets according to asset_mode and update scene_json.
     """
     if asset_mode == "none":
         return scene_json
     timestamp = Path(image_path).parent.name if image_path else "0000000000"
 
-    # 预加载图片
+    # Preload image
     base_image = None
     if image_path and os.path.exists(image_path):
         try:
@@ -1068,14 +1068,14 @@ def get_mesh(
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
 
-    # --- 通用预处理：建立 mesh_id 到 最佳代表物索引 的映射，并加载 Mask ---
+    # --- Shared preprocessing: mesh_id -> best representative index mapping, load masks ---
     mesh_to_orig_idx = {}
     masks_data = []
     ref_data = []
     if base_image:
         dir_name = os.path.dirname(image_path)
         
-        # 1. 建立映射mesh_to_orig_idx (基于体积最大原则) mesh_id -> 属于这个mesh_id的最大体积物体索引
+        # 1. Build mesh_to_orig_idx (largest volume per mesh_id) -> index of largest object for each mesh_id
         ref_json_path = os.path.join(dir_name, "g_asset_resp.json")
         if os.path.exists(ref_json_path):
             try:
@@ -1094,11 +1094,11 @@ def get_mesh(
                         mesh_max_volumes[mid_key] = vol
                         mesh_to_orig_idx[mid_key] = i
                 
-                print(f"📊 建立 Mesh ID 到索引的映射: {mesh_to_orig_idx}")
+                print(f"📊 Built mesh ID to index mapping: {mesh_to_orig_idx}")
             except Exception as e:
                 print(f"Error building mesh mapping: {e}")
 
-        # 2. 加载 Mask 数据
+        # 2. Load mask data
         mask_path = os.path.join(dir_name, "h_masks_amodal.pkl")
         if not os.path.exists(mask_path):
             mask_path = os.path.join(dir_name, "d_masks.pkl")
@@ -1110,7 +1110,7 @@ def get_mesh(
             except Exception as e:
                 print(f"Error loading masks: {e}")
 
-    # ------------------ 分支逻辑开始 ------------------
+    # ------------------ Branch logic ------------------
 
     if asset_mode == "generate":
         assert base_image is not None, "Image must be provided for generate mode"
@@ -1120,9 +1120,9 @@ def get_mesh(
 
         
         
-        # 按 mesh_id 分组 (包含 bbox, door, window)
+        # Group by mesh_id (bbox, door, window)
         mesh_groups = {}
-        # 遍历所有可能的物体类型, 拿到所有存在的 mesh_id
+        # Collect all mesh_ids from object types
         for key in ["bbox", "door", "window"]:
             for item in scene_json.get(key, []):
                 if item.get("asset_id"): continue
@@ -1132,19 +1132,19 @@ def get_mesh(
                     except: mid_key = mid
                     if mid_key not in mesh_groups: mesh_groups[mid_key] = []
                     mesh_groups[mid_key].append(item)
-        # 遍历所有 mesh_id, 从之前建立的 mesh_to_orig_idx 中拿到最大体积物体的信息
+        # For each mesh_id, get largest-volume object info from mesh_to_orig_idx
         for mid, bboxes in mesh_groups.items():
             if not bboxes: continue
             
             orig_idx = mesh_to_orig_idx.get(mid)
             if orig_idx is not None and orig_idx < len(ref_data):
-                # 统一使用“体积最大”实例作为生成代表，确保 Mask 和 Crop 坐标来自同一个物体
+                # Always use largest-volume instance as generation representative so mask and crop share coordinates
                 rep_item = ref_data[orig_idx]
                 label = rep_item.get("label", "object")
                 caption = rep_item.get("caption", "")
                 bbox_2d = rep_item.get("bbox")
             else:
-                # 回退方案
+                # Fallback
                 first_bbox = bboxes[0]
                 label = first_bbox.get("label", "object")
                 caption = first_bbox.get("caption", "")
@@ -1158,17 +1158,17 @@ def get_mesh(
             generated_asset_id = _format_asset_prefix(mid, timestamp, label)
             target_glb_path = os.path.join(gen_asset_dir, f"{generated_asset_id}.glb") if gen_asset_dir else ""
             if target_glb_path and os.path.exists(target_glb_path):
-                print(f"⏭️ 跳过资产生成，已存在: {target_glb_path}")
+                print(f"⏭️ Skipping asset generation; already exists: {target_glb_path}")
                 for b in bboxes:
                     b["asset_id"] = generated_asset_id
                 continue
             
             if bbox_2d and len(bbox_2d) == 4:
-                # 使用 Mask 抠图并处理旋转
+                # Mask crop with rotation handling
                 orientation = rep_item.get("orientation", 0) if (orig_idx is not None and orig_idx < len(ref_data)) else bboxes[0].get("orientation", 0)
 
                 def _build_bbox_cropped_image(src_img, bbox, orient_deg):
-                    # 在原图先裁一个可容纳旋转后的大框(越界补黑)，再顺时针旋转并中心裁到横平竖直框
+                    # Crop a large box on source image (pad black if OOB), rotate CW, then center-crop to axis-aligned box
                     y1, x1, y2, x2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
                     cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
                     theta = float(orient_deg or 0.0)
@@ -1215,7 +1215,7 @@ def get_mesh(
                     mask_np = masks_data[orig_idx]
                     mask_np_bool = (mask_np > 127) if mask_np.max() > 1 else mask_np.astype(bool)
                     
-                    # 凹包络 + 膨胀 10px（每个物体单独处理）
+                    # Concave hull + 10px dilation (per object)
                     try:
                         import alphashape
                         from shapely.geometry import Polygon, MultiPolygon
@@ -1260,18 +1260,18 @@ def get_mesh(
                                 except Exception:
                                     pass
                     
-                    # 1. 寻找原始 mask 的包围盒
+                    # 1. Bounding box of original mask
                     coords_orig = np.argwhere(mask_np_bool)
                     if coords_orig.size > 0:
                         y1_o, x1_o = coords_orig.min(axis=0)
                         y2_o, x2_o = coords_orig.max(axis=0)
                         
-                        # 2. 裁剪出一个较大的局部区域，为旋转留出空间 (取长宽最大值的 1.5 倍)
+                        # 2. Crop a larger local region for rotation (pad = max(w,h) as radius slack)
                         w_o, h_o = x2_o - x1_o, y2_o - y1_o
                         cx_o, cy_o = (x1_o + x2_o) / 2, (y1_o + y2_o) / 2
-                        pad = int(max(w_o, h_o) * 1.0) # 这里的 pad 是半径方向的冗余
+                        pad = int(max(w_o, h_o) * 1.0)  # pad is slack along radius
                         
-                        # 构图：应用 mask 并准备裁剪
+                        # Compose: apply mask and prepare crop
                         base_np = np.array(base_image)
                         mask_3d = np.repeat(mask_np_bool[:, :, np.newaxis], 3, axis=2)
                         masked_np = np.where(mask_3d, base_np, 0)
@@ -1279,17 +1279,17 @@ def get_mesh(
                         full_masked_img = Image.fromarray(masked_np.astype(np.uint8))
                         full_mask_img = Image.fromarray((mask_np_bool * 255).astype(np.uint8))
                         
-                        # 初次裁剪：获取包含物体的局部图
+                        # Initial crop: local patch containing the object
                         crop_box = (cx_o - pad, cy_o - pad, cx_o + pad, cy_o + pad)
                         obj_img_local = full_masked_img.crop(crop_box)
                         obj_mask_local = full_mask_img.crop(crop_box)
                         
-                        # 3. 在局部图中旋转，expand=True 确保所有像素被保留
+                        # 3. Rotate in local patch with expand=True to keep all pixels
                         if orientation != 0:
                             obj_img_local = obj_img_local.rotate(-orientation, expand=True, resample=Image.BICUBIC)
                             obj_mask_local = obj_mask_local.rotate(-orientation, expand=True, resample=Image.NEAREST)
                         
-                        # 4. 在旋转后的图中寻找新的最小包围盒
+                        # 4. Find minimal bounding box in rotated image
                         rotated_mask_np = np.array(obj_mask_local)
                         coords_rot = np.argwhere(rotated_mask_np > 0)
                         
@@ -1300,7 +1300,7 @@ def get_mesh(
                             rw, rh = rx_max - rx_min, ry_max - ry_min
                             rcx, rcy = (rx_min + rx_max) / 2, (ry_min + ry_max) / 2
                             
-                            # 5. 最终 1.2 倍比例裁剪
+                            # 5. Final 1.2x aspect crop
                             final_box = (int(rcx - rw*0.6), int(rcy - rh*0.6), int(rcx + rw*0.6), int(rcy + rh*0.6))
                             cropped_img = obj_img_local.crop(final_box)
                         else:
@@ -1309,7 +1309,7 @@ def get_mesh(
                         # Fallback
                         cropped_img = base_image.crop((bbox_2d[1], bbox_2d[0], bbox_2d[3], bbox_2d[2]))
                 else:
-                    # 无 Mask 情况下的回退逻辑
+                    # Fallback when no mask
                     cropped_img = _build_bbox_cropped_image(base_image, bbox_2d, orientation)
 
                 mask_cropped_path = os.path.join(gen_dir, f"{generated_asset_id}_mask_cropped.png")
@@ -1340,7 +1340,7 @@ def get_mesh(
         return scene_json
 
 
-    # asset_mode == "retrieve" 逻辑
+    # asset_mode == "retrieve" branch
     import lancedb
     import torch
 
@@ -1382,7 +1382,7 @@ def get_mesh(
                 label, caption = first_bbox.get("label"), first_bbox.get("caption")
                 if not label: continue
                 
-                # --- Retrieve 同样使用精准代表物索引和 Mask 抠图 ---
+                # --- Retrieve also uses representative index and mask crop ---
                 orig_idx = mesh_to_orig_idx.get(mid)
                 if masks_data and orig_idx is not None and orig_idx < len(masks_data):
                     import numpy as np
@@ -1396,7 +1396,7 @@ def get_mesh(
                 prompt = f"this is a {label}" + (f", the caption is {caption}" if caption else "")
                 bbox_2d = first_bbox.get("bbox_2d")
                 if bbox_2d and len(bbox_2d) == 4:
-                    # 检索也使用 1.2 倍扩张以获取更多形状信息，但核心是黑色背景
+                    # Retrieval uses 1.2x expansion for more shape context; core requirement is black background
                     cx, cy = (bbox_2d[1] + bbox_2d[3]) / 2, (bbox_2d[0] + bbox_2d[2]) / 2
                     w, h = (bbox_2d[3] - bbox_2d[1]), (bbox_2d[2] - bbox_2d[0])
                     cropped = masked_image.crop((int(cx - w*0.6), int(cy - h*0.6), int(cx + w*0.6), int(cy + h*0.6)))
@@ -1424,7 +1424,7 @@ def get_mesh(
     return scene_json
 
 def asset_id_exists(asset_id: Any, search_paths: Optional[List[str]]) -> bool:
-    """检查 asset_id 对应 glb/gltf 是否在搜索路径中存在。"""
+    """Return True if glb/gltf for asset_id exists on any search path."""
     if asset_id is None or not search_paths:
         return False
     aid = str(asset_id)
@@ -1438,7 +1438,7 @@ def asset_id_exists(asset_id: Any, search_paths: Optional[List[str]]) -> bool:
 
 
 def object_ply_stem(label: str, asset_id: Any = None) -> str:
-    """点云/可见几何文件名主干：{label} 或 {label}_{asset_id}。"""
+    """Point cloud / visible geometry filename stem: {label} or {label}_{asset_id}."""
     parts = [label]
     if asset_id is not None:
         parts.append(str(asset_id))
@@ -1451,7 +1451,7 @@ def build_pointcloud_ply_relpath(
     asset_id: Any = None,
     suffixes: Optional[List[str]] = None,
 ) -> str:
-    """相对 pointcloud 根目录的 ply 路径，如 boxes/sidetable0_56056912_visible.ply。"""
+    """Relative ply path under pointcloud root, e.g. boxes/sidetable0_56056912_visible.ply."""
     stem = object_ply_stem(label, asset_id)
     for suffix in suffixes or []:
         if suffix:
@@ -1474,7 +1474,7 @@ def normalize_scene_context(
     model_paths: Optional[List[str]] = None,
     hole_paths: Optional[List[str]] = None,
 ) -> None:
-    """统一 context 键与 label；校验 asset_id（bbox 缺失则删，门窗缺失则去 asset_id）。"""
+    """Normalize context keys and labels; validate asset_id (drop bbox if missing, strip door/window asset_id)."""
     meta = context.setdefault("meta", {})
     if meta.get("_scene_normalized"):
         return
@@ -1501,7 +1501,7 @@ def normalize_scene_context(
             aid = new_door.get("asset_id")
             if aid is not None and not asset_id_exists(aid, hole_paths):
                 new_door.pop("asset_id", None)
-                print(f"⚠️ {door_label}: asset_id={aid} 不存在，保留空洞但不加载模型")
+                print(f"⚠️ {door_label}: asset_id={aid} does not exist; keeping opening but not loading model")
             new_wall["doors"][door_label] = new_door
 
         for window in wall.get("windows", {}).values():
@@ -1513,7 +1513,7 @@ def normalize_scene_context(
             aid = new_window.get("asset_id")
             if aid is not None and not asset_id_exists(aid, hole_paths):
                 new_window.pop("asset_id", None)
-                print(f"⚠️ {window_label}: asset_id={aid} 不存在，保留空洞但不加载模型")
+                print(f"⚠️ {window_label}: asset_id={aid} does not exist; keeping opening but not loading model")
             new_wall["windows"][window_label] = new_window
 
         new_walls[wall_label] = new_wall
@@ -1525,7 +1525,7 @@ def normalize_scene_context(
         aid = box.get("asset_id")
         if aid is not None and not asset_id_exists(aid, model_paths):
             print(
-                f"⚠️ 删除 bbox (asset_id={aid} 不存在): "
+                f"⚠️ Removing bbox (asset_id={aid} does not exist): "
                 f"{box.get('label') or box.get('class') or _old_id}"
             )
             continue
@@ -1558,7 +1558,7 @@ def _normalize_bbox_label_slug(raw_label: str) -> str:
 
 
 def compute_topdown_camera_pose(context: Dict[str, Any]):
-    """与 topdown_view 首帧相机一致：位于场景中心正上方，看向地面中心。"""
+    """Same as topdown_view first frame: above scene center, looking at floor center."""
     meta = context["meta"]
     center = meta["center"]
     span = meta["span"]
@@ -1570,17 +1570,17 @@ def compute_topdown_camera_pose(context: Dict[str, Any]):
 
 
 def ssl_xy_to_image_xy(ssl_x: float, ssl_y: float) -> tuple:
-    """SSL 坐标 (Y 北) → SpatialFactory 图像坐标 (Y 南)。"""
+    """SSL coords (Y north) -> SpatialFactory image coords (Y south)."""
     return float(ssl_x), float(-ssl_y)
 
 
 def image_xy_to_ssl_xy(image_x: float, image_y: float) -> tuple:
-    """图像坐标 → SSL 坐标。"""
+    """Image coords -> SSL coords."""
     return float(image_x), float(-image_y)
 
 
 def compute_pixel2real_ratio(camera_z: float, fov_y_rad: float, image_half: float = 500.0) -> float:
-    """1 像素 = ratio 米；与 SpatialFactory Stage 1 一致。"""
+    """Meters per pixel; consistent with SpatialFactory Stage 1."""
     return float(camera_z) * math.tan(float(fov_y_rad) / 2.0) / float(image_half)
 
 
@@ -1589,9 +1589,9 @@ def compute_pixel_align_translation_ssl(
     fov_y_rad: float,
     image_half: float = 500.0,
 ) -> tuple:
-    """计算像素对齐平移量，使图像主点落在 (ratio*half, ratio*half) 像素。
+    """Compute pixel-alignment translation so image principal point lands at (ratio*half, ratio*half).
 
-    返回 (pixel2real_ratio, dx_ssl, dy_ssl, target_image_x, target_image_y)。
+    Returns (pixel2real_ratio, dx_ssl, dy_ssl, target_image_x, target_image_y).
     """
     cam = np.asarray(camera_position_ssl, dtype=float)
     z = float(cam[2])
@@ -1626,7 +1626,7 @@ def apply_context_xy_translation(
     *,
     round_decimals: Optional[int] = 2,
 ) -> None:
-    """将场景 context 在 SSL XY 平面平移 (dx_ssl, dy_ssl)，并重算 meta。"""
+    """Translate scene context in SSL XY plane by (dx_ssl, dy_ssl) and recompute meta."""
     for wall in context.get("walls", {}).values():
         wall["s"] = _round_xy([wall["s"][0] + dx_ssl, wall["s"][1] + dy_ssl], round_decimals)
         wall["e"] = _round_xy([wall["e"][0] + dx_ssl, wall["e"][1] + dy_ssl], round_decimals)
@@ -1658,7 +1658,7 @@ def build_pixel_aligned_camera_para(
     *,
     round_decimals: int = 2,
 ) -> Dict[str, Any]:
-    """SpatialFactory 兼容的 camera_para（图像坐标系 + pixel2real_ratio）。"""
+    """SpatialFactory-compatible camera_para (image coords + pixel2real_ratio)."""
     cam = np.asarray(camera_position_ssl, dtype=float)
     look = np.asarray(look_at_target_ssl, dtype=float)
     cam_img_x, cam_img_y = ssl_xy_to_image_xy(float(cam[0]), float(cam[1]))
@@ -1689,7 +1689,7 @@ def write_standard_ssl_to_path(context: Dict[str, Any], ssl_path: str) -> str:
     ssl_text = format_standard_ssl(context)
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(ssl_text)
-    print(f"✅ SSL 已导出: {ssl_path}")
+    print(f"✅ SSL exported: {ssl_path}")
     return ssl_path
 
 
@@ -1702,7 +1702,7 @@ def prepare_pixel_aligned_topdown_context(
     outdoor_fov_scale: float = 1.05,
     round_decimals: int = 2,
 ) -> Dict[str, Any]:
-    """按 SpatialFactory Stage 1 规则平移 context，并返回渲染/导出参数。"""
+    """Translate context per SpatialFactory Stage 1 rules; return render/export parameters."""
     util = _import_core_util()
 
     image_half = float(width) / 2.0
@@ -1748,7 +1748,7 @@ def apply_scene_json_xy_translation(
     *,
     round_decimals: Optional[int] = 2,
 ) -> None:
-    """将 scene_json 的墙/门窗/家具坐标与 context 同步做 XY 平移。"""
+    """Apply the same XY translation to scene_json walls/doors/windows/furniture as context."""
     for wall in scene_json.get("wall", []):
         p = wall.get("p") or [0.0, 0.0, 0.0]
         q = wall.get("q") or [0.0, 0.0, 0.0]
@@ -1767,9 +1767,9 @@ def view_ssl_transform_params(
     camera_position,
     look_at_target,
 ) -> tuple:
-    """视角 SSL 变换：原点平移到相机地面投影 (a,b,0)，+Y 对齐 look_at 在 XY 上的方向。
+    """View SSL transform: translate origin to camera ground projection (a,b,0); align +Y with look_at XY direction.
 
-    返回 (origin_xy, theta_rad)。theta 为 look 方向相对 +Y 的方位角；点坐标绕 Z 旋转 +theta 后与视角 SSL 对齐。
+    Returns (origin_xy, theta_rad). theta is look direction azimuth relative to +Y; rotate points by +theta for view SSL.
     """
     cam = np.asarray(camera_position, dtype=float)
     look = np.asarray(look_at_target, dtype=float)
@@ -1794,7 +1794,7 @@ def _transform_xyz_view_ssl(xyz, origin_xy, theta: float) -> List[float]:
 
 
 def _transform_direction_view_ssl(xyz, theta: float) -> List[float]:
-    """方向向量：仅绕 Z 旋转，不平移。"""
+    """Direction vector: Z rotation only, no translation."""
     v = np.asarray(xyz, dtype=float)
     c, s = float(np.cos(theta)), float(np.sin(theta))
     return [c * v[0] - s * v[1], s * v[0] + c * v[1], float(v[2])]
@@ -1809,10 +1809,10 @@ def view_ssl_camera_pose_fields(
     *,
     reference_frame: bool = False,
 ) -> Dict[str, List[float]]:
-    """世界/视角 SSL 双套相机位姿。
+    """World and view SSL camera poses.
 
-    reference_frame=True（首帧/单视角）时视角下相机为 (0,0,h)，look_at 为 (0,x,e)。
-    序列后续帧则写入完整视角 SSL 坐标。
+    reference_frame=True (first/single view): view camera at (0,0,h), look_at at (0,x,e).
+    Sequence frames write full view SSL coordinates.
     """
     cam = np.asarray(camera_position, dtype=float)
     look = np.asarray(look_at_target, dtype=float)
@@ -1855,7 +1855,7 @@ def build_camera_para_dict(
     height: Optional[int] = None,
     include_intrinsic: bool = True,
 ) -> Dict[str, Any]:
-    """构建 camera_para.json 内容（含世界坐标与视角 SSL 坐标）。"""
+    """Build camera_para.json (world coords + view SSL coords)."""
     if view_origin_xy is None or view_theta is None:
         view_origin_xy, view_theta = view_ssl_transform_params(camera_position, look_at_target)
 
@@ -1903,7 +1903,7 @@ def build_camera_para_dict(
 
 
 def recompute_context_meta_from_walls(context: Dict[str, Any]) -> None:
-    """视角 SSL 变换后，根据墙段重算 meta（bounds/center/span/vertices/z_max）及墙 orientation。"""
+    """After view SSL transform, recompute meta (bounds/center/span/vertices/z_max) and wall orientations from wall segments."""
     try:
         from . import util
     except ImportError:
@@ -1937,7 +1937,7 @@ def recompute_context_meta_from_walls(context: Dict[str, Any]) -> None:
 
 
 def _normalize_angle_z_deg(angle: float) -> float:
-    """归一化到 (-180, 180]。"""
+    """Normalize angle to (-180, 180] degrees."""
     angle = float(angle) % 360.0
     if angle > 180.0:
         angle -= 360.0
@@ -1945,7 +1945,7 @@ def _normalize_angle_z_deg(angle: float) -> float:
 
 
 def _bbox_forward_xy(angle_z_deg: float):
-    """SSL 约定：angle_z=0 时朝向 −Y，逆时针为正。返回 XY 单位朝向向量。"""
+    """SSL convention: angle_z=0 faces -Y; CCW positive. Returns XY unit forward vector."""
     rad = np.radians(float(angle_z_deg))
     c, s = float(np.cos(rad)), float(np.sin(rad))
     return np.array([s, -c], dtype=float)
@@ -1956,10 +1956,10 @@ def apply_view_ssl_transform_with_params(
     origin_xy,
     theta: float,
 ) -> None:
-    """原地将 context 变换到视角 SSL 坐标系。
+    """Transform context in place to view SSL coordinates.
 
-    不变：bbox scale、墙 height、门窗 width/height。
-    变：墙 p/q、门窗/bbox center（平移 + 绕 Z 旋转 +θ）、bbox angle_z（+θ 度）。
+    Unchanged: bbox scale, wall height, door/window width/height.
+    Changed: wall p/q, door/window/bbox center (translate + Z rotate +theta), bbox angle_z (+theta deg).
     """
     theta_deg = float(np.degrees(theta))
     for wall in context.get("walls", {}).values():
@@ -1991,7 +1991,7 @@ def reference_view_camera_pose(
     origin_xy,
     theta: float,
 ):
-    """首帧视角 SSL 相机：(0,0,h) 与 (0,x,e)。"""
+    """First-frame view SSL camera: (0,0,h) and (0,x,e)."""
     cam = np.asarray(world_camera, dtype=float)
     look_view = _transform_xyz_view_ssl(world_look_at, origin_xy, theta)
     return [0.0, 0.0, float(cam[2])], [0.0, float(look_view[1]), float(np.asarray(world_look_at)[2])]
@@ -2009,18 +2009,18 @@ def world_pose_to_view_ssl(
 
 
 def write_view_ssl_from_context(context: Dict[str, Any], output_dir: str) -> str:
-    """context 已是视角 SSL 坐标时直接导出 ssl.txt。"""
+    """Export ssl.txt when context is already in view SSL coordinates."""
     os.makedirs(output_dir, exist_ok=True)
     ssl_text = format_standard_ssl(context)
     ssl_path = os.path.join(output_dir, "ssl.txt")
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(ssl_text)
-    print(f"✅ 视角 SSL 已导出: {ssl_path}")
+    print(f"✅ View SSL exported: {ssl_path}")
     return ssl_path
 
 
 class ViewSslSession:
-    """视角 SSL 临时 context：enabled 时变换 owner.context，退出时恢复。"""
+    """Temporary view SSL context: transforms owner.context while enabled; restores on exit."""
 
     def __init__(self, owner, enabled: bool):
         self.owner = owner
@@ -2163,7 +2163,7 @@ def transform_context_to_view_ssl(
     camera_position,
     look_at_target,
 ) -> Dict[str, Any]:
-    """深拷贝 context 并变换为视角 SSL 坐标（不修改原 context）。"""
+    """Deep-copy context and transform to view SSL (does not modify original)."""
     origin_xy, theta = view_ssl_transform_params(camera_position, look_at_target)
     out = copy.deepcopy(context)
     apply_view_ssl_transform_with_params(out, origin_xy, theta)
@@ -2176,19 +2176,19 @@ def write_view_ssl(
     camera_position,
     look_at_target,
 ) -> str:
-    """导出视角 SSL 到 output_dir/ssl.txt（场景坐标经相机首帧位姿变换）。"""
+    """Export view SSL to output_dir/ssl.txt (scene coords transformed by first-frame camera pose)."""
     os.makedirs(output_dir, exist_ok=True)
     view_context = transform_context_to_view_ssl(context, camera_position, look_at_target)
     ssl_text = format_standard_ssl(view_context)
     ssl_path = os.path.join(output_dir, "ssl.txt")
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(ssl_text)
-    print(f"✅ 视角 SSL 已导出: {ssl_path}")
+    print(f"✅ View SSL exported: {ssl_path}")
     return ssl_path
 
 
 def format_standard_ssl(context: Dict[str, Any]) -> str:
-    """将加载后的 scene context 导出为简洁标准 SSL（无 id/room_id，label 规范化）。"""
+    """Export loaded scene context as concise standard SSL (no id/room_id, normalized labels)."""
     lines: List[str] = []
     room_type = context.get("meta", {}).get("scene_type", "unknown")
     lines.append(f'Room(room_type="{room_type}")')
@@ -2293,7 +2293,7 @@ def generate_texture(ctx: Any, image_path: str):
         print("Warning: edit_image_with_qunhe not found, skip texture generation.")
         return False
 
-    print(f"📦 正在为图片 {image_path} 生成纹理...")
+    print(f"📦 Generating textures for image {image_path}...")
     image_dir = os.path.dirname(image_path)
     texture_dir = os.path.join(image_dir, "texture")
     os.makedirs(texture_dir, exist_ok=True)
@@ -2301,26 +2301,26 @@ def generate_texture(ctx: Any, image_path: str):
     wall_texture_path = os.path.join(texture_dir, "wall_texture.png")
     ceiling_texture_path = os.path.join(texture_dir, "ceiling_texture.png")
     
-    floor_prompt = "这是一张场景透视图, 帮我生成这个房间可能的地板纹理图片, 你反思自己在生成时候是否已经排除了墙体, 以及房间中其他物体的影响, 只生成地板本身纹理, 同时这个纹理必须是符合这个房间风格的可重复的简单纹理(seamless tileable texture)"
-    wall_prompt = "这是一张场景透视图, 帮我生成这个房间可能的墙体纹理图片, 你需要反思自己在生成时候是否已经排除了地板, 墙上的挂画和挂饰, 以及房间中其他物体的影响, 只关注墙面本身纹理, 同时这个纹理必须是符合这个房间风格的可重复的简单纹理(seamless tileable texture)"
-    ceiling_prompt = "这是一张场景透视图, 帮我生成这个房间可能的天花板纹理图片, 你需要反思自己在生成时候是否已经排除了墙体, 地板以及房间中其他物体的影响, 只生成天花板本身纹理, 同时这个纹理必须是符合这个房间风格的可重复的简单纹理(seamless tileable texture)"
+    floor_prompt = "This is a perspective view of a room. Generate a plausible floor texture for this room. Reflect on whether you have excluded walls and other objects in the room, and generate only the floor texture itself. The texture must be a simple, room-style-appropriate, repeatable seamless tileable texture."
+    wall_prompt = "This is a perspective view of a room. Generate a plausible wall texture for this room. Reflect on whether you have excluded the floor, wall paintings/decorations, and other room objects, and focus only on the wall surface texture. The texture must be a simple, room-style-appropriate, repeatable seamless tileable texture."
+    ceiling_prompt = "This is a perspective view of a room. Generate a plausible ceiling texture for this room. Reflect on whether you have excluded walls, the floor, and other room objects, and generate only the ceiling texture itself. The texture must be a simple, room-style-appropriate, repeatable seamless tileable texture."
 
     floor_texture_path_tmp = None
     wall_texture_path_tmp = None
     ceiling_texture_path_tmp = None
 
     if os.path.exists(floor_texture_path):
-        print(f"⏭️ 跳过地板纹理生成，已存在: {floor_texture_path}")
+        print(f"⏭️ Skipping floor texture generation; already exists: {floor_texture_path}")
     else:
         floor_texture_path_tmp = edit_image_with_qunhe(floor_prompt, image_path, output_dir=texture_dir)
 
     if os.path.exists(wall_texture_path):
-        print(f"⏭️ 跳过墙体纹理生成，已存在: {wall_texture_path}")
+        print(f"⏭️ Skipping wall texture generation; already exists: {wall_texture_path}")
     else:
         wall_texture_path_tmp = edit_image_with_qunhe(wall_prompt, image_path, output_dir=texture_dir)
 
     if os.path.exists(ceiling_texture_path):
-        print(f"⏭️ 跳过天花板纹理生成，已存在: {ceiling_texture_path}")
+        print(f"⏭️ Skipping ceiling texture generation; already exists: {ceiling_texture_path}")
     else:
         ceiling_texture_path_tmp = edit_image_with_qunhe(ceiling_prompt, image_path, output_dir=texture_dir)
     

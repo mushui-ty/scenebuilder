@@ -12,7 +12,7 @@ import numpy as np
 DEFAULT_RESOLUTION = 256
 VOXEL_FORMAT = "colored_occupancy_voxel_grid"
 VOXEL_VERSION = 1
-# 大三角形 surface splat 上限；过大时单视角体素化会明显变慢
+# Large-triangle surface splat cap; per-view voxelization slows down significantly when too high
 MAX_SAMPLES_PER_TRIANGLE = 4096
 BRUTEFORCE_VOXEL_LIMIT = 4096
 
@@ -399,7 +399,7 @@ def write_voxel_bundle(
     compress: bool = False,
 ) -> None:
     os.makedirs(os.path.dirname(base_path) or ".", exist_ok=True)
-    # 256³ dense 数组 gzip 压缩仍偏慢；默认不压缩以保证渲染流水线速度
+    # 256³ dense array gzip compression is still slow; default uncompressed for render pipeline speed
     if compress:
         np.savez_compressed(base_path, occupancy=occupancy, rgb=rgb)
     else:
@@ -475,7 +475,7 @@ def export_colored_voxel_grids(
     tris = np.asarray(triangles, dtype=float).reshape(-1, 3, 3)
     cols = np.asarray(colors, dtype=np.uint8).reshape(-1, 3)
     if len(tris) == 0:
-        print("⚠️ 体素导出跳过：没有三角形")
+        print("⚠️ Voxel export skipped: no triangles")
         return {}
 
     voxel_dir = os.path.join(output_dir, "voxel")
@@ -500,8 +500,8 @@ def export_colored_voxel_grids(
     io_w_s = time.perf_counter() - t_io
     summary["grids"]["world"] = meta_w
     print(
-        f"✅ 体素(世界系): {world_path} 占用 {meta_w['occupied_count']} 格 "
-        f"(体素化 {vox_w_s:.1f}s, 写盘 {io_w_s:.1f}s)"
+        f"✅ Voxels (world): {world_path} {meta_w['occupied_count']} occupied cells "
+        f"(voxelize {vox_w_s:.1f}s, write {io_w_s:.1f}s)"
     )
 
     if write_preview_ply:
@@ -512,7 +512,7 @@ def export_colored_voxel_grids(
         summary["grids"]["world"]["preview_ply"] = os.path.basename(preview_w)
         summary["grids"]["world"]["preview_points"] = n_prev
         if n_prev:
-            print(f"✅ 体素预览 PLY(世界系): {preview_w} ({n_prev} 点)")
+            print(f"✅ Voxel preview PLY (world): {preview_w} ({n_prev} points)")
 
     if camera_pose is not None:
         try:
@@ -541,8 +541,8 @@ def export_colored_voxel_grids(
         io_o_s = time.perf_counter() - t_io
         summary["grids"]["opencv"] = meta_o
         print(
-            f"✅ 体素(相机系): {opencv_path} 占用 {meta_o['occupied_count']} 格 "
-            f"(体素化 {vox_o_s:.1f}s, 写盘 {io_o_s:.1f}s)"
+            f"✅ Voxels (camera): {opencv_path} {meta_o['occupied_count']} occupied cells "
+            f"(voxelize {vox_o_s:.1f}s, write {io_o_s:.1f}s)"
         )
 
         if write_preview_ply:
@@ -553,12 +553,12 @@ def export_colored_voxel_grids(
             summary["grids"]["opencv"]["preview_ply"] = os.path.basename(preview_o)
             summary["grids"]["opencv"]["preview_points"] = n_prev_o
             if n_prev_o:
-                print(f"✅ 体素预览 PLY(相机系): {preview_o} ({n_prev_o} 点)")
+                print(f"✅ Voxel preview PLY (camera): {preview_o} ({n_prev_o} points)")
 
     summary_path = os.path.join(voxel_dir, "metadata_voxel.json")
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     total_s = time.perf_counter() - t0
-    print(f"⏱️  体素导出总耗时: {total_s:.1f}s")
+    print(f"⏱️  Voxel export total time: {total_s:.1f}s")
     return summary

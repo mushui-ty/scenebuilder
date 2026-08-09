@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""根据地板路径自动生成 render_view 相机位姿（views=auto）。"""
+"""Auto-generate render_view camera poses from floor path (views=auto)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ WORLD_UP = (0.0, 0.0, 1.0)
 
 
 def _evenly_spaced_indices(n_points: int, target_count: int) -> List[int]:
-    """在 [0, n_points-1] 上均匀取 target_count 个索引（含首点，尽量含尾点）。"""
+    """Uniformly sample target_count indices in [0, n_points-1] (includes first, tries to include last)."""
     if n_points <= 0:
         return []
     target_count = max(1, int(target_count))
@@ -45,11 +45,11 @@ def _evenly_spaced_indices(n_points: int, target_count: int) -> List[int]:
 
 
 def sample_path_indices(n_points: int, stride: int = PATH_SAMPLE_STRIDE) -> List[int]:
-    """从闭环路径点采样索引（含 0）。
+    """Sample indices along closed path (includes 0).
 
-    - n < 40：每隔 ``stride``（默认 4）取一个
-    - 40 <= n <= 100：均匀取 15 个
-    - n > 100：均匀取 20 个
+    - n < 40: every ``stride`` (default 4)
+    - 40 <= n <= 100: uniformly sample 15
+    - n > 100: uniformly sample 20
     """
     if n_points <= 0:
         return []
@@ -72,7 +72,7 @@ def _rotate_vector(v: np.ndarray, axis: np.ndarray, angle_rad: float) -> np.ndar
 
 
 def scene_bbox_center(context: Dict[str, Any]) -> List[float]:
-    """场景 3D 包围盒中心（SSL 坐标）。"""
+    """Scene 3D bounding box center (SSL coordinates)."""
     meta = context["meta"]
     cx, cy = float(meta["center"][0]), float(meta["center"][1])
     z_max = float(meta["z_max"])
@@ -90,7 +90,7 @@ def random_camera_z(
     lo: float = 0.5,
     hi: float = 2.5,
 ) -> float:
-    """采样相机高度，保证小于墙高最大值。"""
+    """Sample camera height, ensuring it stays below max wall height."""
     cap = min(float(hi), float(wall_z_max) - 1e-3)
     floor = float(lo)
     if cap <= floor:
@@ -124,7 +124,7 @@ def adjust_look_at_pitch(
     pitch_deg: float,
     world_up: Sequence[float] = WORLD_UP,
 ) -> List[float]:
-    """沿射线 AB 调整俯仰角（度），返回新的 look_at。"""
+    """Adjust pitch (degrees) along ray AB; return new look_at."""
     eye = np.asarray(camera_pos, dtype=float)
     target = np.asarray(look_at, dtype=float)
     dist = _look_distance(camera_pos, look_at)
@@ -148,7 +148,7 @@ def adjust_look_at_yaw(
     yaw_deg: float,
     world_up: Sequence[float] = WORLD_UP,
 ) -> List[float]:
-    """绕 world_up 偏航（度，正=从左往右看时向左转），返回新的 look_at。"""
+    """Yaw (degrees) about world_up; positive = turn left when looking left-to-right; return new look_at."""
     eye = np.asarray(camera_pos, dtype=float)
     dist = _look_distance(camera_pos, look_at)
     forward = _forward_unit(camera_pos, look_at)
@@ -225,7 +225,7 @@ def build_auto_views_from_path(
     rng: Optional[random.Random] = None,
     stride: int = PATH_SAMPLE_STRIDE,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
-    """生成 auto 模式下的全部视角 spec。返回 (name→spec, 渲染顺序名列表)。"""
+    """Build all view specs for auto mode. Returns (name→spec, render order name list)."""
     rng = rng or random.Random()
     points = [list(p) for p in path_points_ssl]
     n = len(points)
