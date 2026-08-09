@@ -94,14 +94,14 @@ For data production and benchmark runs, `render_ssl.py` is the high-level entry 
 
 ### Simple usage
 
-**CLI** — scene input (`--ssl` and `--ssl-text` are mutually exclusive):
+**CLI** — scene input (`--ssl` and `--ssl_str` are mutually exclusive):
 
 ```bash
 # file path (SSL or JSON)
 python render_ssl.py --ssl path/to/scene.ssl --output out --views topdown
 
 # inline string (e.g. one line from JSONL)
-python render_ssl.py --ssl-text '{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}' \
+python render_ssl.py --ssl_str '{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}' \
   --output out --views topdown
 
 # stdin (pipe one JSONL line)

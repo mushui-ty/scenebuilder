@@ -586,6 +586,7 @@ def render_ssl(
 | CLI | Python | Description |
 | ---------------------- | ------------------------- | ------------------------------------ |
 | `--ssl PATH` | `input_text` (read file) | SSL or JSON scene |
+| `--ssl_str TEXT` | `input_text` (inline string) | Mutually exclusive with `--ssl`; e.g. one JSONL line |
 | `--output DIR` | `output_root` | Default `{ssl_dir}/render_output` |
 | `--views V ...` | `views` | Unspecified = no view rendering; `auto` used alone |
 | `--backend bpy         | pyrender` | `backend` |

@@ -92,14 +92,14 @@ ctx.render_view(
 
 ### 简单用法
 
-**CLI** — 场景输入（`--ssl` 与 `--ssl-text` 二选一）：
+**CLI** — 场景输入（`--ssl` 与 `--ssl_str` 二选一）：
 
 ```bash
 # 文件路径（SSL 或 JSON）
 python render_ssl.py --ssl path/to/scene.ssl --output out --views topdown
 
 # 行内字符串（例如 JSONL 的一行）
-python render_ssl.py --ssl-text '{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}' \
+python render_ssl.py --ssl_str '{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}' \
   --output out --views topdown
 
 # 标准输入（管道传入一行 JSONL）

@@ -1000,9 +1000,9 @@ ALL_VIEWS = [
 
 
 def _read_scene_input(args) -> tuple:
-    """Load scene text from --ssl (file or stdin), or --ssl-text. Returns (input_text, source_path)."""
-    if args.ssl_text is not None:
-        return args.ssl_text, None
+    """Load scene text from --ssl (file or stdin), or --ssl_str. Returns (input_text, source_path)."""
+    if args.ssl_str is not None:
+        return args.ssl_str, None
     if args.ssl == "-":
         import sys
         text = sys.stdin.read()
@@ -1093,7 +1093,7 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         help="Path to SSL/JSON scene file, or '-' to read scene text from stdin",
     )
     parser.add_argument(
-        "--ssl-text",
+        "--ssl_str",
         default=None,
         help="Inline SSL or JSON scene string (e.g. one line from JSONL); mutually exclusive with --ssl",
     )
@@ -1162,10 +1162,10 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     )
 
     args = parser.parse_args()
-    if args.ssl is None and args.ssl_text is None:
-        parser.error("one of --ssl or --ssl-text is required")
-    if args.ssl is not None and args.ssl_text is not None:
-        parser.error("--ssl and --ssl-text are mutually exclusive")
+    if args.ssl is None and args.ssl_str is None:
+        parser.error("one of --ssl or --ssl_str is required")
+    if args.ssl is not None and args.ssl_str is not None:
+        parser.error("--ssl and --ssl_str are mutually exclusive")
     input_text, output_dir, asset_dir, texture_dir = _prepare_ssl_and_dirs(args)
 
     views: ViewsSpec
