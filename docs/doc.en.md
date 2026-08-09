@@ -586,7 +586,9 @@ def render_ssl(
 | CLI | Python | Description |
 | ---------------------- | ------------------------- | ------------------------------------ |
 | `--ssl PATH` | `input_text` (read file) | SSL or JSON scene |
-| `--ssl_str TEXT` | `input_text` (inline string) | Mutually exclusive with `--ssl`; e.g. one JSONL line |
+| `--ssl_str TEXT` | `input_text` (inline string) | Mutually exclusive with `--ssl` / `--ssl_id`; e.g. one JSONL line |
+| `--ssl_id ID` | — (CLI reads JSONL) | e.g. `310449449_4`; requires `--ssl_collection_dir` |
+| `--ssl_collection_dir DIR` | — | Line `{room_index}` (0-based) in `{DIR}/{design_id}.jsonl` |
 | `--output DIR` | `output_root` | Default `{ssl_dir}/render_output` |
 | `--views V ...` | `views` | Unspecified = no view rendering; `auto` used alone |
 | `--backend bpy         | pyrender` | `backend` |

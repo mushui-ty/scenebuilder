@@ -94,7 +94,7 @@ For data production and benchmark runs, `render_ssl.py` is the high-level entry 
 
 ### Simple usage
 
-**CLI** — scene input (`--ssl` and `--ssl_str` are mutually exclusive):
+**CLI** — scene input (choose one of `--ssl`, `--ssl_str`, `--ssl_id`):
 
 ```bash
 # file path (SSL or JSON)
@@ -106,6 +106,11 @@ python render_ssl.py --ssl_str '{"wall":[],"bbox":[],"room":{"room_type":"bedroo
 
 # stdin (pipe one JSONL line)
 sed -n '1p' scenes.jsonl | python render_ssl.py --ssl - --output out --views auto
+
+# JSONL collection room id (310449449_4 = line index 4 in 310449449.jsonl, 0-based)
+python render_ssl.py --ssl_id 310449449_4 \
+  --ssl_collection_dir /root/datasets/manycore/spatiallm_raw \
+  --output out --views topdown
 ```
 
 **Python** — first argument is always `input_text` (SSL or JSON **string**); read from a file, or pass text directly:

@@ -92,7 +92,7 @@ ctx.render_view(
 
 ### 简单用法
 
-**CLI** — 场景输入（`--ssl` 与 `--ssl_str` 二选一）：
+**CLI** — 场景输入（`--ssl`、`--ssl_str`、`--ssl_id` 三选一）：
 
 ```bash
 # 文件路径（SSL 或 JSON）
@@ -104,6 +104,11 @@ python render_ssl.py --ssl_str '{"wall":[],"bbox":[],"room":{"room_type":"bedroo
 
 # 标准输入（管道传入一行 JSONL）
 sed -n '1p' scenes.jsonl | python render_ssl.py --ssl - --output out --views auto
+
+# JSONL 数据集房间 id（310449449_4 = 310449449.jsonl 第 5 行，0-based 索引 4）
+python render_ssl.py --ssl_id 310449449_4 \
+  --ssl_collection_dir /root/datasets/manycore/spatiallm_raw \
+  --output out --views topdown
 ```
 
 **Python** — 第一个参数始终是 `input_text`（SSL 或 JSON **字符串**）；可从文件读取，也可直接传字符串：

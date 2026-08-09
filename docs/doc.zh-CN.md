@@ -586,7 +586,9 @@ def render_ssl(
 | CLI                    | Python                    | 说明                                   |
 | ---------------------- | ------------------------- | ------------------------------------ |
 | `--ssl PATH`           | `input_text`（读文件）         | SSL 或 JSON 场景                        |
-| `--ssl_str TEXT`       | `input_text`（行内字符串）      | 与 `--ssl` 二选一；例如 JSONL 一行              |
+| `--ssl_str TEXT`       | `input_text`（行内字符串）      | 与 `--ssl` / `--ssl_id` 二选一；例如 JSONL 一行              |
+| `--ssl_id ID`          | —（CLI 读 JSONL）             | 如 `310449449_4`；须配合 `--ssl_collection_dir` |
+| `--ssl_collection_dir DIR` | —                      | `{DIR}/{design_id}.jsonl` 第 `{room_index}` 行（0-based） |
 | `--output DIR`         | `output_root`             | 默认 `{ssl_dir}/render_output`         |
 | `--views V ...`        | `views`                   | 不指定 = 不渲染视角；`auto` 单独使用              |
 | `--backend bpy         | pyrender`                 | `backend`                            |

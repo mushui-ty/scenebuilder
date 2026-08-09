@@ -999,26 +999,82 @@ ALL_VIEWS = [
 ]
 
 
-def _read_scene_input(args) -> tuple:
-    """Load scene text from --ssl (file or stdin), or --ssl_str. Returns (input_text, source_path)."""
+def _parse_ssl_id(ssl_id: str) -> Tuple[str, int]:
+    """Parse ``310449449_4`` -> (``310449449``, 4). Room index is 0-based line number in JSONL."""
+    if not ssl_id or "_" not in ssl_id:
+        raise ValueError(
+            f"Invalid --ssl_id {ssl_id!r}; expected format {{design_id}}_{{room_index}}, e.g. 310449449_4"
+        )
+    design_id, room_str = ssl_id.rsplit("_", 1)
+    if not design_id or not room_str.isdigit():
+        raise ValueError(
+            f"Invalid --ssl_id {ssl_id!r}; expected format {{design_id}}_{{room_index}}, e.g. 310449449_4"
+        )
+    return design_id, int(room_str)
+
+
+def _read_jsonl_line(file_path: str, line_number: int) -> Dict[str, Any]:
+    """Read line ``line_number`` (0-based) from a JSONL file."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i == line_number:
+                return json.loads(line.strip())
+    raise ValueError(f"Line number {line_number} is out of file range")
+
+
+def _load_scene_text_from_collection(ssl_id: str, collection_dir: str) -> Tuple[str, str]:
+    """Load one room JSON line from ``{collection_dir}/{design_id}.jsonl``."""
+    design_id, room_index = _parse_ssl_id(ssl_id)
+    jsonl_path = os.path.join(collection_dir, f"{design_id}.jsonl")
+    if not os.path.isfile(jsonl_path):
+        raise FileNotFoundError(
+            f"JSONL not found for --ssl_id {ssl_id!r}: {jsonl_path}"
+        )
+
+    try:
+        scene_data = _read_jsonl_line(jsonl_path, room_index)
+    except ValueError as exc:
+        raise ValueError(
+            f"Room index {room_index} out of range in {jsonl_path} for --ssl_id {ssl_id!r}"
+        ) from exc
+
+    room = scene_data.get("room") or {}
+    room_id = room.get("id")
+    if room_id and room_id != ssl_id:
+        print(
+            f"⚠️  JSONL line {room_index} has room.id={room_id!r}, expected {ssl_id!r}; continuing"
+        )
+
+    scene_text = json.dumps(scene_data, ensure_ascii=False)
+    print(f"📂 Loaded scene from {jsonl_path} line {room_index} ({room.get('room_type', 'unknown')})")
+    return scene_text, jsonl_path
+
+
+def _read_scene_input(args) -> Tuple[str, Optional[str], Optional[str]]:
+    """Load scene text. Returns (input_text, source_path, asset_id_timestamp)."""
+    if getattr(args, "ssl_id", None) is not None:
+        scene_text, jsonl_path = _load_scene_text_from_collection(args.ssl_id, args.ssl_collection_dir)
+        return scene_text, jsonl_path, args.ssl_id
     if args.ssl_str is not None:
-        return args.ssl_str, None
+        return args.ssl_str, None, None
     if args.ssl == "-":
         import sys
         text = sys.stdin.read()
         if not text.strip():
             raise ValueError("Empty scene input from stdin (--ssl -)")
-        return text, None
+        return text, None, None
     with open(args.ssl, "r", encoding="utf-8") as f:
-        return f.read(), args.ssl
+        return f.read(), args.ssl, None
 
 
 def _prepare_ssl_and_dirs(args) -> tuple:
     """Read SSL/JSON input and resolve output directory plus asset/texture paths."""
-    input_text, source_path = _read_scene_input(args)
+    input_text, source_path, asset_id_timestamp = _read_scene_input(args)
 
     if args.output is not None:
         output_dir = args.output
+    elif getattr(args, "ssl_id", None) is not None:
+        output_dir = os.path.join(os.getcwd(), "render_output", args.ssl_id)
     elif source_path is not None:
         output_dir = os.path.join(os.path.dirname(os.path.abspath(source_path)), "render_output")
     else:
@@ -1051,24 +1107,30 @@ def _prepare_ssl_and_dirs(args) -> tuple:
                 texture_dir = candidate
                 break
 
-    if source_path is not None and "asset_id=" not in input_text and "mesh_id=" in input_text:
-        timestamp = os.path.basename(os.path.dirname(source_path))
+    if "asset_id=" not in input_text and "mesh_id=" in input_text:
+        if asset_id_timestamp is not None:
+            timestamp = asset_id_timestamp
+        elif source_path is not None:
+            timestamp = os.path.basename(os.path.dirname(source_path))
+        else:
+            timestamp = None
 
-        def _add_asset_id(match):
-            full = match.group(0)
-            mesh_id_match = re.search(r'mesh_id="([^"]*)"', full)
-            if mesh_id_match:
-                mesh_id_str = mesh_id_match.group(1)
-                try:
-                    mesh_id_padded = f"{int(mesh_id_str):03d}"
-                except ValueError:
-                    mesh_id_padded = mesh_id_str
-                asset_id = f"{mesh_id_padded}_{timestamp}"
-                return full[:-1] + f', asset_id="{asset_id}")'
-            return full
+        if timestamp is not None:
+            def _add_asset_id(match):
+                full = match.group(0)
+                mesh_id_match = re.search(r'mesh_id="([^"]*)"', full)
+                if mesh_id_match:
+                    mesh_id_str = mesh_id_match.group(1)
+                    try:
+                        mesh_id_padded = f"{int(mesh_id_str):03d}"
+                    except ValueError:
+                        mesh_id_padded = mesh_id_str
+                    asset_id = f"{mesh_id_padded}_{timestamp}"
+                    return full[:-1] + f', asset_id="{asset_id}")'
+                return full
 
-        input_text = re.sub(r"(?:Bbox|Door|Window)\([^)]+\)", _add_asset_id, input_text)
-        print(f"Inferred asset_id from mesh_id + timestamp ({timestamp})")
+            input_text = re.sub(r"(?:Bbox|Door|Window)\([^)]+\)", _add_asset_id, input_text)
+            print(f"Inferred asset_id from mesh_id + timestamp ({timestamp})")
 
     return input_text, output_dir, asset_dir, texture_dir
 
@@ -1095,7 +1157,17 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     parser.add_argument(
         "--ssl_str",
         default=None,
-        help="Inline SSL or JSON scene string (e.g. one line from JSONL); mutually exclusive with --ssl",
+        help="Inline SSL or JSON scene string (e.g. one line from JSONL); mutually exclusive with --ssl / --ssl_id",
+    )
+    parser.add_argument(
+        "--ssl_id",
+        default=None,
+        help="Room id like 310449449_4 (design_id + 0-based room index); requires --ssl_collection_dir",
+    )
+    parser.add_argument(
+        "--ssl_collection_dir",
+        default=None,
+        help="Directory of per-design JSONL files, e.g. /root/datasets/manycore/spatiallm_raw",
     )
     parser.add_argument("--output", default=None, help="Output directory (default: render_output next to ssl file, cwd, or as given)")
     parser.add_argument(
@@ -1162,10 +1234,19 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     )
 
     args = parser.parse_args()
-    if args.ssl is None and args.ssl_str is None:
-        parser.error("one of --ssl or --ssl_str is required")
-    if args.ssl is not None and args.ssl_str is not None:
-        parser.error("--ssl and --ssl_str are mutually exclusive")
+    input_modes = [name for name, val in (
+        ("--ssl", args.ssl),
+        ("--ssl_str", args.ssl_str),
+        ("--ssl_id", args.ssl_id),
+    ) if val is not None]
+    if not input_modes:
+        parser.error("one of --ssl, --ssl_str, or --ssl_id is required")
+    if len(input_modes) > 1:
+        parser.error(f"only one scene input flag allowed; got {', '.join(input_modes)}")
+    if args.ssl_id is not None and not args.ssl_collection_dir:
+        parser.error("--ssl_collection_dir is required when using --ssl_id")
+    if args.ssl_collection_dir is not None and args.ssl_id is None:
+        parser.error("--ssl_collection_dir requires --ssl_id")
     input_text, output_dir, asset_dir, texture_dir = _prepare_ssl_and_dirs(args)
 
     views: ViewsSpec
