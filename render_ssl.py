@@ -86,6 +86,8 @@ def _run_auto_views_from_path(
     context: Dict[str, Any],
     *,
     resume: bool = True,
+    width: int = 1000,
+    height: int = 1000,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Build auto-view specs from the floor path and write auto_views.json."""
     if resume:
@@ -111,7 +113,7 @@ def _run_auto_views_from_path(
         print("⚠️  path_points_ssl is empty; auto views unavailable")
         return {}, []
 
-    specs, names = build_auto_views_from_path(path_points, context)
+    specs, names = build_auto_views_from_path(path_points, context, width=width, height=height)
     manifest = write_auto_views_manifest(y_dir, specs)
     n_path = len(path_points)
     n_single = sum(1 for n in names if not n.endswith("_seq"))
@@ -229,13 +231,15 @@ def _render_view_spec(
     spec: Dict[str, Any],
     extra: dict,
     view_dir_name: str,
+    camera_kwargs: Optional[dict] = None,
 ) -> None:
     """Invoke render_view from a view spec (shared by auto / custom)."""
+    camera_kwargs = camera_kwargs or {}
     common = dict(
         rebuild=True,
         use_HDRI=False,
-        width=int(spec.get("width", 1000)),
-        height=int(spec.get("height", 1000)),
+        width=int(spec.get("width", camera_kwargs.get("width", 1000))),
+        height=int(spec.get("height", camera_kwargs.get("height", 1000))),
         auto_transparent=True,
         view_dir_name=view_dir_name,
         **extra,
@@ -243,8 +247,11 @@ def _render_view_spec(
     if spec.get("manual_fov") is not None:
         common["manual_fov"] = float(spec["manual_fov"])
         common["auto_fov"] = False
+    elif camera_kwargs.get("manual_fov") is not None:
+        common["manual_fov"] = float(camera_kwargs["manual_fov"])
+        common["auto_fov"] = False
     else:
-        common["auto_fov"] = True
+        common["auto_fov"] = bool(camera_kwargs.get("auto_fov", True))
 
     if spec["type"] == "single":
         single_kwargs = dict(
@@ -277,9 +284,10 @@ def _render_auto_view_spec(
     spec: Dict[str, Any],
     extra: dict,
     view_dir_name: str,
+    camera_kwargs: Optional[dict] = None,
 ) -> None:
     """Invoke render_view from an auto_view spec; output dir name is view_dir_name (e.g. auto_path_0004_seq)."""
-    _render_view_spec(ctx, output_dir, spec, extra, view_dir_name)
+    _render_view_spec(ctx, output_dir, spec, extra, view_dir_name, camera_kwargs=camera_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +387,29 @@ def _job_render_kwargs(job: dict) -> dict:
     )
 
 
+def _view_camera_kwargs(job: dict) -> dict:
+    """Width/height/FOV kwargs shared by topdown, preset, and custom views."""
+    kwargs = {
+        "width": int(job.get("width", 1000)),
+        "height": int(job.get("height", 1000)),
+        "auto_fov": bool(job.get("auto_fov", True)),
+    }
+    manual_fov = job.get("manual_fov")
+    if manual_fov is not None:
+        kwargs["manual_fov"] = float(manual_fov)
+        kwargs["auto_fov"] = False
+    return kwargs
+
+
+def _apply_job_view_size(job: dict, spec: Dict[str, Any]) -> None:
+    """Override auto/custom view spec resolution from render_ssl job settings."""
+    spec["width"] = int(job.get("width", 1000))
+    spec["height"] = int(job.get("height", 1000))
+    manual_fov = job.get("manual_fov")
+    if manual_fov is not None:
+        spec["manual_fov"] = float(manual_fov)
+
+
 def worker_render_view(job_path: str, view_name: str) -> None:
     job = _load_job(job_path)
     ctx = _create_render_ctx(job)
@@ -425,8 +456,12 @@ def worker_render_view(job_path: str, view_name: str) -> None:
     else:
         extra = _job_render_kwargs(job)
 
+    camera_kwargs = _view_camera_kwargs(job)
+
     if view_name in auto_specs:
-        _render_auto_view_spec(ctx, output_dir, auto_specs[view_name], extra, view_dir_name=view_name)
+        spec = dict(auto_specs[view_name])
+        _apply_job_view_size(job, spec)
+        _render_auto_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
         view_dir = view_dir_for(output_dir, view_name)
         record_view_complete(
             output_dir,
@@ -437,7 +472,9 @@ def worker_render_view(job_path: str, view_name: str) -> None:
         return
 
     if view_name in custom_specs:
-        _render_view_spec(ctx, output_dir, custom_specs[view_name], extra, view_dir_name=view_name)
+        spec = dict(custom_specs[view_name])
+        _apply_job_view_size(job, spec)
+        _render_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
         view_dir = view_dir_for(output_dir, view_name)
         record_view_complete(
             output_dir,
@@ -455,6 +492,7 @@ def worker_render_view(job_path: str, view_name: str) -> None:
             show_ceiling=False,
             rebuild=True,
             use_HDRI=False,
+            **_view_camera_kwargs(job),
             **extra,
         )
         view_dir = view_dir_for(output_dir, "topdown")
@@ -478,6 +516,7 @@ def worker_render_view(job_path: str, view_name: str) -> None:
         rebuild=True,
         use_HDRI=False,
         view_dir_name=view_dir_name_for(view_name),
+        **_view_camera_kwargs(job),
         **extra,
     )
     view_dir = view_dir_for(output_dir, view_name)
@@ -564,11 +603,9 @@ def _run_normalized_topdown_phase(
     *,
     align: Dict[str, Any],
     floor_path: bool = True,
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Render a 1000² pixel-aligned top-down view under Y/topdown_normalized/ and optionally sample the floor path."""
+    """Render fixed 1000² pixel-aligned top-down under Y/topdown_normalized/ and optionally sample the floor path."""
     if not hasattr(ctx, "normalized_topdown_view"):
         raise RuntimeError("Current backend does not support normalized_topdown_view")
 
@@ -578,8 +615,6 @@ def _run_normalized_topdown_phase(
 
     ctx.normalized_topdown_view(
         topdown_norm_dir,
-        width=width,
-        height=height,
         show_ceiling=show_ceiling,
         use_HDRI=False,
         render_depth=floor_path,
@@ -612,8 +647,6 @@ def render_normalized_topdown(
     gen_texture: bool = False,
     image: Optional[str] = None,
     samples: Optional[int] = None,
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
     retrieve_hole: bool = True,
     asset_mode: Literal["none", "retrieve", "generate"] = "none",
@@ -649,8 +682,6 @@ def render_normalized_topdown(
         samples=samples,
         normalized_topdown=True,
         floor_path=floor_path,
-        normalized_topdown_width=width,
-        normalized_topdown_height=height,
         normalized_topdown_show_ceiling=show_ceiling,
     )
     if not floor_path:
@@ -693,9 +724,11 @@ def render_ssl(
     samples: Optional[int] = None,
     normalized_topdown: bool = False,
     floor_path: bool = True,
-    normalized_topdown_width: int = 1000,
-    normalized_topdown_height: int = 1000,
     normalized_topdown_show_ceiling: bool = False,
+    width: int = 1000,
+    height: int = 1000,
+    auto_fov: bool = True,
+    manual_fov: Optional[float] = None,
     resume: bool = True,
     camera_position: Any = None,
     look_at: Any = None,
@@ -716,8 +749,21 @@ def render_ssl(
     or sequence (``custom_seq/``) after the ``views`` specified above finish.
     ``up_vector`` is optional: ``render_view`` defaults to ``[0,0,1]``; uses ``[0,1,0]`` when collinear.
 
+    ``width`` / ``height`` / ``auto_fov`` / ``manual_fov`` follow ``render_view`` semantics for preset,
+    custom, auto, and regular ``topdown/`` views (defaults: 1000×1000, auto FOV).
+    Pixel-aligned ``topdown_normalized/`` is **fixed at 1000×1000** (SpatialFactory convention; not configurable).
+    Auto views keep randomized FOV unless ``manual_fov`` is set.
+
     Each view renders in world (or normalized) SSL; visible-geometry primary files use world SSL with ``*_opencv`` copies.
     """
+    width = int(width)
+    height = int(height)
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive integers")
+    if manual_fov is not None and float(manual_fov) <= 0:
+        raise ValueError("manual_fov must be positive when set")
+    if manual_fov is not None:
+        auto_fov = False
     if visible_geometry:
         semantic = True
     if views == "auto":
@@ -812,8 +858,6 @@ def render_ssl(
                 y_dir,
                 align=pixel_align,
                 floor_path=floor_path,
-                width=normalized_topdown_width,
-                height=normalized_topdown_height,
                 show_ceiling=normalized_topdown_show_ceiling,
             )
 
@@ -848,7 +892,7 @@ def render_ssl(
             print("⚠️  views=auto currently only supports backend=bpy; skipped auto views")
         else:
             auto_view_specs, auto_view_names = _run_auto_views_from_path(
-                y_dir, floor_result, ctx.context, resume=resume
+                y_dir, floor_result, ctx.context, resume=resume, width=width, height=height
             )
 
     if camera_position is not None:
@@ -856,6 +900,9 @@ def render_ssl(
             camera_position,
             look_at,
             up_vector=up_vector,
+            width=width,
+            height=height,
+            manual_fov=manual_fov,
         )
         custom_view_specs[custom_name] = custom_spec
         custom_view_names.append(custom_name)
@@ -884,6 +931,10 @@ def render_ssl(
         "depth": depth,
         "pano": pano,
         "pano_resolution": int(pano_resolution),
+        "width": int(width),
+        "height": int(height),
+        "auto_fov": bool(auto_fov),
+        "manual_fov": float(manual_fov) if manual_fov is not None else None,
         "look_at": look_at,
         "view_cameras": view_cameras,
         "auto_view_specs": auto_view_specs,
@@ -896,7 +947,7 @@ def render_ssl(
     views_to_run = _resolve_views_to_run(views, view_cameras)
     if views == "auto":
         if backend == "bpy":
-            # Regular topdown (Y/topdown/, 1024²) + path-driven auto views
+            # Regular topdown (Y/topdown/) + path-driven auto views
             views_to_run = ["topdown"] + list(auto_view_names)
         else:
             views_to_run = []
@@ -938,32 +989,60 @@ ALL_VIEWS = [
 ]
 
 
+def _read_scene_input(args) -> tuple:
+    """Load scene text from --ssl (file or stdin), or --ssl-text. Returns (input_text, source_path)."""
+    if args.ssl_text is not None:
+        return args.ssl_text, None
+    if args.ssl == "-":
+        import sys
+        text = sys.stdin.read()
+        if not text.strip():
+            raise ValueError("Empty scene input from stdin (--ssl -)")
+        return text, None
+    with open(args.ssl, "r", encoding="utf-8") as f:
+        return f.read(), args.ssl
+
+
 def _prepare_ssl_and_dirs(args) -> tuple:
     """Read SSL/JSON input and resolve output directory plus asset/texture paths."""
-    output_dir = args.output
-    if output_dir is None:
-        output_dir = os.path.join(os.path.dirname(args.ssl), "render_output")
+    input_text, source_path = _read_scene_input(args)
+
+    if args.output is not None:
+        output_dir = args.output
+    elif source_path is not None:
+        output_dir = os.path.join(os.path.dirname(os.path.abspath(source_path)), "render_output")
+    else:
+        output_dir = os.path.join(os.getcwd(), "render_output")
 
     asset_dir = args.assets
     if asset_dir is None:
-        ssl_dir = os.path.dirname(args.ssl)
-        for candidate in ("assets", "Assets", "nano_gen_asset"):
-            path = os.path.join(ssl_dir, candidate)
-            if os.path.isdir(path):
-                asset_dir = path
+        search_roots = []
+        if source_path is not None:
+            search_roots.append(os.path.dirname(os.path.abspath(source_path)))
+        search_roots.append(os.getcwd())
+        for root in search_roots:
+            for candidate in ("assets", "Assets", "nano_gen_asset"):
+                path = os.path.join(root, candidate)
+                if os.path.isdir(path):
+                    asset_dir = path
+                    break
+            if asset_dir is not None:
                 break
 
     texture_dir = args.texture
     if texture_dir is None:
-        candidate = os.path.join(os.path.dirname(args.ssl), "texture")
-        if os.path.isdir(candidate):
-            texture_dir = candidate
+        search_roots = []
+        if source_path is not None:
+            search_roots.append(os.path.dirname(os.path.abspath(source_path)))
+        search_roots.append(os.getcwd())
+        for root in search_roots:
+            candidate = os.path.join(root, "texture")
+            if os.path.isdir(candidate):
+                texture_dir = candidate
+                break
 
-    with open(args.ssl, "r", encoding="utf-8") as f:
-        input_text = f.read()
-
-    if "asset_id=" not in input_text and "mesh_id=" in input_text:
-        timestamp = os.path.basename(os.path.dirname(args.ssl))
+    if source_path is not None and "asset_id=" not in input_text and "mesh_id=" in input_text:
+        timestamp = os.path.basename(os.path.dirname(source_path))
 
         def _add_asset_id(match):
             full = match.group(0)
@@ -999,8 +1078,16 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     --ply --visible_geometry --semantic --depth --pano
 """,
     )
-    parser.add_argument("--ssl", required=True, help="Path to SSL or JSON scene file")
-    parser.add_argument("--output", default=None, help="Output directory (default: render_output next to ssl file)")
+    parser.add_argument(
+        "--ssl",
+        help="Path to SSL/JSON scene file, or '-' to read scene text from stdin",
+    )
+    parser.add_argument(
+        "--ssl-text",
+        default=None,
+        help="Inline SSL or JSON scene string (e.g. one line from JSONL); mutually exclusive with --ssl",
+    )
+    parser.add_argument("--output", default=None, help="Output directory (default: render_output next to ssl file, cwd, or as given)")
     parser.add_argument(
         "--views", nargs="*", default=None, metavar="VIEW",
         help=f"View list ({', '.join(ALL_VIEWS)}); omit to skip preset views; "
@@ -1039,6 +1126,14 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
                         help="For render_view perspectives, also export sibling dir {millis_timestamp}_pano (not for topdown)")
     parser.add_argument("--pano_resolution", type=int, default=4096,
                         help="Panorama horizontal resolution; only with --pano; height is half (default: 4096, i.e. 4096x2048)")
+    parser.add_argument("--width", type=int, default=1000,
+                        help="Render width for views (default: 1000; same semantics as render_view)")
+    parser.add_argument("--height", type=int, default=1000,
+                        help="Render height for views (default: 1000; same semantics as render_view)")
+    parser.add_argument("--manual_fov", type=float, default=None,
+                        help="Vertical FOV in degrees; overrides auto_fov (same as render_view)")
+    parser.add_argument("--no_auto_fov", action="store_true",
+                        help="Disable auto FOV; use with --manual_fov for perspective views")
     parser.add_argument("--normalized_topdown", action="store_true",
                         help="Enable pixel-aligned SSL: sole output Y={output}_normalized, "
                              "Y/topdown_normalized path planning first, then render views")
@@ -1052,6 +1147,10 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     )
 
     args = parser.parse_args()
+    if args.ssl is None and args.ssl_text is None:
+        parser.error("one of --ssl or --ssl-text is required")
+    if args.ssl is not None and args.ssl_text is not None:
+        parser.error("--ssl and --ssl-text are mutually exclusive")
     input_text, output_dir, asset_dir, texture_dir = _prepare_ssl_and_dirs(args)
 
     views: ViewsSpec
@@ -1090,6 +1189,10 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         normalized_topdown=normalized_topdown,
         floor_path=floor_path,
         resume=not args.no_resume,
+        width=args.width,
+        height=args.height,
+        auto_fov=not args.no_auto_fov,
+        manual_fov=args.manual_fov,
     )
     if args.samples is not None:
         render_kwargs["samples"] = args.samples

@@ -14,6 +14,10 @@ from typing import Dict, Any, Optional, Literal, List
 from pathlib import Path
 from PIL import Image
 
+# Pixel-aligned topdown (SpatialFactory Stage 1) is fixed at 1000²; not user-configurable.
+NORMALIZED_TOPDOWN_WIDTH = 1000
+NORMALIZED_TOPDOWN_HEIGHT = 1000
+
 
 def _import_core_util():
     """Support package-relative imports and render_ssl loading util_data via importlib."""
@@ -1696,15 +1700,18 @@ def write_standard_ssl_to_path(context: Dict[str, Any], ssl_path: str) -> str:
 def prepare_pixel_aligned_topdown_context(
     context: Dict[str, Any],
     *,
-    width: int = 1000,
-    height: int = 1000,
     indoor_fov: float = 160.0,
     outdoor_fov_scale: float = 1.05,
     round_decimals: int = 2,
 ) -> Dict[str, Any]:
-    """Translate context per SpatialFactory Stage 1 rules; return render/export parameters."""
+    """Translate context per SpatialFactory Stage 1 rules; return render/export parameters.
+
+    Resolution is fixed at NORMALIZED_TOPDOWN_WIDTH × NORMALIZED_TOPDOWN_HEIGHT (1000²).
+    """
     util = _import_core_util()
 
+    width = NORMALIZED_TOPDOWN_WIDTH
+    height = NORMALIZED_TOPDOWN_HEIGHT
     image_half = float(width) / 2.0
     world_cam_w, world_look_w = compute_topdown_camera_pose(context)
     meta = context["meta"]

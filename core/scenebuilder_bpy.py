@@ -3523,8 +3523,6 @@ class BpySceneCtx:
     def normalized_topdown_view(
         self,
         output_dir: str,
-        width: int = 1000,
-        height: int = 1000,
         geometry_mode: str = "gltf",
         show_wall: bool = True,
         show_window: bool = True,
@@ -3547,8 +3545,11 @@ class BpySceneCtx:
     ):
         """Pixel-aligned top-down view: translate SSL so image top-left maps to floor (0,0); outputs topdown.png / camera_para.json.
 
+        Resolution is fixed at 1000×1000 (SpatialFactory pixel-align convention); not configurable.
         Skip second translation when align is provided (scene already in pixel-aligned SSL); no ssl.txt when write_ssl=False.
         """
+        width = util_data.NORMALIZED_TOPDOWN_WIDTH
+        height = util_data.NORMALIZED_TOPDOWN_HEIGHT
         for key in (
             "export_glb", "export_point_cloud", "export_voxel", "visible_geometry",
             "rebuild", "auto_fov", "manual_fov", "glb_path",
@@ -3562,8 +3563,6 @@ class BpySceneCtx:
 
         align = util_data.prepare_pixel_aligned_topdown_context(
             self.context,
-            width=width,
-            height=height,
             round_decimals=round_decimals,
         ) if align is None else align
         if write_ssl:

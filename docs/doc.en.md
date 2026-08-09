@@ -317,8 +317,6 @@ result = render_normalized_topdown(
 ```python
 ctx.normalized_topdown_view(
     "out/topdown_normalized",
-    width=1000,
-    height=1000,
     render_depth=True,             # required for floor_path
     render_semantic=True,
 )
@@ -337,11 +335,73 @@ See **§4** for parameters; **§6** for output directories; **§7** for export f
 
 | Need | Entry Point |
 | ----------------- | ------------------------------------------------------------ |
+| Resolution / FOV semantics (Blender) | **§4.0** (long-axis FOV, `sensor_fit=AUTO`, focal length) |
 | Single top-down view (regular SSL) | `BpySceneCtx.topdown_view` (§4.1) |
 | Pixel-aligned top-down + optional floor path | `render_normalized_topdown()` / `--normalized_topdown` (§4.4) |
 | Custom camera perspective | `BpySceneCtx.render_view` (§4.2) |
 | Batch multi-view / benchmark | `render_ssl()` or `render_ssl.py` (§4.3) |
 | Auto path-driven views | `render_ssl(..., views="auto")` (§5.1, includes normalized_topdown) |
+
+
+
+
+### 4.0 Resolution and FOV (Blender backend)
+
+Applies to perspective views rendered via **bpy** in `topdown_view`, `render_view`, and `render_ssl` (not equirectangular `pano` cameras).
+
+#### Specifiable imaging parameters
+
+| Parameter | Role |
+| --------- | ---- |
+| `width` / `height` | Output pixel resolution, written to `scene.render.resolution_x/y` independently |
+| `auto_fov` | Auto-compute field of view from scene bounding box (degrees → radians for Blender) |
+| `manual_fov` | Manually specify one FOV angle (**degrees**); overrides `auto_fov` when not `None` |
+
+Camera setup (`BpySceneCtx._create_render_camera`):
+
+```python
+camera_data.lens_unit = 'FOV'
+camera_data.angle = fov_rad   # from manual_fov or auto_fov
+# default sensor_fit = 'AUTO' (not explicitly changed)
+scene.render.resolution_x = width
+scene.render.resolution_y = height
+```
+
+#### `manual_fov` is the **long-axis** FOV, not always "vertical FOV"
+
+With Blender `sensor_fit=AUTO`, `camera_data.angle` applies to the image **long axis**; the short-axis FOV is derived from aspect ratio. Both axes share the same focal length \(f_x = f_y\):
+
+| Aspect | Long axis | `manual_fov` means | Short-axis FOV |
+| ------ | --------- | ------------------ | -------------- |
+| width ≥ height (e.g. 1280×720) | horizontal | **horizontal FOV** | vertical FOV smaller, derived from aspect |
+| height > width (e.g. 720×1280) | vertical | **vertical FOV** | horizontal FOV smaller, derived from aspect |
+| 1:1 (e.g. 1000×1000) | — | horizontal FOV = vertical FOV | — |
+
+Implementation matches `util_bpy.camera_frustum_tangents` and `build_opencv_intrinsic_4x4` (§6.3.3):
+
+- width ≥ height: `tan_x = tan(angle/2)`, `tan_y = tan_x / aspect`
+- height > width: `tan_y = tan(angle/2)`, `tan_x = tan_y × aspect`
+- Focal length: `fx = width / (2·tan_x)`, `fy = height / (2·tan_y)`, and **`fx = fy`**
+
+**Mental model:** specify X/Y resolution + one FOV angle → long-axis FOV is fixed → focal length is computed → same focal length applies to the short axis → short-axis FOV follows. It is **not** "the same FOV applied to both X and Y".
+
+The internal variable is often named `fov_y`, but for non-square landscape images it actually corresponds to Blender's `angle` (long-axis FOV)—do not read the name literally as "always vertical FOV".
+
+#### PyRender backend difference
+
+PyRender uses `PerspectiveCamera(yfov=..., aspectRatio=width/height)`, where `manual_fov` is **always vertical FOV**. For non-1:1 aspect ratios, PyRender and Blender FOV semantics may differ slightly; prefer `backend="bpy"` for data production.
+
+#### Relation to pixel-aligned top-down
+
+`topdown_normalized/` is **fixed at 1000×1000** and cannot be changed via API (SpatialFactory Stage 1 convention; `image_half=500` in `prepare_pixel_aligned_topdown_context` is tied to this). At 1:1, long-axis FOV equals horizontal = vertical FOV; the `fov` in §5.2 `pixel2real_ratio = camera_z × tan(fov/2) / 500` is that angle.
+
+#### Default resolution by API (not all 1000×1000)
+
+| API | Default resolution | Configurable? |
+| --- | ------------------ | ------------- |
+| `topdown_view` / `render_view` | **1024×1024** | Yes (`width` / `height`) |
+| `render_ssl` views (incl. `topdown/`, auto) | **1000×1000** | Yes (`width` / `height` or CLI) |
+| `topdown_normalized/` (pixel-aligned) | **1000×1000** | **No** (fixed) |
 
 
 
@@ -359,8 +419,8 @@ ctx.topdown_view(
     show_door: bool = True,
     show_ceiling: bool = True,     # usually False for top-down
     up_vector: list = None,        # default [0,1,0]; camera "up" direction (SSL world frame)
-    auto_fov: bool = True,         # auto vertical FOV from scene bounding box
-    manual_fov: float = None,      # specify vertical FOV (degrees); overrides auto_fov when not None
+    auto_fov: bool = True,         # auto FOV from scene bbox (long axis; see §4.0)
+    manual_fov: float = None,      # specify long-axis FOV (degrees); overrides auto_fov (see §4.0)
     auto_transparent: bool = True, # auto-transparent occluding walls/ceiling/floor
     transparent_alpha: float = 0.0,
     render_depth: bool = False,    # also writes {basename}_depth.png + camera_para in same dir
@@ -385,7 +445,7 @@ ctx.topdown_view(
 | `output_path` | When a directory: main image at `{dir}/topdown/topdown.png`; also writes `topdown_camera_para.json`, `ssl_opencv.txt` |
 | `show_ceiling` | When `False`, ceiling is not rendered (common top-down config) |
 | `up_vector` | Top-down default `[0,1,0]`; differs from `render_view` default `[0,0,1]` |
-| `auto_fov` / `manual_fov` | Camera directly above scene; FOV determines visible range |
+| `auto_fov` / `manual_fov` | Camera directly above scene; FOV determines visible range; `manual_fov` is **long-axis FOV** (§4.0) |
 | `render_depth` | bpy: Cycles same-pass depth; `camera_para.json` includes `depth_scale` |
 | `render_semantic` | Semantic map + JSON + bbox_2d overlay (see §7.3) |
 | `export_glb` / `export_point_cloud` / `export_voxel` | Geometry type flags; with `visible_geometry=True` exports **current view** frustum subset; root full-scene requires `render_ssl(..., holo_geometry=True)` |
@@ -402,7 +462,7 @@ Camera position is auto-computed from scene `meta` (directly above center); **no
 | `width` / `height` | `1024` | Resolution |
 | `geometry_mode` | `"gltf"` | `"gltf"` / `"mixed"` / `"bbox"` |
 | `show_wall/window/door/ceiling` | `True` | Element visibility; top-down often uses `show_ceiling=False` |
-| `auto_fov` / `manual_fov` | auto / `None` | Vertical FOV (degrees) |
+| `auto_fov` / `manual_fov` | auto / `None` | Long-axis FOV (degrees); equals horizontal = vertical at 1:1 (§4.0) |
 | `auto_transparent` | `True` | Auto-transparent occluding walls/ceiling/floor |
 | `use_HDRI` | `True` | Enable HDRI from config |
 | `hdri_transparent_background` | `True` | Top-down default transparent background |
@@ -510,9 +570,11 @@ def render_ssl(
     samples: Optional[int] = None,      # Blender Cycles sample count
     normalized_topdown: bool = False,
     floor_path: bool = True,
-    normalized_topdown_width: int = 1000,
-    normalized_topdown_height: int = 1000,
     normalized_topdown_show_ceiling: bool = False,
+    width: int = 1000,                # per-view render width (§4.0); not topdown_normalized/
+    height: int = 1000,               # per-view render height (§4.0)
+    auto_fov: bool = True,
+    manual_fov: Optional[float] = None,
     resume: bool = True,               # resume from checkpoint; CLI uses --no-resume to disable
 ) -> Tuple[str, str, Optional[dict]]
 ```
@@ -537,6 +599,10 @@ def render_ssl(
 | `--depth` | `depth=True` | Per-view depth + normal (bpy) |
 | `--pano` | `pano=True` | Extra panorama per `render_view` view (topdown skipped) |
 | `--pano_resolution N` | `pano_resolution` | Default 4096 |
+| `--width W` | `width` | Per-view render width, default 1000 (§4.0) |
+| `--height H` | `height` | Per-view render height, default 1000 (§4.0) |
+| `--manual_fov DEG` | `manual_fov` | Long-axis FOV (degrees), overrides auto_fov (§4.0) |
+| `--no_auto_fov` | `auto_fov=False` | Disable auto FOV; use with `--manual_fov` for perspective views |
 | `--normalized_topdown` | `normalized_topdown=True` | Output Y=`{output}_normalized` |
 | `--no_floor_path` | `floor_path=False` | Skip path sampling in `topdown_normalized/` |
 | `--samples N` | `samples` | Blender sample count |
@@ -593,7 +659,7 @@ Three equivalent levels (low to high):
 | | `topdown_view` (§4.1) | `normalized_topdown_view` / `--normalized_topdown` |
 | ------------------ | ------------------------ | -------------------------------------------------- |
 | SSL coordinates | Unchanged | **Translate** XY so image top-left ↔ ground `(0,0)` |
-| Default resolution | 1024² | 1000² (`topdown_normalized/`) |
+| Default resolution | 1024² | **Fixed 1000²** (not configurable) |
 | Output directory | `{Y}/{view}/topdown.png` | `{Y}/topdown_normalized/topdown.png` |
 | `camera_para.json` | SSL world frame | Includes `pixel2real_ratio`, image coordinate system (SpatialFactory) |
 | Floor path | None | Auto nav_mask sampling when `floor_path=True` (§5.2) |
@@ -610,8 +676,6 @@ def render_normalized_topdown(
     backend: str = "bpy",
     asset_dir: Optional[str] = None,
     texture_dir: Optional[str] = None,
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
     floor_path: bool = True,      # False → top-down only, no path sampling
     export_glb: bool = False,
@@ -629,7 +693,7 @@ Equivalent to `render_ssl(..., normalized_topdown=True, views=None)`. When `floo
 | --------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `normalized_topdown` / `--normalized_topdown` | Output root `Y={output_root}_normalized`; pixel-align first; subsequent views/GLB/point cloud use normalized SSL |
 | `floor_path` / `--no_floor_path` | Whether to run nav_mask path in `topdown_normalized/` (default True) |
-| `normalized_topdown_width/height` | Pixel-aligned top-down resolution (default 1000) |
+| `topdown_normalized/` resolution | **Fixed 1000×1000**, not configurable (SpatialFactory Stage 1) |
 | `normalized_topdown_show_ceiling` | Whether to render ceiling in normalization pass |
 | `views="auto"` | **Implicitly** `normalized_topdown=True` + `floor_path=True`, plus extra `topdown/` + auto views (§5.1) |
 
@@ -641,8 +705,6 @@ Can be **combined** with `--views topdown front left_seq`: normalize first, then
 ```python
 ctx.normalized_topdown_view(
     output_dir: str,               # writes topdown.png / ssl.txt / camera_para.json inside dir
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
     render_depth: bool = False,    # required for floor_path
     render_semantic: bool = False,
@@ -652,6 +714,8 @@ ctx.normalized_topdown_view(
     ...
 )
 ```
+
+Resolution is **fixed at 1000×1000**; no `width` / `height` parameters.
 
 Translation computed by `prepare_pixel_aligned_topdown_context`; when `align` is non-empty the scene is already in normalized SSL (`render_ssl` internal path). **Does not support** `visible_geometry` / `export_glb` (stripped from kwargs).
 
@@ -759,20 +823,20 @@ def render_normalized_topdown(
     backend: str = "bpy",
     asset_dir: Optional[str] = None,
     texture_dir: Optional[str] = None,
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
     floor_path: bool = True,   # when True: render depth+semantic and call nav_mask_path
     ...
 ) -> Union[str, Dict[str, Any]]
 ```
 
+`topdown_normalized/` output is **fixed at 1000×1000**; not configurable via parameters.
+
 Underlying render: `BpySceneCtx.normalized_topdown_view()` / `SceneCtx.normalized_topdown_view()` (`core/util_data.prepare_pixel_aligned_topdown_context` performs XY translation).
 
 ### Pixel Alignment Rules
 
-1. Compute topdown camera and `fov_y` (same as regular top-down)
-2. `pixel2real_ratio = camera_z × tan(fov_y/2) / 500`
+1. Compute topdown camera and FOV (same as regular top-down; at default 1000×1000 this is long-axis FOV, see §4.0)
+2. `pixel2real_ratio = camera_z × tan(fov/2) / 500` (at 1:1, fov equals horizontal = vertical FOV)
 3. **Translate entire scene SSL** so camera ground projection lands at image pixel `(ratio×500, ratio×500)` (image coordinate system)
 4. Render 1000×1000 top-down → image top-left `(0,0)` corresponds to ground `(0,0)`
 5. `camera_para.json` uses **image coordinate system** + `pixel2real_ratio` (SpatialFactory compatible)
@@ -1005,7 +1069,7 @@ intrinsic = | fx   0   cx   0 |
 | `cy = intrinsic[1][2]` | Principal point v (pixels) |
 
 
-Consistent with Blender `sensor_fit=AUTO` and current `fov_y`, `image_size`: `fx = width / (2·tan_x)`, `fy = height / (2·tan_y)`, `cx = width/2`, `cy = height/2` (`tan_x/tan_y` rules same as `util_bpy` frustum).
+Consistent with Blender `sensor_fit=AUTO` and current `image_size` (§4.0): `manual_fov` / `auto_fov` supplies long-axis angle; `tan_x` / `tan_y` follow aspect ratio; `fx = width / (2·tan_x)`, `fy = height / (2·tan_y)`, **`fx = fy`**; `cx = width/2`, `cy = height/2` (same rules as `util_bpy.camera_frustum_tangents`).
 
 **Depth back-projection (camera frame, meters):**
 

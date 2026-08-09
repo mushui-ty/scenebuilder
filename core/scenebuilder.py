@@ -1649,8 +1649,6 @@ class SceneCtx:
     def normalized_topdown_view(
         self,
         output_dir: str,
-        width: int = 1000,
-        height: int = 1000,
         show_ceiling: bool = False,
         round_decimals: int = 2,
         render_depth: bool = False,
@@ -1660,7 +1658,12 @@ class SceneCtx:
         write_ssl: bool = True,
         **kwargs,
     ):
-        """Pixel-aligned top-down view (pyrender): translate SSL, render, and write camera_para.json."""
+        """Pixel-aligned top-down view (pyrender): translate SSL, render, and write camera_para.json.
+
+        Resolution is fixed at 1000×1000; not configurable.
+        """
+        width = util_data.NORMALIZED_TOPDOWN_WIDTH
+        height = util_data.NORMALIZED_TOPDOWN_HEIGHT
         for key in (
             "export_glb", "export_point_cloud", "visible_geometry",
             "rebuild", "use_HDRI", "geometry_mode", "show_wall", "show_window", "show_door",
@@ -1675,8 +1678,6 @@ class SceneCtx:
 
         align = util_data.prepare_pixel_aligned_topdown_context(
             self.context,
-            width=width,
-            height=height,
             round_decimals=round_decimals,
         ) if align is None else align
         if write_ssl:

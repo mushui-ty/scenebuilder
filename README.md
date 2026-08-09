@@ -92,6 +92,45 @@ For data production and benchmark runs, `render_ssl.py` is the high-level entry 
 - **Export supervision**: semantic masks, metric depth + normals, equirectangular panoramas
 - **Resume** interrupted jobs (`--no-resume` to force a full rerun)
 
+### Simple usage
+
+**CLI** — scene input (`--ssl` and `--ssl-text` are mutually exclusive):
+
+```bash
+# file path (SSL or JSON)
+python render_ssl.py --ssl path/to/scene.ssl --output out --views topdown
+
+# inline string (e.g. one line from JSONL)
+python render_ssl.py --ssl-text '{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}' \
+  --output out --views topdown
+
+# stdin (pipe one JSONL line)
+sed -n '1p' scenes.jsonl | python render_ssl.py --ssl - --output out --views auto
+```
+
+**Python** — first argument is always `input_text` (SSL or JSON **string**); read from a file, or pass text directly:
+
+```python
+from scenebuilder.render_ssl import render_ssl
+
+# 1) from file path (read SSL / JSON file, then pass content)
+scene_path = "path/to/scene.ssl"  # or scene.json
+with open(scene_path, encoding="utf-8") as f:
+    render_ssl(f.read(), output_root="out", views=["topdown"])
+
+# 2) from input_text (string already in memory)
+ssl_text = """
+Room(id="D54g", room_type="bedroom")
+Wall(id="0", room_id="D54g", p=[0,0,0], q=[3,0,0], height=2.8)
+"""
+render_ssl(ssl_text, output_root="out", views=["topdown"])
+
+# JSON / JSONL line as string works too
+render_ssl('{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}', output_root="out", views="auto")
+```
+
+### Full example — all export switches
+
 Example — turn on the main export switches:
 
 ```bash
@@ -102,22 +141,51 @@ python render_ssl.py \
   --visible_geometry --holo_geometry \
   --glb --ply --voxel \
   --semantic --depth --pano \
-  --views auto
+  --views auto \
+  --width 1000 --height 1000
 ```
+
+**Camera / resolution (`--width`, `--height`, `--manual_fov`, `--no_auto_fov`)**: Same semantics as `render_view`. Default output size is **1000×1000** with auto FOV. `manual_fov` is the **long-axis FOV** under Blender `sensor_fit=AUTO` (see [§4.0](docs/doc.en.md#40-resolution-and-fov-blender-backend)). **`topdown_normalized/` is fixed at 1000×1000** and is not affected by `--width`/`--height`. Auto views keep randomized FOV unless `--manual_fov` is set.
 
 **Output layout** (`out_normalized/` with `--views auto`):
 
 ```
 out_normalized/
-├── ssl.txt, data.json
-├── scene.glb                         # --holo_geometry --glb
-├── pointcloud/, voxel/               # --holo_geometry --ply --voxel
-├── topdown_normalized/               # pixel-aligned topdown + floor path
-├── topdown/                          # regular 1024² topdown + exports
-├── auto_views.json
-├── auto_path_0000/ …                 # auto single-frame views
-├── auto_path_0008_seq/               # auto 3-frame sequences
-└── {view}/                           # RGB, depth, semantic, pano, visible glb/ply/voxel …
+├── ssl.txt, data.json                # normalized scene (when --normalized_topdown / --views auto)
+├── scene.glb                         # --holo_geometry --glb (full scene)
+├── pointcloud/scene_all.ply          # --holo_geometry --ply
+├── voxel/                            # --holo_geometry --voxel (256³ occupancy)
+├── topdown_normalized/               # pixel-aligned topdown + floor path (1000² by default)
+│   ├── topdown.png
+│   ├── camera_para.json
+│   ├── topdown_depth.png             # [--depth] (also used for path planning)
+│   ├── topdown_semantic.*            # [--semantic]
+│   ├── nav_mask*.png                 # floor path planning masks
+│   ├── floor_path_ssl.txt
+│   └── topdown_floor_path.png
+├── auto_views.json                   # auto camera manifest
+├── topdown/                          # regular topdown (--width × --height, default 1000×1000)
+│   ├── topdown.png
+│   ├── topdown_depth.png             # [--depth]
+│   ├── topdown_semantic.*            # [--semantic]
+│   ├── planar_faces.json             # [--ply]
+│   ├── pointcloud/                   # [--visible_geometry --ply]
+│   └── voxel/                        # [--visible_geometry --voxel]
+├── auto_path_0000/                   # auto single-frame view
+│   ├── {timestamp}.png
+│   ├── {timestamp}_depth.png         # [--depth]
+│   ├── {timestamp}_semantic.*        # [--semantic]
+│   ├── {timestamp}_camera_para.json
+│   ├── scene_visible.glb             # [--visible_geometry --glb]
+│   ├── pointcloud/, voxel/           # [--visible_geometry --ply/--voxel]
+│   └── ssl_opencv.txt
+├── auto_path_0000_pano/              # [--pano] sibling panorama for auto_path_0000
+│   ├── {timestamp}_pano.png          # equirectangular (--pano_resolution × half)
+│   └── {timestamp}_pano_camera_para.json
+├── auto_path_0008_seq/               # auto three-frame sequence
+│   ├── {timestamp}_000.png … _002.png
+│   └── … (depth / semantic / visible geometry per frame)
+└── auto_path_0008_seq_pano/        # [--pano] panorama for sequence (first-frame ref)
 ```
 
 Full directory reference: [§6 Output layout](docs/doc.en.md#6-output-layout-and-coordinate-systems).

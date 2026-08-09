@@ -317,8 +317,6 @@ result = render_normalized_topdown(
 ```python
 ctx.normalized_topdown_view(
     "out/topdown_normalized",
-    width=1000,
-    height=1000,
     render_depth=True,             # floor_path 需要
     render_semantic=True,
 )
@@ -337,11 +335,73 @@ ctx.normalized_topdown_view(
 
 | 需求                | 入口                                                           |
 | ----------------- | ------------------------------------------------------------ |
+| 分辨率 / FOV 语义（Blender） | **§4.0**（长轴 FOV、`sensor_fit=AUTO`、焦距推导）                    |
 | 单张俯视图（常规 SSL）     | `BpySceneCtx.topdown_view`（§4.1）                             |
 | 像素对齐俯视图 + 可选地板路径  | `render_normalized_topdown()` / `--normalized_topdown`（§4.4） |
 | 自定义相机透视图          | `BpySceneCtx.render_view`（§4.2）                              |
 | 批量多视角 / benchmark | `render_ssl()` 或 `render_ssl.py`（§4.3）                       |
 | auto 路径驱动视角       | `render_ssl(..., views="auto")`（§5.1，内含 normalized_topdown）  |
+
+
+
+
+### 4.0 分辨率与 FOV（Blender 后端）
+
+适用于 `topdown_view`、`render_view`、`render_ssl` 中通过 **bpy** 渲染的透视视角（不含 equirectangular 全景 `pano`）。
+
+#### 可指定的成像参数
+
+| 参数 | 作用 |
+| ---- | ---- |
+| `width` / `height` | 输出像素分辨率，分别写入 `scene.render.resolution_x/y`，**两轴独立** |
+| `auto_fov` | 按场景包围盒自动计算视野角度（度 → 弧度后写入 Blender） |
+| `manual_fov` | 手动指定一个 FOV 角度（**度**）；非 `None` 时覆盖 `auto_fov` |
+
+相机创建时（`BpySceneCtx._create_render_camera`）：
+
+```python
+camera_data.lens_unit = 'FOV'
+camera_data.angle = fov_rad   # 来自 manual_fov 或 auto_fov
+# 默认 sensor_fit = 'AUTO'（未显式修改）
+scene.render.resolution_x = width
+scene.render.resolution_y = height
+```
+
+#### `manual_fov` 是长轴 FOV，不是固定「垂直 FOV」
+
+Blender 在 `sensor_fit=AUTO` 下会把 `camera_data.angle` 作用在图像的**长轴**上；短轴 FOV 由宽高比自动推出。两轴共用同一焦距 \(f_x = f_y\)：
+
+| 宽高比 | 长轴 | `manual_fov` 对应 | 短轴 FOV |
+| ------ | ---- | ----------------- | -------- |
+| 宽 ≥ 高（如 1280×720） | 水平 | **水平 FOV** | 垂直 FOV 更小，由 aspect 推出 |
+| 高 > 宽（如 720×1280） | 垂直 | **垂直 FOV** | 水平 FOV 更小，由 aspect 推出 |
+| 1:1（如 1000×1000） | — | 水平 FOV = 垂直 FOV | — |
+
+实现与 `util_bpy.camera_frustum_tangents`、`build_opencv_intrinsic_4x4` 一致（§6.3.3）：
+
+- 宽 ≥ 高：`tan_x = tan(angle/2)`，`tan_y = tan_x / aspect`
+- 高 > 宽：`tan_y = tan(angle/2)`，`tan_x = tan_y × aspect`
+- 焦距：`fx = width / (2·tan_x)`，`fy = height / (2·tan_y)`，且 **`fx = fy`**
+
+**理解方式**：你指定 X/Y 分辨率 + 一个 FOV 角度 → 先确定长轴 FOV → 算出焦距 → 同一焦距作用到短轴 → 自动得到短轴 FOV。并非「同一个 FOV 同时赋给 X 和 Y」。
+
+代码内部变量名常写作 `fov_y`，但在非正方形横图下它实际对应 Blender 的 `angle`（长轴 FOV），不要按字面理解为「永远是 Y 方向 FOV」。
+
+#### PyRender 后端差异
+
+PyRender 使用 `PerspectiveCamera(yfov=..., aspectRatio=width/height)`，此时 `manual_fov` **始终作为垂直 FOV**。非 1:1 宽高比时，PyRender 与 Blender 的 FOV 语义可能略有差异；数据生产建议优先使用 `backend="bpy"`。
+
+#### 与像素对齐俯视的关系
+
+`topdown_normalized/` **固定 1000×1000**，不可通过 API 修改（SpatialFactory Stage 1 约定；`prepare_pixel_aligned_topdown_context` 中 `image_half=500` 与之绑定）。正方形下长轴 FOV = 水平 = 垂直 FOV；§5.2 中 `pixel2real_ratio = camera_z × tan(fov/2) / 500` 的 `fov` 即该 FOV。
+
+#### 各接口默认分辨率（并非全是 1000×1000）
+
+| 接口 | 默认分辨率 | 可否改分辨率 |
+| ---- | ---------- | ------------ |
+| `topdown_view` / `render_view` | **1024×1024** | 可以（`width` / `height`） |
+| `render_ssl` 各视角（含 `topdown/`、auto） | **1000×1000** | 可以（`width` / `height` 或 CLI） |
+| `topdown_normalized/`（像素对齐） | **1000×1000** | **不可**（固定） |
 
 
 
@@ -359,8 +419,8 @@ ctx.topdown_view(
     show_door: bool = True,
     show_ceiling: bool = True,     # 俯视图通常设 False
     up_vector: list = None,        # 默认 [0,1,0]；相机「上」方向（SSL 世界系）
-    auto_fov: bool = True,         # 按场景包围盒自动算垂直 FOV
-    manual_fov: float = None,      # 指定垂直 FOV（度）；非 None 时覆盖 auto_fov
+    auto_fov: bool = True,         # 按场景包围盒自动算 FOV（长轴，见 §4.0）
+    manual_fov: float = None,      # 指定长轴 FOV（度）；非 None 时覆盖 auto_fov（见 §4.0）
     auto_transparent: bool = True, # 遮挡墙/顶/地自动透明
     transparent_alpha: float = 0.0,
     render_depth: bool = False,    # 同目录输出 {basename}_depth.png + camera_para
@@ -385,7 +445,7 @@ ctx.topdown_view(
 | `output_path`                       | 传目录时在 `{dir}/topdown/topdown.png` 写主图；同时写 `topdown_camera_para.json`、`ssl_opencv.txt` |
 | `show_ceiling`                      | `False` 时不渲染天花板（常用俯视图配置）                                                              |
 | `up_vector`                         | 俯视默认 `[0,1,0]`；与 `render_view` 默认 `[0,0,1]` 不同                                        |
-| `auto_fov` / `manual_fov`           | 相机在场景正上方，FOV 决定可见范围                                                                   |
+| `auto_fov` / `manual_fov`           | 相机在场景正上方，FOV 决定可见范围；`manual_fov` 为**长轴 FOV**（§4.0）                         |
 | `render_depth`                      | bpy：Cycles 同 pass 输出深度；`camera_para.json` 含 `depth_scale`                             |
 | `render_semantic`                   | 语义图 + JSON + bbox_2d 叠加图（见 §7.3）                                                      |
 | `export_glb` / `export_point_cloud` / `export_voxel` | 几何类型开关；`visible_geometry=True` 时导出**当前视角**视锥内部分；根目录全场景须 `render_ssl(..., holo_geometry=True)` |
@@ -402,7 +462,7 @@ ctx.topdown_view(
 | `width` / `height`                  | `1024`      | 分辨率                                  |
 | `geometry_mode`                     | `"gltf"`    | `"gltf"` / `"mixed"` / `"bbox"`      |
 | `show_wall/window/door/ceiling`     | `True`      | 各元素可见性；俯视常用 `show_ceiling=False`     |
-| `auto_fov` / `manual_fov`           | 自动 / `None` | 垂直 FOV（度）                            |
+| `auto_fov` / `manual_fov`           | 自动 / `None` | 长轴 FOV（度）；1:1 时等于水平 = 垂直（§4.0）   |
 | `auto_transparent`                  | `True`      | 遮挡墙/顶/地自动透明                          |
 | `use_HDRI`                          | `True`      | 启用 config 中 HDRI                     |
 | `hdri_transparent_background`       | `True`      | 俯视默认背景透明                             |
@@ -510,9 +570,11 @@ def render_ssl(
     samples: Optional[int] = None,      # Blender Cycles 采样数
     normalized_topdown: bool = False,
     floor_path: bool = True,
-    normalized_topdown_width: int = 1000,
-    normalized_topdown_height: int = 1000,
     normalized_topdown_show_ceiling: bool = False,
+    width: int = 1000,                # 各视角渲染宽（§4.0）；不含 topdown_normalized/
+    height: int = 1000,               # 各视角渲染高（§4.0）
+    auto_fov: bool = True,
+    manual_fov: Optional[float] = None,
     resume: bool = True,               # 断点续跑；CLI 用 --no-resume 关闭
 ) -> Tuple[str, str, Optional[dict]]
 ```
@@ -537,6 +599,10 @@ def render_ssl(
 | `--depth`              | `depth=True`              | 各视角 depth + normal（bpy）              |
 | `--pano`               | `pano=True`               | 各 `render_view` 视角额外全景（topdown 跳过）   |
 | `--pano_resolution N`  | `pano_resolution`         | 默认 4096                              |
+| `--width W`            | `width`                   | 各视角渲染宽，默认 1000（§4.0）                 |
+| `--height H`           | `height`                  | 各视角渲染高，默认 1000（§4.0）                 |
+| `--manual_fov DEG`     | `manual_fov`              | 长轴 FOV（度），覆盖 auto_fov（§4.0）           |
+| `--no_auto_fov`        | `auto_fov=False`          | 关闭自动 FOV；透视视角建议配合 `--manual_fov`     |
 | `--normalized_topdown` | `normalized_topdown=True` | 输出 Y=`{output}_normalized`           |
 | `--no_floor_path`      | `floor_path=False`        | 跳过 `topdown_normalized/` 路径采样        |
 | `--samples N`          | `samples`                 | Blender 采样数                          |
@@ -593,7 +659,7 @@ def render_ssl(
 |                    | `topdown_view`（§4.1）     | `normalized_topdown_view` / `--normalized_topdown` |
 | ------------------ | ------------------------ | -------------------------------------------------- |
 | SSL 坐标             | 不变                       | **平移** XY，图像左上 ↔ 地面 `(0,0)`                        |
-| 默认分辨率              | 1024²                    | 1000²（`topdown_normalized/`）                       |
+| 默认分辨率              | 1024²                    | **固定 1000²**（不可改）                       |
 | 输出目录               | `{Y}/{view}/topdown.png` | `{Y}/topdown_normalized/topdown.png`               |
 | `camera_para.json` | SSL 世界系                  | 含 `pixel2real_ratio`、图像坐标系（SpatialFactory）         |
 | 地板路径               | 无                        | `floor_path=True` 时自动 nav_mask 采样（§5.2）            |
@@ -610,8 +676,6 @@ def render_normalized_topdown(
     backend: str = "bpy",
     asset_dir: Optional[str] = None,
     texture_dir: Optional[str] = None,
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
     floor_path: bool = True,      # False → 只渲染俯视图，不采样路径
     export_glb: bool = False,
@@ -629,7 +693,7 @@ def render_normalized_topdown(
 | --------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `normalized_topdown` / `--normalized_topdown` | 输出根 `Y={output_root}_normalized`；先 pixel-align，后续 views/GLB/点云均用规范化 SSL               |
 | `floor_path` / `--no_floor_path`              | 是否在 `topdown_normalized/` 跑 nav_mask 路径（默认 True）                                      |
-| `normalized_topdown_width/height`             | 像素对齐俯视图分辨率（默认 1000）                                                                   |
+| `topdown_normalized/` 分辨率                     | **固定 1000×1000**，不可配置（SpatialFactory Stage 1）                                        |
 | `normalized_topdown_show_ceiling`             | 规范化 pass 是否渲染天花                                                                       |
 | `views="auto"`                                | **隐式** `normalized_topdown=True` + `floor_path=True`，并额外渲染 `topdown/` + auto 视角（§5.1） |
 
@@ -641,8 +705,6 @@ def render_normalized_topdown(
 ```python
 ctx.normalized_topdown_view(
     output_dir: str,               # 目录内写 topdown.png / ssl.txt / camera_para.json
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
     render_depth: bool = False,    # floor_path 依赖
     render_semantic: bool = False,
@@ -652,6 +714,8 @@ ctx.normalized_topdown_view(
     ...
 )
 ```
+
+分辨率**固定 1000×1000**，无 `width` / `height` 参数。
 
 由 `prepare_pixel_aligned_topdown_context` 计算平移；`align` 非空时场景已在规范化 SSL 下（`render_ssl` 内部路径）。**不支持** `visible_geometry` / `export_glb`（会从 kwargs 丢弃）。
 
@@ -759,20 +823,20 @@ def render_normalized_topdown(
     backend: str = "bpy",
     asset_dir: Optional[str] = None,
     texture_dir: Optional[str] = None,
-    width: int = 1000,
-    height: int = 1000,
     show_ceiling: bool = False,
     floor_path: bool = True,   # True 时渲染 depth+semantic 并调用 nav_mask_path
     ...
 ) -> Union[str, Dict[str, Any]]
 ```
 
+`topdown_normalized/` 输出分辨率**固定 1000×1000**，不可通过参数修改。
+
 底层渲染：`BpySceneCtx.normalized_topdown_view()` / `SceneCtx.normalized_topdown_view()`（`core/util_data.prepare_pixel_aligned_topdown_context` 做 XY 平移）。
 
 ### 像素对齐规则
 
-1. 计算 topdown 相机与 `fov_y`（与常规俯视图相同）
-2. `pixel2real_ratio = camera_z × tan(fov_y/2) / 500`
+1. 计算 topdown 相机与 FOV（与常规俯视图相同；默认 1000×1000 时长轴 FOV，见 §4.0）
+2. `pixel2real_ratio = camera_z × tan(fov/2) / 500`（正方形时 fov 为水平 = 垂直 FOV）
 3. **平移整场景 SSL**，使相机地面投影落在图像像素 `(ratio×500, ratio×500)`（图像坐标系）
 4. 渲染 1000×1000 俯视图 → 图像左上角 `(0,0)` 对应地面 `(0,0)`
 5. `camera_para.json` 使用**图像坐标系** + `pixel2real_ratio`（SpatialFactory 兼容）
@@ -1005,7 +1069,7 @@ intrinsic = | fx   0   cx   0 |
 | `cy = intrinsic[1][2]` | 主点 v（像素）          |
 
 
-与 Blender `sensor_fit=AUTO` 及当前 `fov_y`、`image_size` 一致：`fx = width / (2·tan_x)`，`fy = height / (2·tan_y)`，`cx = width/2`，`cy = height/2`（`tan_x/tan_y` 规则同 `util_bpy` 视锥）。
+与 Blender `sensor_fit=AUTO` 及当前 `image_size` 一致（§4.0）：`manual_fov` / `auto_fov` 给出长轴 FOV 角 `angle`，按宽高比推出 `tan_x`、`tan_y`；`fx = width / (2·tan_x)`，`fy = height / (2·tan_y)`，**`fx = fy`**；`cx = width/2`，`cy = height/2`（规则同 `util_bpy.camera_frustum_tangents`）。
 
 **深度反投影（相机系，米）：**
 

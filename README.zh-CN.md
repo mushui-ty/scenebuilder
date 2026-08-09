@@ -90,6 +90,45 @@ ctx.render_view(
 - **导出监督信号**：语义 mask、米制深度 + 法线、等距圆柱全景图
 - **断点续跑**（用 `--no-resume` 强制全量重跑）
 
+### 简单用法
+
+**CLI** — 场景输入（`--ssl` 与 `--ssl-text` 二选一）：
+
+```bash
+# 文件路径（SSL 或 JSON）
+python render_ssl.py --ssl path/to/scene.ssl --output out --views topdown
+
+# 行内字符串（例如 JSONL 的一行）
+python render_ssl.py --ssl-text '{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}' \
+  --output out --views topdown
+
+# 标准输入（管道传入一行 JSONL）
+sed -n '1p' scenes.jsonl | python render_ssl.py --ssl - --output out --views auto
+```
+
+**Python** — 第一个参数始终是 `input_text`（SSL 或 JSON **字符串**）；可从文件读取，也可直接传字符串：
+
+```python
+from scenebuilder.render_ssl import render_ssl
+
+# 1）从文件路径（读取 SSL / JSON 文件，再传入内容）
+scene_path = "path/to/scene.ssl"  # 或 scene.json
+with open(scene_path, encoding="utf-8") as f:
+    render_ssl(f.read(), output_root="out", views=["topdown"])
+
+# 2）从 input_text（内存里已有的字符串）
+ssl_text = """
+Room(id="D54g", room_type="bedroom")
+Wall(id="0", room_id="D54g", p=[0,0,0], q=[3,0,0], height=2.8)
+"""
+render_ssl(ssl_text, output_root="out", views=["topdown"])
+
+# JSON / JSONL 一行作为字符串也可以
+render_ssl('{"wall":[],"bbox":[],"room":{"room_type":"bedroom"}}', output_root="out", views="auto")
+```
+
+### 完整示例 — 打开全部导出开关
+
 示例 — 打开主要导出开关：
 
 ```bash
@@ -100,22 +139,51 @@ python render_ssl.py \
   --visible_geometry --holo_geometry \
   --glb --ply --voxel \
   --semantic --depth --pano \
-  --views auto
+  --views auto \
+  --width 1000 --height 1000
 ```
+
+**相机 / 分辨率（`--width`、`--height`、`--manual_fov`、`--no_auto_fov`）**：与 `render_view` 语义一致。默认输出 **1000×1000**，自动 FOV。Blender 下 `manual_fov` 为**长轴 FOV**（见 [§4.0](docs/doc.zh-CN.md#40-分辨率与-fovblender-后端)）。**`topdown_normalized/` 固定 1000×1000**，不受 `--width`/`--height` 影响。auto 视角在未指定 `--manual_fov` 时仍使用随机 FOV。
 
 **输出目录结构**（`--views auto` 时输出到 `out_normalized/`）：
 
 ```
 out_normalized/
-├── ssl.txt, data.json
-├── scene.glb                         # --holo_geometry --glb
-├── pointcloud/, voxel/               # --holo_geometry --ply --voxel
-├── topdown_normalized/               # 像素对齐俯视 + 地板路径
-├── topdown/                          # 常规 1024² 俯视 + 导出
-├── auto_views.json
-├── auto_path_0000/ …                 # auto 单帧视角
+├── ssl.txt, data.json                # 规范化场景（--normalized_topdown / --views auto）
+├── scene.glb                         # --holo_geometry --glb（全场景）
+├── pointcloud/scene_all.ply          # --holo_geometry --ply
+├── voxel/                            # --holo_geometry --voxel（256³ 占用）
+├── topdown_normalized/               # 像素对齐俯视 + 地板路径（默认 1000²）
+│   ├── topdown.png
+│   ├── camera_para.json
+│   ├── topdown_depth.png             # [--depth]（路径规划也会用到）
+│   ├── topdown_semantic.*            # [--semantic]
+│   ├── nav_mask*.png                 # 路径规划 mask
+│   ├── floor_path_ssl.txt
+│   └── topdown_floor_path.png
+├── auto_views.json                   # auto 相机清单
+├── topdown/                          # 常规俯视（--width × --height，默认 1000×1000）
+│   ├── topdown.png
+│   ├── topdown_depth.png             # [--depth]
+│   ├── topdown_semantic.*            # [--semantic]
+│   ├── planar_faces.json             # [--ply]
+│   ├── pointcloud/                   # [--visible_geometry --ply]
+│   └── voxel/                        # [--visible_geometry --voxel]
+├── auto_path_0000/                   # auto 单帧视角
+│   ├── {timestamp}.png
+│   ├── {timestamp}_depth.png         # [--depth]
+│   ├── {timestamp}_semantic.*        # [--semantic]
+│   ├── {timestamp}_camera_para.json
+│   ├── scene_visible.glb             # [--visible_geometry --glb]
+│   ├── pointcloud/, voxel/           # [--visible_geometry --ply/--voxel]
+│   └── ssl_opencv.txt
+├── auto_path_0000_pano/              # [--pano] auto_path_0000 的全景 sibling 目录
+│   ├── {timestamp}_pano.png          # 等距圆柱全景（--pano_resolution × 一半高度）
+│   └── {timestamp}_pano_camera_para.json
 ├── auto_path_0008_seq/               # auto 三帧序列
-└── {view}/                           # RGB、depth、semantic、pano、可见 glb/ply/voxel …
+│   ├── {timestamp}_000.png … _002.png
+│   └── …（每帧 depth / semantic / 可见几何）
+└── auto_path_0008_seq_pano/        # [--pano] 序列对应的全景目录（以首帧为参考）
 ```
 
 完整目录说明见 [§6 输出目录与坐标系](docs/doc.zh-CN.md#6-输出目录与坐标系)。

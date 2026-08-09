@@ -165,6 +165,9 @@ def build_single_auto_view_spec(
     bbox_center: Sequence[float],
     wall_z_max: float,
     rng: random.Random,
+    *,
+    width: int = AUTO_VIEW_WIDTH,
+    height: int = AUTO_VIEW_HEIGHT,
 ) -> Dict[str, Any]:
     x, y = float(path_point[0]), float(path_point[1])
     z_cam = random_camera_z(rng, wall_z_max)
@@ -182,8 +185,8 @@ def build_single_auto_view_spec(
         "up_vector": list(WORLD_UP),
         "manual_fov": float(fov),
         "pitch_deg": float(pitch),
-        "width": AUTO_VIEW_WIDTH,
-        "height": AUTO_VIEW_HEIGHT,
+        "width": int(width),
+        "height": int(height),
         "_view_name": name,
     }
 
@@ -193,6 +196,9 @@ def build_sequence_auto_view_spec(
     path_point: Sequence[float],
     bbox_center: Sequence[float],
     rng: random.Random,
+    *,
+    width: int = AUTO_VIEW_WIDTH,
+    height: int = AUTO_VIEW_HEIGHT,
 ) -> Dict[str, Any]:
     x, y = float(path_point[0]), float(path_point[1])
     camera_pos = [x, y, 1.5]
@@ -212,8 +218,8 @@ def build_sequence_auto_view_spec(
         "manual_fov": float(fov),
         "yaw_left_deg": float(yaw_left),
         "yaw_right_deg": float(yaw_right),
-        "width": AUTO_VIEW_WIDTH,
-        "height": AUTO_VIEW_HEIGHT,
+        "width": int(width),
+        "height": int(height),
         "_view_name": name,
     }
 
@@ -224,6 +230,8 @@ def build_auto_views_from_path(
     *,
     rng: Optional[random.Random] = None,
     stride: int = PATH_SAMPLE_STRIDE,
+    width: int = AUTO_VIEW_WIDTH,
+    height: int = AUTO_VIEW_HEIGHT,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Build all view specs for auto mode. Returns (name→spec, render order name list)."""
     rng = rng or random.Random()
@@ -239,13 +247,17 @@ def build_auto_views_from_path(
 
     for idx in sample_path_indices(n, stride=stride):
         pt = points[idx]
-        spec = build_single_auto_view_spec(idx, pt, bbox_center, wall_z_max, rng)
+        spec = build_single_auto_view_spec(
+            idx, pt, bbox_center, wall_z_max, rng, width=width, height=height
+        )
         name = spec.pop("_view_name")
         specs[name] = spec
         names.append(name)
 
     seq_idx = rng.randrange(n)
-    seq_spec = build_sequence_auto_view_spec(seq_idx, points[seq_idx], bbox_center, rng)
+    seq_spec = build_sequence_auto_view_spec(
+        seq_idx, points[seq_idx], bbox_center, rng, width=width, height=height
+    )
     seq_name = seq_spec.pop("_view_name")
     specs[seq_name] = seq_spec
     names.append(seq_name)
