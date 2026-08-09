@@ -158,8 +158,8 @@ python render_ssl.py \
 ```
 out_normalized/
 ├── ssl.txt, data.json                # normalized scene (when --normalized_topdown / --views auto)
-├── scene.glb                         # --holo_geometry --glb (full scene)
-├── pointcloud/scene_all.ply          # --holo_geometry --ply
+├── glb/scene.glb                     # --holo_geometry --glb (full scene)
+├── pointcloud/scene_all.ply          # --holo_geometry --ply (full scene)
 ├── voxel/                            # --holo_geometry --voxel (256³ occupancy)
 ├── topdown_normalized/               # pixel-aligned topdown + floor path (1000² by default)
 │   ├── topdown.png
@@ -175,15 +175,26 @@ out_normalized/
 │   ├── topdown_depth.png             # [--depth]
 │   ├── topdown_semantic.*            # [--semantic]
 │   ├── planar_faces.json             # [--ply]
+│   ├── glb/                          # [--visible_geometry --glb]
+│   │   ├── scene_visible.glb
+│   │   └── scene_visible_opencv.glb
 │   ├── pointcloud/                   # [--visible_geometry --ply]
+│   │   ├── scene_visible.ply
+│   │   ├── scene_visible_opencv.ply
+│   │   ├── floor/, walls/, boxes/    # (+ ceiling/, doors/, windows/ when present)
+│   │   └── …/*_visible.ply, *_opencv.ply
 │   └── voxel/                        # [--visible_geometry --voxel]
 ├── auto_path_0000/                   # auto single-frame view
 │   ├── {timestamp}.png
 │   ├── {timestamp}_depth.png         # [--depth]
 │   ├── {timestamp}_semantic.*        # [--semantic]
 │   ├── {timestamp}_camera_para.json
-│   ├── scene_visible.glb             # [--visible_geometry --glb]
-│   ├── pointcloud/, voxel/           # [--visible_geometry --ply/--voxel]
+│   ├── glb/scene_visible.glb         # [--visible_geometry --glb]
+│   ├── glb/scene_visible_opencv.glb
+│   ├── pointcloud/scene_visible.ply  # [--visible_geometry --ply] merged (world SSL)
+│   ├── pointcloud/scene_visible_opencv.ply
+│   ├── pointcloud/floor/, walls/, boxes/
+│   ├── voxel/                        # [--visible_geometry --voxel]
 │   └── ssl_opencv.txt
 ├── auto_path_0000_pano/              # [--pano] sibling panorama for auto_path_0000
 │   ├── {timestamp}_pano.png          # equirectangular (--pano_resolution × half)

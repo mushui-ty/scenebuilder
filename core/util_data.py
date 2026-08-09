@@ -1463,6 +1463,34 @@ def build_pointcloud_ply_relpath(
     return os.path.join(category, f"{stem}.ply")
 
 
+GEOMETRY_GLB_DIR = "glb"
+GEOMETRY_POINTCLOUD_DIR = "pointcloud"
+
+
+def geometry_glb_dir(root: str) -> str:
+    return os.path.join(root, GEOMETRY_GLB_DIR)
+
+
+def geometry_pointcloud_dir(root: str) -> str:
+    return os.path.join(root, GEOMETRY_POINTCLOUD_DIR)
+
+
+def visible_glb_path(view_dir: str) -> str:
+    return os.path.join(geometry_glb_dir(view_dir), "scene_visible.glb")
+
+
+def visible_merged_ply_path(view_dir: str) -> str:
+    return os.path.join(geometry_pointcloud_dir(view_dir), "scene_visible.ply")
+
+
+def holo_glb_path(output_root: str) -> str:
+    return os.path.join(geometry_glb_dir(output_root), "scene.glb")
+
+
+def holo_scene_all_ply_path(output_root: str) -> str:
+    return os.path.join(geometry_pointcloud_dir(output_root), "scene_all.ply")
+
+
 def _recompute_context_z_max(context: Dict[str, Any]) -> None:
     wall_heights = [float(w.get("height", 0.0)) for w in context.get("walls", {}).values()]
     z_max = max(wall_heights) if wall_heights else 0.0

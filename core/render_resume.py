@@ -11,6 +11,11 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+try:
+    from . import util_data
+except ImportError:
+    import util_data  # type: ignore
+
 PROGRESS_FILENAME = ".render_progress.json"
 
 _AUX_PNG_MARKERS = (
@@ -152,14 +157,26 @@ def _pano_complete(
 
 
 def _visible_glb_ok(view_dir: str) -> bool:
+    if os.path.isfile(util_data.visible_glb_path(view_dir)):
+        return True
+    # Legacy: GLB at view root (pre glb/ subdir).
     return os.path.isfile(os.path.join(view_dir, "scene_visible.glb"))
 
 
 def _visible_ply_ok(view_dir: str) -> bool:
-    pc_dir = os.path.join(view_dir, "pointcloud")
-    if not os.path.isdir(pc_dir):
-        return False
-    return any(name.endswith(".ply") for name in os.listdir(pc_dir))
+    merged = util_data.visible_merged_ply_path(view_dir)
+    if os.path.isfile(merged) and os.path.getsize(merged) > 0:
+        return True
+    pc_dir = util_data.geometry_pointcloud_dir(view_dir)
+    if os.path.isdir(pc_dir):
+        for _root, _dirs, files in os.walk(pc_dir):
+            if any(name.endswith(".ply") for name in files):
+                return True
+    # Legacy: merged PLY at view root, or per-object PLY scattered under view_dir.
+    scene_ply = os.path.join(view_dir, "scene_visible.ply")
+    if os.path.isfile(scene_ply) and os.path.getsize(scene_ply) > 0:
+        return True
+    return False
 
 
 def _voxel_ok(view_dir: str) -> bool:
@@ -420,11 +437,13 @@ def is_post_export_complete(y_dir: str, job: Dict[str, Any]) -> bool:
     if not job.get("holo_geometry"):
         return True
     if job.get("export_glb"):
-        glb = os.path.join(y_dir, "scene.glb")
+        glb = util_data.holo_glb_path(y_dir)
         if not os.path.isfile(glb) or os.path.getsize(glb) <= 0:
-            return False
+            legacy = os.path.join(y_dir, "scene.glb")
+            if not os.path.isfile(legacy) or os.path.getsize(legacy) <= 0:
+                return False
     if job.get("export_point_cloud"):
-        scene_ply = os.path.join(y_dir, "pointcloud", "scene_all.ply")
+        scene_ply = util_data.holo_scene_all_ply_path(y_dir)
         if not os.path.isfile(scene_ply) or os.path.getsize(scene_ply) <= 0:
             return False
     if job.get("export_voxel") and not _voxel_ok(y_dir):

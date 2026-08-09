@@ -1215,7 +1215,7 @@ class BpySceneCtx:
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
 
         if export_glb:
-            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), merge_entries)
+            self.export_visible_glb(util_data.visible_glb_path(output_dir), merge_entries)
         if export_point_cloud:
             self.export_visible_point_cloud(output_dir, visible_entries, merge_entries)
         if export_voxel:
@@ -1237,7 +1237,7 @@ class BpySceneCtx:
             return
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
-            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), merge_entries)
+            self.export_visible_glb(util_data.visible_glb_path(output_dir), merge_entries)
         if export_point_cloud:
             self.export_visible_point_cloud(output_dir, visible_entries, merge_entries)
         if export_voxel:
@@ -1260,7 +1260,7 @@ class BpySceneCtx:
             return
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
-            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), merge_entries)
+            self.export_visible_glb(util_data.visible_glb_path(output_dir), merge_entries)
         if export_point_cloud:
             self.export_visible_point_cloud(output_dir, visible_entries, merge_entries)
         if export_voxel:
@@ -1441,11 +1441,14 @@ class BpySceneCtx:
 
     def export_visible_point_cloud(
         self,
-        output_dir: str,
+        view_dir: str,
         visible_entries: List[Dict[str, Any]],
         merge_entries: Optional[List[Dict[str, Any]]] = None,
     ):
-        os.makedirs(output_dir, exist_ok=True)
+        """Write per-object and merged PLY under ``{view_dir}/pointcloud/``; GLB under ``{view_dir}/glb/``."""
+        os.makedirs(view_dir, exist_ok=True)
+        pointcloud_dir = util_data.geometry_pointcloud_dir(view_dir)
+        os.makedirs(pointcloud_dir, exist_ok=True)
         merge_entries = merge_entries if merge_entries is not None else visible_entries
         default_samples = 5000
         box_samples = 5000
@@ -1462,7 +1465,8 @@ class BpySceneCtx:
             points, colors, normals = self._sample_visible_records(entry["records"], entry["camera_obj"], sample_count)
             if len(points) == 0:
                 continue
-            path = os.path.join(output_dir, entry["visible_ply"])
+            path = os.path.join(pointcloud_dir, entry["visible_ply"])
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             self._write_ply_with_opencv_copy(
                 path, points, colors, normals, entry.get("camera_obj"), quiet=True
             )
@@ -1470,7 +1474,7 @@ class BpySceneCtx:
             metadata["objects"].append({
                 "category": entry["category"],
                 "id": entry["id"],
-                "path": os.path.relpath(path, output_dir),
+                "path": os.path.relpath(path, view_dir),
                 "points": int(len(points)),
                 "requested_samples": int(sample_count),
                 "frustum_cutted": bool(entry.get("frustum_cutted", False)),
@@ -1496,22 +1500,22 @@ class BpySceneCtx:
             merged_points = np.vstack(merge_points)
             merged_colors = np.vstack(merge_colors)
             merged_normals = np.vstack(merge_normals)
-            scene_path = os.path.join(output_dir, "scene_visible.ply")
+            scene_path = util_data.visible_merged_ply_path(view_dir)
             ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
             self._write_ply_with_opencv_copy(
                 scene_path, merged_points, merged_colors, merged_normals, ref_camera, quiet=True
             )
             opencv_ply_count += 1
             metadata["scene_visible"] = {
-                "path": "scene_visible.ply",
+                "path": os.path.relpath(scene_path, view_dir),
                 "points": int(len(merged_points)),
             }
 
-        with open(os.path.join(output_dir, "metadata_visible.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(view_dir, "metadata_visible.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
         if opencv_ply_count:
             print(f"✅ OpenCV point cloud copies: {opencv_ply_count} files")
-        print(f"✅ Visible point cloud exported: {output_dir}")
+        print(f"✅ Visible point cloud exported: {view_dir}")
 
     def _triangle_rgb_at_centroid(self, tri, color_source, tri_uv=None):
         base_color = color_source.get("base_color", np.array([160, 160, 160], dtype=np.uint8))
@@ -4050,10 +4054,25 @@ class BpySceneCtx:
     def _is_image_output_path(path: str) -> bool:
         return path.lower().endswith((".png", ".jpg", ".jpeg", ".exr", ".webp"))
 
-    def _resolve_view_output_path(self, output_path: str, view_dir_name: Optional[str] = None) -> str:
+    def _resolve_view_output_path(
+        self,
+        output_path: str,
+        view_dir_name: Optional[str] = None,
+        *,
+        skip_render: bool = False,
+    ) -> str:
         """Single camera: when output_path is a directory, use {view_dir_name or dir_stamp}/{image_stamp}.png."""
         if self._is_image_output_path(output_path):
             return output_path
+        if skip_render and view_dir_name:
+            try:
+                from .render_resume import list_primary_frames
+            except ImportError:
+                from render_resume import list_primary_frames  # type: ignore
+            view_dir = os.path.join(output_path, view_dir_name)
+            frames = list_primary_frames(view_dir)
+            if frames:
+                return frames[0]
         return util.resolve_view_image_path(output_path, view_dir_name=view_dir_name)
 
     def _resolve_topdown_output_path(self, output_path: str) -> str:
@@ -4689,6 +4708,7 @@ class BpySceneCtx:
                             visible_geometry=False,
                             export_glb=False,
                             export_point_cloud=export_point_cloud,
+                            export_voxel=export_voxel,
                             transparent_objects=transparent_objects,
                             vss=vss,
                             world_cam_w=world_cam,
@@ -4846,7 +4866,9 @@ class BpySceneCtx:
                 write_camera_para=write_camera_para,
             )
 
-        output_path = self._resolve_view_output_path(output_path, view_dir_name=view_dir_name)
+        output_path = self._resolve_view_output_path(
+            output_path, view_dir_name=view_dir_name, skip_render=skip_render
+        )
         view_dir = os.path.dirname(output_path) or "."
         center = self.context["meta"]["center"]
         z_max = self.context["meta"]["z_max"]

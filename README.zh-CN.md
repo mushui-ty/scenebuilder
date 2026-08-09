@@ -156,8 +156,8 @@ python render_ssl.py \
 ```
 out_normalized/
 ├── ssl.txt, data.json                # 规范化场景（--normalized_topdown / --views auto）
-├── scene.glb                         # --holo_geometry --glb（全场景）
-├── pointcloud/scene_all.ply          # --holo_geometry --ply
+├── glb/scene.glb                     # --holo_geometry --glb（全场景）
+├── pointcloud/scene_all.ply          # --holo_geometry --ply（全场景）
 ├── voxel/                            # --holo_geometry --voxel（256³ 占用）
 ├── topdown_normalized/               # 像素对齐俯视 + 地板路径（默认 1000²）
 │   ├── topdown.png
@@ -173,15 +173,26 @@ out_normalized/
 │   ├── topdown_depth.png             # [--depth]
 │   ├── topdown_semantic.*            # [--semantic]
 │   ├── planar_faces.json             # [--ply]
+│   ├── glb/                          # [--visible_geometry --glb]
+│   │   ├── scene_visible.glb
+│   │   └── scene_visible_opencv.glb
 │   ├── pointcloud/                   # [--visible_geometry --ply]
+│   │   ├── scene_visible.ply
+│   │   ├── scene_visible_opencv.ply
+│   │   ├── floor/, walls/, boxes/    #（若有则还有 ceiling/, doors/, windows/）
+│   │   └── …/*_visible.ply、*_opencv.ply
 │   └── voxel/                        # [--visible_geometry --voxel]
 ├── auto_path_0000/                   # auto 单帧视角
 │   ├── {timestamp}.png
 │   ├── {timestamp}_depth.png         # [--depth]
 │   ├── {timestamp}_semantic.*        # [--semantic]
 │   ├── {timestamp}_camera_para.json
-│   ├── scene_visible.glb             # [--visible_geometry --glb]
-│   ├── pointcloud/, voxel/           # [--visible_geometry --ply/--voxel]
+│   ├── glb/scene_visible.glb         # [--visible_geometry --glb]
+│   ├── glb/scene_visible_opencv.glb
+│   ├── pointcloud/scene_visible.ply  # [--visible_geometry --ply] 合并点云（世界 SSL）
+│   ├── pointcloud/scene_visible_opencv.ply
+│   ├── pointcloud/floor/, walls/, boxes/
+│   ├── voxel/                        # [--visible_geometry --voxel]
 │   └── ssl_opencv.txt
 ├── auto_path_0000_pano/              # [--pano] auto_path_0000 的全景 sibling 目录
 │   ├── {timestamp}_pano.png          # 等距圆柱全景（--pano_resolution × 一半高度）

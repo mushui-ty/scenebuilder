@@ -554,15 +554,20 @@ def worker_render_post(job_path: str) -> None:
     ctx = _create_render_ctx(job)
     scene_json = job["scene_json"]
 
+    try:
+        from .core import util_data
+    except (ImportError, ValueError):
+        from core import util_data  # type: ignore
+
     if job.get("export_glb"):
-        glb_path = os.path.join(output_dir, "scene.glb")
+        glb_path = util_data.holo_glb_path(output_dir)
         try:
             ctx.export_glb(glb_path, rebuild=True, show_ceiling=True)
         except Exception as exc:
             print(f"⚠️ GLB export failed: {exc}")
 
     if job.get("export_point_cloud"):
-        point_cloud_dir = os.path.join(output_dir, "pointcloud")
+        point_cloud_dir = util_data.geometry_pointcloud_dir(output_dir)
         try:
             ctx.export_point_cloud(point_cloud_dir, rebuild=True, show_ceiling=True)
         except Exception as exc:
@@ -1332,5 +1337,5 @@ if __name__ == "__main__":
     main()
 
 '''
-python /data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/render_ssl.py --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt --views auto --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out14  --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified --ply --visible_geometry --semantic --depth --pano --voxel --holo_geometry
+python /root/utils/scenebuilder/render_ssl.py --ssl_id 310449449_4 --ssl_collection_dir /data/mushui/datasets/manycore/spatiallm_raw --views auto --output /root/utils/scenebuilder/out/310449449_4/out1 --assets /data/mushui/datasets/Manycore-Future/simplified --hole_assets /data/mushui/datasets/Manycore-Future/holes   --glb --ply --visible_geometry --semantic --depth --pano --voxel --holo_geometry
 '''

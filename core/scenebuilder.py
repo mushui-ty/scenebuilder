@@ -930,9 +930,9 @@ class SceneCtx:
             print("⚠️ No visible geometry detected in current pyrender view")
             return
         if export_glb:
-            self.export_visible_glb(os.path.join(output_dir, "scene_visible.glb"), entries)
+            self.export_visible_glb(util_data.visible_glb_path(output_dir), entries)
         if export_point_cloud:
-            self.export_visible_point_cloud(os.path.join(output_dir, "pointcloud"), entries)
+            self.export_visible_point_cloud(output_dir, entries)
 
     def export_visible_glb(self, output_path: str, entries: List[Dict[str, Any]]):
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -951,8 +951,10 @@ class SceneCtx:
         scene.export(output_path)
         print(f"✅ Visible GLB exported: {output_path}")
 
-    def export_visible_point_cloud(self, output_dir: str, entries: List[Dict[str, Any]]):
-        os.makedirs(output_dir, exist_ok=True)
+    def export_visible_point_cloud(self, view_dir: str, entries: List[Dict[str, Any]]):
+        os.makedirs(view_dir, exist_ok=True)
+        pointcloud_dir = util_data.geometry_pointcloud_dir(view_dir)
+        os.makedirs(pointcloud_dir, exist_ok=True)
         default_samples = 5000
         box_samples = 5000
         all_points = []
@@ -969,14 +971,15 @@ class SceneCtx:
             points, colors = self._sample_trimesh_meshes(entry["meshes"], sample_count, use_ses=False)
             if len(points) == 0:
                 continue
-            path = os.path.join(output_dir, entry["visible_ply"])
+            path = os.path.join(pointcloud_dir, entry["visible_ply"])
+            os.makedirs(os.path.dirname(path), exist_ok=True)
             self._write_ply(path, points, colors)
             all_points.append(points)
             all_colors.append(colors)
             metadata["objects"].append({
                 "category": entry["category"],
                 "id": entry["id"],
-                "path": os.path.relpath(path, output_dir),
+                "path": os.path.relpath(path, view_dir),
                 "points": int(len(points)),
                 "requested_samples": int(sample_count),
                 "frustum_cutted": bool(entry.get("frustum_cutted", False)),
@@ -986,16 +989,16 @@ class SceneCtx:
         if all_points:
             merged_points = np.vstack(all_points)
             merged_colors = np.vstack(all_colors)
-            scene_path = os.path.join(output_dir, "scene_visible.ply")
+            scene_path = util_data.visible_merged_ply_path(view_dir)
             self._write_ply(scene_path, merged_points, merged_colors)
             metadata["scene_visible"] = {
-                "path": "scene_visible.ply",
+                "path": os.path.relpath(scene_path, view_dir),
                 "points": int(len(merged_points)),
             }
 
-        with open(os.path.join(output_dir, "metadata_visible.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(view_dir, "metadata_visible.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
-        print(f"✅ Visible point cloud exported: {output_dir}")
+        print(f"✅ Visible point cloud exported: {view_dir}")
 
     def _visible_trimesh_entries(
         self,

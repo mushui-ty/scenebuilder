@@ -5,3 +5,4 @@
 /scripts/
 /core/__pycache__/
 .vscode/
+/out/
