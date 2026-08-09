@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-基于 **bpy / pyrender** 的 **3D 场景构建**、**渲染**、**路径规划**（覆盖式视频渲染）与**几何导出**工具库，输入为 **SSL** 结构化场景格式。
+基于 **bpy / pyrender** 的 **3D 场景构建**、**空间规划**（覆盖式视频渲染）、**渲染**与**几何导出**工具库，输入为 **SSL** 结构化场景格式。
 
 <p align="center">
   <img src="assets/image.png" alt="SceneBuilder 渲染示例" width="800">

@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh-CN.md)
 
-A repository for **3D scene build**, **render**, **path planning** (for coverage video rendering), and **geometry export** — based on **bpy / pyrender**, from **SSL** structured scene format.
+A repository for **3D scene build**, **space planning for coverage video rendering**, **render**, and **geometry export** — based on **bpy / pyrender**, from **SSL** structured scene format.
 
 <p align="center">
   <img src="assets/image.png" alt="SceneBuilder render example" width="800">
