@@ -16,7 +16,7 @@
 | 阶段    | 状态     | 目标                                                                     |
 | ----- | ------ | ---------------------------------------------------------------------- |
 | **1** | ✅ 已完成  | 渲染与几何导出工具链（`render_ssl`、`topdown_view`、`render_view`、GLB/PLY/体素/语义/深度） |
-| **2** | 🚧 进行中 | 发布 **场景 example 数据集**                                                  |
+| **2** | 🚧 进行中 | 发布 **structured scene data sets**（结构化场景数据集）                                                  |
 | **3** | ⏳ 未开始  | 构建 **canonical 资产检索（retrieve）** 系统                                     |
 | **4** | ⏳ 未开始  | 接入 **资产生成（generation）** 能力                                             |
 
@@ -47,21 +47,6 @@ pip install -e .
 Linux 无头 Pyrender 需设置 `PYOPENGL_PLATFORM=egl` 并安装 Mesa/EGL 依赖，详见 [完整文档（中文）](docs/doc.zh-CN.md#1-安装与依赖)。
 
 ## 快速开始
-
-
-
-### CLI — 批量渲染
-
-```bash
-python render_ssl.py \
-  --ssl path/to/ssl.txt \
-  --views auto \
-  --output out \
-  --assets path/to/assets \
-  --glb --ply --visible_geometry --semantic --depth --pano
-```
-
-
 
 ### Python — 单张俯视图
 
@@ -95,7 +80,47 @@ ctx.render_view(
 )
 ```
 
-CLI 也支持 `--camera_position`、`--look_at`、可选 `--up_vector`。未指定 `up_vector` 时，若视线与默认 up `[0,0,1]` 共线（如俯视），`render_view` 会自动回退为 `[0,1,0]`。
+## 高级功能 — `render_ssl` 批量管线
+
+面向数据生产与 benchmark，`render_ssl.py` 是高层入口。一次调用可以：
+
+- **像素对齐**规范化俯视坐标，并 **规划地板覆盖路径**
+- 沿路径 **自动生成相机视角**（`--views auto`），也支持预设 / 自定义相机
+- **导出几何**：各视角可见 GLB / PLY / 256³ 体素，以及输出根目录的全场景 holo 导出
+- **导出监督信号**：语义 mask、米制深度 + 法线、等距圆柱全景图
+- **断点续跑**（用 `--no-resume` 强制全量重跑）
+
+示例 — 打开主要导出开关：
+
+```bash
+python render_ssl.py \
+  --ssl path/to/ssl.txt \
+  --output out \
+  --assets path/to/assets \
+  --visible_geometry --holo_geometry \
+  --glb --ply --voxel \
+  --semantic --depth --pano \
+  --views auto
+```
+
+**输出目录结构**（`--views auto` 时输出到 `out_normalized/`）：
+
+```
+out_normalized/
+├── ssl.txt, data.json
+├── scene.glb                         # --holo_geometry --glb
+├── pointcloud/, voxel/               # --holo_geometry --ply --voxel
+├── topdown_normalized/               # 像素对齐俯视 + 地板路径
+├── topdown/                          # 常规 1024² 俯视 + 导出
+├── auto_views.json
+├── auto_path_0000/ …                 # auto 单帧视角
+├── auto_path_0008_seq/               # auto 三帧序列
+└── {view}/                           # RGB、depth、semantic、pano、可见 glb/ply/voxel …
+```
+
+完整目录说明见 [§6 输出目录与坐标系](docs/doc.zh-CN.md#6-输出目录与坐标系)。
+
+也支持 `--camera_position`、`--look_at`、可选 `--up_vector` 自定义相机；视线与默认 up `[0,0,1]` 共线时会自动回退为 `[0,1,0]`。
 
 ## 文档
 
@@ -113,28 +138,6 @@ CLI 也支持 `--camera_position`、`--look_at`、可选 `--up_vector`。未指�
 | 6 | 输出目录、`c2w` 与导出产物 | [§6](docs/doc.zh-CN.md#6-输出目录与坐标系) | [§6](docs/doc.en.md#6-output-layout-and-coordinate-systems) |
 | 7 | 语义 / 深度 / 体素详解 | [§7](docs/doc.zh-CN.md#7-导出产物详解) | [§7](docs/doc.en.md#7-export-artifacts) |
 
-
-
-
-## 目录结构
-
-```
-scenebuilder/
-├── render_ssl.py          # CLI 与高层批量 API
-├── core/
-│   ├── scenebuilder_bpy.py
-│   ├── scenebuilder.py
-│   ├── auto_views.py
-│   └── nav_mask_path.py
-├── assets/                # 示例图与家具 GLB
-├── config.yaml
-└── docs/
-    ├── doc.zh-CN.md       # 完整文档（中文）
-    └── doc.en.md          # Full documentation (English)
-```
-
-
-
 ## 许可证
 
-见 [LICENSE](LICENSE)。
+本项目采用 [MIT License](LICENSE) 开源。
