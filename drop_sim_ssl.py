@@ -2,7 +2,7 @@
 物理掉落仿真：读取带 supported_by 的 SSL，执行重力仿真，导出更新后的 SSL。
 
 用法：
-    from fast_scene.drop_sim_ssl import drop_sim_ssl
+    from scenebuilder.drop_sim_ssl import drop_sim_ssl
     new_ssl = drop_sim_ssl(ssl_text, asset_dir="/path/to/assets")
 """
 
@@ -65,9 +65,9 @@ def drop_sim_ssl(
 
     # 4. 构建场景
     try:
-        from .core.fast_scene_bpy import BpySceneCtx
+        from .core.scenebuilder_bpy import BpySceneCtx
     except (ImportError, ValueError):
-        from core.fast_scene_bpy import BpySceneCtx  # type: ignore
+        from core.scenebuilder_bpy import BpySceneCtx  # type: ignore
 
     room_type = scene_json["room"].get("room_type", "unknown")
     ctx = BpySceneCtx(room_type, asset_dir)

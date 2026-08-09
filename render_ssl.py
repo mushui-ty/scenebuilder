@@ -5,8 +5,8 @@
 每视角独立子进程渲染。
 
 命令行用法:
-    python fast_scene/render_ssl.py --ssl path/to/ssl.txt --views topdown left_seq --output out_dir
-    python fast_scene/render_ssl.py --help
+    python scenebuilder/render_ssl.py --ssl path/to/ssl.txt --views topdown left_seq --output out_dir
+    python scenebuilder/render_ssl.py --help
 """
 
 import argparse
@@ -27,7 +27,7 @@ for _p in (_PKG_PARENT, _PKG_ROOT):
 
 def _load_util_data_module():
     util_path = os.path.join(_PKG_ROOT, "core", "util_data.py")
-    spec = importlib.util.spec_from_file_location("fast_scene_util_data", util_path)
+    spec = importlib.util.spec_from_file_location("scenebuilder_util_data", util_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"无法加载 util_data: {util_path}")
     mod = importlib.util.module_from_spec(spec)
@@ -175,15 +175,15 @@ def _instantiate_ctx(backend: str, room_type: str, asset_dir: Optional[str]):
     """按 backend 创建 SceneCtx / BpySceneCtx。"""
     if backend == "pyrender":
         try:
-            from .core.fast_scene import SceneCtx
+            from .core.scenebuilder import SceneCtx
         except (ImportError, ValueError):
-            from core.fast_scene import SceneCtx  # type: ignore
+            from core.scenebuilder import SceneCtx  # type: ignore
         return SceneCtx(room_type, asset_dir)
 
     try:
-        from .core.fast_scene_bpy import BpySceneCtx
+        from .core.scenebuilder_bpy import BpySceneCtx
     except (ImportError, ValueError):
-        from core.fast_scene_bpy import BpySceneCtx  # type: ignore
+        from core.scenebuilder_bpy import BpySceneCtx  # type: ignore
     return BpySceneCtx(room_type, asset_dir)
 
 
@@ -409,7 +409,7 @@ def worker_render_post(job_path: str) -> None:
 def _spawn_worker_view(job_path: str, view_name: str) -> None:
     subprocess.run([
         sys.executable, "-c",
-        "from fast_scene.render_ssl import worker_render_view; "
+        "from scenebuilder.render_ssl import worker_render_view; "
         f"worker_render_view({job_path!r}, {view_name!r})",
     ], check=True)
 
@@ -417,7 +417,7 @@ def _spawn_worker_view(job_path: str, view_name: str) -> None:
 def _spawn_worker_post(job_path: str) -> None:
     subprocess.run([
         sys.executable, "-c",
-        "from fast_scene.render_ssl import worker_render_post; "
+        "from scenebuilder.render_ssl import worker_render_post; "
         f"worker_render_post({job_path!r})",
     ], check=True)
 
@@ -831,7 +831,7 @@ def main() -> None:
         epilog="""
 示例（等价于 SpatialFactory/scripts/render_scene.py 的常用命令）:
 
-  python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py \\
+  python /data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/render_ssl.py \\
     --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt \\
     --views topdown left_seq \\
     --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out9 \\
@@ -947,5 +947,5 @@ if __name__ == "__main__":
     main()
 
 '''
-python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt --views auto --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out14  --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified --ply --visible_geometry --semantic --depth --pano --voxel --holo_geometry
+python /data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/render_ssl.py --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/ssl.txt --views auto --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Balcony/310449449_4/out14  --glb --assets /data-nas/data/dataset/qunhe/Manycore-Future/simplified --ply --visible_geometry --semantic --depth --pano --voxel --holo_geometry
 '''

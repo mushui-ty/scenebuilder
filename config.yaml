@@ -1,14 +1,14 @@
 
 
 #  1. pyrender配置
-# fast_scene专用配置, 在 fast_scene_bpy 中没有用到
-# 资产路径均相对 fast_scene 包根目录 (与 config.yaml 同级)
+# scenebuilder专用配置, 在 scenebuilder_bpy 中没有用到
+# 资产路径均相对 scenebuilder 包根目录 (与 config.yaml 同级)
 floor_texture_path: assets/textures/floor_texture2.png
 ceiling_texture_path: assets/textures/wall_texture3.png
 wall_texture_path: assets/textures/wall_texture3.png
 door_texture_path: assets/textures/door.png
 window_texture_path: assets/textures/window.png
-wall_color:  # 墙体颜色, 在 fast_scene_bpy 中为材质不存在下的备选
+wall_color:  # 墙体颜色, 在 scenebuilder_bpy 中为材质不存在下的备选
 - 1.2
 - 1.2
 - 1.2
@@ -22,7 +22,7 @@ wall_edge_color:  # 边缘线条颜色 [R, G, B, A]
 wall_edge_offset: 0.01  # 边缘线向房间内部偏移距离（米），避免相邻墙边缘重叠  
     
     
-# 2. fast_scene_bpy中使用的配置
+# 2. scenebuilder_bpy中使用的配置
 floor_blender_texture_path: assets/textures/oak_veneer_01_1k.blend/oak_veneer_01_1k.blend
 ceiling_blender_texture_path: assets/textures/polystyrene_1k.blend/polystyrene_1k.blend
 wall_blender_texture_path: assets/textures/polystyrene_1k.blend/polystyrene_1k.blend

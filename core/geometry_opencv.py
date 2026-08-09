@@ -154,7 +154,7 @@ def build_blender_camera_matrix(
     look_at_target,
     world_up=(0.0, 0.0, 1.0),
 ) -> np.ndarray:
-    """与 fast_scene_bpy._build_view_camera_matrix_and_fov 相同的 4×4 相机矩阵（列基 right, up, -forward）。"""
+    """与 scenebuilder_bpy._build_view_camera_matrix_and_fov 相同的 4×4 相机矩阵（列基 right, up, -forward）。"""
     camera_position = np.asarray(camera_position, dtype=float)
     look_at_target = np.asarray(look_at_target, dtype=float)
     up_vector = np.asarray(world_up if world_up is not None else [0.0, 0.0, 1.0], dtype=float)

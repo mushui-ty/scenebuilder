@@ -105,7 +105,7 @@ def prepare_batch_with_images(inputs_batch: list, download_workers: int = 16) ->
 def build_asset_db(
     mesh_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/mesh_info.json",
     bgids_data_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/bgids_data.json",
-    db_uri: str = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore",
+    db_uri: str = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/manycore",
     table_name: str = "furniture",
     model_path: str = "/data-nas/data/experiments/mushui/.cache/huggingface/hub/Qwen/Qwen3-VL-Embedding-2B",
     batch_size: int = 32,
@@ -335,7 +335,7 @@ def build_asset_db(
 def build_hole_table(
     window_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/window_info.json",
     door_info_path: str = "/data-nas/data/experiments/mushui/datasets/manycore/door_info.json",
-    db_uri: str = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore"
+    db_uri: str = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/manycore"
 ):
     """
     构建 window 和 door 向量数据库表
@@ -385,7 +385,7 @@ def build_hole_table(
 if __name__ == "__main__":
     # # 直接运行此文件时，执行构建
     # table = build_asset_db(batch_size=128, download_workers=12)
-    db_uri = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/manycore"
+    db_uri = "/data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/manycore"
     # table_name = "furniture"
     # db = lancedb.connect(db_uri)
     # table = db.open_table(table_name)

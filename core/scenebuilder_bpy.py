@@ -1,11 +1,11 @@
 """
-Fast Scene - 纯 Blender 渲染版本（无 trimesh 依赖）
+SceneBuilder - 纯 Blender 渲染版本（无 trimesh 依赖）
 
 用 bpy 替代 trimesh/pyrender
 
 使用方式：
-   $BLENDER_PATH --background --python -m fast_scene.core.fast_scene_bpy
-   或者在 pip install bpy 后: python -m fast_scene.core.fast_scene_bpy
+   $BLENDER_PATH --background --python -m scenebuilder.core.scenebuilder_bpy
+   或者在 pip install bpy 后: python -m scenebuilder.core.scenebuilder_bpy
 """
 
 import os
@@ -50,7 +50,7 @@ class BpySceneCtx:
     
     def __init__(self, scene_type: str, model_extra_path: Optional[str] = None, 
                  render_engine: Literal["CYCLES", "EEVEE"] = "CYCLES"):
-        # 与 fast_scene.py 完全一致的数据结构
+        # 与 scenebuilder.py 完全一致的数据结构
         self.context = {
             "meta": {"scene_type": scene_type},
             "walls": {},
@@ -68,7 +68,7 @@ class BpySceneCtx:
         self._point_cloud_image_cache = {}
         self._semantic_view_cache: Dict[str, Tuple[Any, List[Dict[str, Any]], Dict[Tuple[str, str], int]]] = {}
         
-        # 保存所有对象引用（与 fast_scene.py 的 mesh_nodes 对应）
+        # 保存所有对象引用（与 scenebuilder.py 的 mesh_nodes 对应）
         self.mesh_nodes = {
             "walls": {},      # wall_id -> node
             "doors": {},      # door_id -> node
@@ -201,7 +201,7 @@ class BpySceneCtx:
         self.if_set_lights = False
         print("🧹 场景已完全清空并重置状态")
 
-    # ==================== 数据管理函数（与 fast_scene.py 完全一致）====================
+    # ==================== 数据管理函数（与 scenebuilder.py 完全一致）====================
     def add_walls(self, walls: List[Dict[str, Any]]):
         """添加墙体并计算场景元数据（自动跳过 height<=0 的墙，支持室外场景）"""
         # walls_converted: 用全部墙体来计算多边形和元数据（包含 height=0 的室外边界）
@@ -643,10 +643,10 @@ class BpySceneCtx:
     # ==================== 纯 bpy 几何体创建（替代 util 中的 trimesh 函数）====================
     # helper functions now live in util_bpy
 
-    # ==================== 场景构建（与 fast_scene.py 逻辑完全一致）====================
+    # ==================== 场景构建（与 scenebuilder.py 逻辑完全一致）====================
     
     def construct_floor(self, show_wall=True, show_window=True, show_door=True, show_ceiling=True, align_height: bool = True):
-        """构建地板和墙体（与 fast_scene.py 完全一致的逻辑）"""
+        """构建地板和墙体（与 scenebuilder.py 完全一致的逻辑）"""
         # 注意：这里不创建 self.scene = pyrender.Scene()，而是使用已有的 bpy scene
         vertices = self.context["meta"]["vertices"]
 
@@ -2114,7 +2114,7 @@ class BpySceneCtx:
 
     def _collect_visibility_sample_points(self, records, max_points: int = 128):
         """收集遮挡判定采样点。用三角形重心而非顶点：地板/天花板 n-gon 顶点全在外轮廓上，
-        仅用顶点会把图像中可见的内侧区域整片误判为不可见（天花板同理；与 fast_scene.py 一致）。"""
+        仅用顶点会把图像中可见的内侧区域整片误判为不可见（天花板同理；与 scenebuilder.py 一致）。"""
         points = []
         for record in records:
             tris = np.asarray(record["triangles"], dtype=float)
@@ -3299,7 +3299,7 @@ class BpySceneCtx:
 
         temp_dir = temp_dir or "."
         os.makedirs(temp_dir, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".fast_scene_sem_", dir=temp_dir)
+        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".scenebuilder_sem_", dir=temp_dir)
         os.close(fd)
 
         render = self.scene.render
@@ -3376,7 +3376,7 @@ class BpySceneCtx:
 
         os.makedirs(os.path.dirname(mask_path) or ".", exist_ok=True)
         os.makedirs(temp_dir, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".fast_scene_iso_sem_", dir=temp_dir)
+        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".scenebuilder_iso_sem_", dir=temp_dir)
         os.close(fd)
 
         render = self.scene.render

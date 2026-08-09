@@ -1,4 +1,4 @@
-# Fast Scene 场景渲染工具库
+# SceneBuilder 场景渲染工具库
 
 从 SSL / JSON 描述（墙体、门窗、家具）构建 3D 场景，支持 **Blender (bpy)** 与 **Pyrender** 双后端渲染、多视角导出、语义图、深度图、路径规划、全景图、点云、可见体素、mesh 导出
 
@@ -69,7 +69,7 @@ apt install -y libxi6 libxrender1 libxrandr2 libxfixes3 libxcursor1 libxinerama1
 ### 安装到 Python 环境
 
 ```bash
-cd fast-scene
+cd scenebuilder
 pip install -e . --config-settings editable_mode=strict
 ```
 
@@ -185,15 +185,15 @@ GLB 加载流程：模型居中 → 按 `scale` 缩放 → 绕 Z 转 `angle_z` �
 
 ## 3. 快速开始
 
-以下示例均基于 **SSL 世界坐标**（见 §2）。底层渲染类为 `BpySceneCtx`（`core/fast_scene_bpy.py`）；`SceneCtx`（pyrender 后端）签名类似，但部分高级导出仅 bpy 支持。
+以下示例均基于 **SSL 世界坐标**（见 §2）。底层渲染类为 `BpySceneCtx`（`core/scenebuilder_bpy.py`）；`SceneCtx`（pyrender 后端）签名类似，但部分高级导出仅 bpy 支持。
 
 ### 3.1 最简单示例：`topdown_view`
 
 只加载场景、渲染一张俯视图，不开启深度/语义/GLB 等高级功能。
 
 ```python
-from fast_scene.core.util_data import parse_scene_input
-from fast_scene.core.fast_scene_bpy import BpySceneCtx
+from scenebuilder.core.util_data import parse_scene_input
+from scenebuilder.core.scenebuilder_bpy import BpySceneCtx
 
 SSL = "path/to/ssl.txt"
 ASSETS = "/path/to/assets"
@@ -241,7 +241,7 @@ ctx.render_view(
 Benchmark / 数据生产推荐走 CLI 或 `render_ssl()`，一次完成多视角、GLB、点云、语义、深度、全景等。
 
 ```bash
-python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/render_ssl.py \
+python /data-nas/data/experiments/mushui/projects/utils/fast-scene/scenebuilder/render_ssl.py \
   --ssl /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Office/325148303_0/render_output/ssl.txt \
   --views auto \
   --output /data-nas/data/experiments/mushui/projects/SpatialFactory/benchmark/data/Office/325148303_0/out2 \
@@ -253,7 +253,7 @@ python /data-nas/data/experiments/mushui/projects/utils/fast-scene/fast_scene/re
 等价 Python 调用：
 
 ```python
-from fast_scene.render_ssl import render_ssl
+from scenebuilder.render_ssl import render_ssl
 
 with open(SSL, encoding="utf-8") as f:
     ssl_text = f.read()
@@ -282,7 +282,7 @@ y_dir, standard_ssl, floor_result = render_ssl(
 **命令行（仅规范化 + 路径，不渲染其它视角）：**
 
 ```bash
-python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+python scenebuilder/render_ssl.py --ssl path/to/ssl.txt \
   --normalized_topdown \
   --output path/to/out \
   --assets path/to/assets
@@ -292,7 +292,7 @@ python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
 **Python（推荐封装** `render_normalized_topdown`**）：**
 
 ```python
-from fast_scene.render_ssl import render_normalized_topdown
+from scenebuilder.render_ssl import render_normalized_topdown
 
 with open(SSL, encoding="utf-8") as f:
     ssl_text = f.read()
@@ -666,7 +666,7 @@ ctx.normalized_topdown_view(
 等价于 `**--normalized_topdown` + 地板路径 + 常规 topdown + 按路径自动生成视角**（目前仅 `backend=bpy`）。
 
 ```bash
-python fast_scene/render_ssl.py --ssl scene.txt \
+python scenebuilder/render_ssl.py --ssl scene.txt \
   --views auto --output out \
   --glb --ply --visible_geometry --voxel --semantic --depth --pano \
   --assets path/to/assets
@@ -884,11 +884,11 @@ Y/                                    # {output} 或 {output}_normalized
 
 ```bash
 # 规范化 + auto 路径视角
-python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+python scenebuilder/render_ssl.py --ssl path/to/ssl.txt \
   --views auto --output path/to/out --glb --assets path/to/assets
 
 # 规范化 + 多视角
-python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+python scenebuilder/render_ssl.py --ssl path/to/ssl.txt \
   --normalized_topdown --views topdown left_seq \
   --output path/to/out --glb --assets path/to/assets
 # → 唯一输出: path/to/out_normalized/
@@ -1372,7 +1372,7 @@ floor、ceiling、walls、doors、windows、boxes 均参与可见性判定与视
 
 ### 几何定义
 
-与 fast_scene 建 mesh 逻辑一致：
+与 scenebuilder 建 mesh 逻辑一致：
 
 - **墙**：SSL 中 `p`/`q` 即内墙底两点，高度为 `align_height ? z_max : wall.height`；带门/窗洞时 JSON 含 `outer` 环与 `hole` 环
 - **门/窗**：按 `center`、`width`、`height` 及所属墙计算内面四顶点（同 `create_door_or_window_mesh`）
@@ -1600,7 +1600,7 @@ valid   = pixel > 0               # 0 表示无效，不应参与几何计算
 import json
 import imageio
 import numpy as np
-from fast_scene.core import util
+from scenebuilder.core import util
 
 base = "1735123456789"  # 与 {base}.png 同名
 with open(f"{base}_camera_para.json") as f:
@@ -1780,7 +1780,7 @@ normal_world = (R.T @ normal_opencv.T).T   # 再 normalize
 import json
 import imageio
 import numpy as np
-from fast_scene.core import util
+from scenebuilder.core import util
 
 with open("topdown_camera_para.json") as f:
     cam = json.load(f)
@@ -1913,7 +1913,7 @@ if occ[i, j, k]:
 ### 8.2 版本对比
 
 
-| 特性       | fast_scene (Pyrender) | fast_scene_bpy (Blender)             |
+| 特性       | scenebuilder (Pyrender) | scenebuilder_bpy (Blender)             |
 | -------- | --------------------- | ------------------------------------ |
 | 渲染品质     | 基础 OpenGL             | PBR (Eevee/Cycles)                   |
 | 转角处理     | 简单重叠                  | 斜接修正 (Miter Joint)                   |
@@ -1983,15 +1983,15 @@ python build_lancedb.py
 
 ```bash
 # 全量 benchmark（同 §3.3）
-python fast_scene/render_ssl.py --ssl path/to/ssl.txt --views auto --output out \
+python scenebuilder/render_ssl.py --ssl path/to/ssl.txt --views auto --output out \
   --glb --assets path/to/assets --ply --visible_geometry --voxel --semantic --depth --pano
 
 # 仅像素对齐 + 地板路径（§5.2）
-python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+python scenebuilder/render_ssl.py --ssl path/to/ssl.txt \
   --normalized_topdown --output out_normalized --assets path/to/assets
 
 # 静态多视角
-python fast_scene/render_ssl.py --ssl path/to/ssl.txt \
+python scenebuilder/render_ssl.py --ssl path/to/ssl.txt \
   --views topdown left_seq --output out --glb --semantic --depth
 ```
 
@@ -2012,7 +2012,7 @@ bpy 路径下，**可见几何**（`visible_geometry`）与**平面内表面顶�
 3. 在 **齐次 clip space** 中对三角形/多边形环做 Sutherland-Hodgman 裁剪
 4. 沿边插值时 **同时插值** `clip` **与** `world`，保证裁切后的交点仍在原平面（墙/门/窗/地板/天花）上
 
-可见几何的三角形裁剪（`fast_scene_bpy._clip_triangle_to_render_frustum`）与平面顶点的多边形裁剪（`util_bpy.clip_polygon_to_render_frustum`）均遵循上述流程。
+可见几何的三角形裁剪（`scenebuilder_bpy._clip_triangle_to_render_frustum`）与平面顶点的多边形裁剪（`util_bpy.clip_polygon_to_render_frustum`）均遵循上述流程。
 
 **遮挡标记** `occluded` 与视锥无关，使用 `scene.ray_cast`（与可见几何物体级遮挡判定相同），透明墙/天花/地板可穿透。
 

@@ -3,15 +3,15 @@ requires = ["setuptools>=64.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fast-scene"
+name = "scenebuilder"
 version = "0.0.1"
 
 [tool.setuptools]
-packages = ["fast_scene", "fast_scene.core"]
+packages = ["scenebuilder", "scenebuilder.core"]
 
 [tool.setuptools.package-dir]
-fast_scene = "."
+scenebuilder = "."
 
 [tool.setuptools.package-data]
-fast_scene = ["config.yaml", "assets/**/*"]
+scenebuilder = ["config.yaml", "assets/**/*"]
 

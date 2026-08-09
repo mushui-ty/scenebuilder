@@ -1,4 +1,4 @@
-"""Core rendering engine and shared utilities for fast_scene."""
+"""Core rendering engine and shared utilities for scenebuilder."""
 
 from .config_utils import (
     ASSETS_DIR,
@@ -8,8 +8,8 @@ from .config_utils import (
     load_config,
     resolve_package_path,
 )
-from .fast_scene import SceneCtx
-from .fast_scene_bpy import BpySceneCtx
+from .scenebuilder import SceneCtx
+from .scenebuilder_bpy import BpySceneCtx
 
 __all__ = [
     "SceneCtx",

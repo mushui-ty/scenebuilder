@@ -1,5 +1,5 @@
 """
-Blender 版本的辅助工具函数，供 fast_scene_bpy.py 使用。
+Blender 版本的辅助工具函数，供 scenebuilder_bpy.py 使用。
 """
 
 import os
@@ -1039,7 +1039,7 @@ def _free_cycles_render_buffers() -> None:
             pass
 
 
-_REUSABLE_DEPTH_COMPOSITOR = "FastSceneDepthCompositor"
+_REUSABLE_DEPTH_COMPOSITOR = "SceneBuilderDepthCompositor"
 
 
 def _clear_compositor_tree(tree) -> None:
@@ -1350,7 +1350,7 @@ def render_color_and_depth_png(
         "compositing_node_group": getattr(scene, "compositing_node_group", None),
         "temp_compositing_node_group": None,
     }
-    temp_dir = tempfile.mkdtemp(prefix="fast_scene_depth_")
+    temp_dir = tempfile.mkdtemp(prefix="scenebuilder_depth_")
     clip_end = float(getattr(scene.camera.data, "clip_end", 1000.0)) if scene.camera else 1000.0
 
     try:
@@ -1527,7 +1527,7 @@ def build_render_frustum_clip_mats(scene, camera_obj, width: int, height: int):
 
 
 def render_frustum_clip_planes():
-    """Blender clip space 视锥半空间（与 fast_scene_bpy 可见几何一致）。"""
+    """Blender clip space 视锥半空间（与 scenebuilder_bpy 可见几何一致）。"""
     eps = 1e-5
     return [
         (np.array([0.0, 0.0, 0.0, 1.0], dtype=float), eps),
