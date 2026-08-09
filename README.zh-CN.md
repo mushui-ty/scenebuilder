@@ -4,7 +4,9 @@
 
 基于 **bpy / pyrender** 的 **3D 场景构建**、**渲染**、**路径规划**（覆盖式视频渲染）与**几何导出**工具库，输入为 **SSL** 结构化场景格式。
 
-SceneBuilder 渲染示例
+<p align="center">
+  <img src="assets/image.png" alt="SceneBuilder 渲染示例" width="800">
+</p>
 
 从 SSL 文本（墙、门、窗、家具）构建室内 3D 场景，支持多视角渲染、语义/深度图、全景图，导出 GLB/PLY/体素，并基于地板路径自动生成相机轨迹。
 
@@ -97,15 +99,19 @@ CLI 也支持 `--camera_position`、`--look_at`、可选 `--up_vector`。未指�
 
 ## 文档
 
+**完整手册：** [中文](docs/doc.zh-CN.md) · [English](docs/doc.en.md)
 
-| 主题                                 | 链接                                                    |
-| ---------------------------------- | ----------------------------------------------------- |
-| **完整参考**（API、SSL 坐标、输出目录、深度/语义/体素） | [docs/doc.zh-CN.md](docs/doc.zh-CN.md)                |
-| SSL 坐标系                            | [§2](docs/doc.zh-CN.md#2-ssl-坐标系与实体约定)                |
-| `render_ssl` / CLI 参数              | [§4.3](docs/doc.zh-CN.md#43-render_ssl--render_sslpy) |
-| 输出目录与 `c2w`                        | [§6](docs/doc.zh-CN.md#6-输出目录与坐标系)                    |
-| `--views auto` 与地板路径               | [§5](docs/doc.zh-CN.md#5-高级工作流)                       |
-| English documentation              | [docs/doc.en.md](docs/doc.en.md)                      |
+建议按以下顺序阅读：
+
+| 步骤 | 主题 | 中文 | English |
+| ---- | ---- | ---- | ------- |
+| 1 | 安装与依赖 | [§1](docs/doc.zh-CN.md#1-安装与依赖) | [§1](docs/doc.en.md#1-installation-and-dependencies) |
+| 2 | SSL 格式与坐标系 | [§2](docs/doc.zh-CN.md#2-ssl-坐标系与实体约定) | [§2](docs/doc.en.md#2-ssl-coordinate-system-and-entities) |
+| 3 | 快速开始与示例 | [§3](docs/doc.zh-CN.md#3-快速开始) | [§3](docs/doc.en.md#3-quick-start) |
+| 4 | API 参考（`topdown_view` / `render_view` / `render_ssl`） | [§4](docs/doc.zh-CN.md#4-api-参考) | [§4](docs/doc.en.md#4-api-reference) |
+| 5 | 自动视角与地板路径（`--views auto`） | [§5](docs/doc.zh-CN.md#5-高级工作流) | [§5](docs/doc.en.md#5-advanced-workflows) |
+| 6 | 输出目录、`c2w` 与导出产物 | [§6](docs/doc.zh-CN.md#6-输出目录与坐标系) | [§6](docs/doc.en.md#6-output-layout-and-coordinate-systems) |
+| 7 | 语义 / 深度 / 体素详解 | [§7](docs/doc.zh-CN.md#7-导出产物详解) | [§7](docs/doc.en.md#7-export-artifacts) |
 
 
 

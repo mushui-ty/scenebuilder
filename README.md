@@ -4,7 +4,9 @@
 
 A repository for **3D scene build**, **render**, **path planning** (for coverage video rendering), and **geometry export** — based on **bpy / pyrender**, from **SSL** structured scene format.
 
-SceneBuilder render example
+<p align="center">
+  <img src="assets/image.png" alt="SceneBuilder render example" width="800">
+</p>
 
 Build indoor scenes from SSL text (walls, doors, windows, furniture), then render multi-view images, semantic/depth maps, panoramas, export GLB/PLY/voxels, and plan floor paths for auto camera trajectories.
 
@@ -99,15 +101,19 @@ Custom cameras can also be passed via CLI: `--camera_position`, `--look_at`, opt
 
 ## Documentation
 
+**Full manuals:** [English](docs/doc.en.md) · [中文](docs/doc.zh-CN.md)
 
-| Topic                                                               | Link                                                        |
-| ------------------------------------------------------------------- | ----------------------------------------------------------- |
-| **Full reference** (API, SSL coords, outputs, depth/semantic/voxel) | [docs/doc.en.md](docs/doc.en.md)                            |
-| SSL coordinate system                                               | [§2](docs/doc.en.md#2-ssl-coordinate-system-and-entities)   |
-| `render_ssl` / CLI flags                                            | [§4.3](docs/doc.en.md#43-render_ssl--render_sslpy)          |
-| Output layout & `c2w`                                               | [§6](docs/doc.en.md#6-output-layout-and-coordinate-systems) |
-| `--views auto` & floor path                                         | [§5](docs/doc.en.md#5-advanced-workflows)                   |
-| 中文文档                                                                | [docs/doc.zh-CN.md](docs/doc.zh-CN.md)                      |
+Read in this order:
+
+| Step | Topic | English | 中文 |
+| ---- | ----- | ------- | ---- |
+| 1 | Installation & dependencies | [§1](docs/doc.en.md#1-installation-and-dependencies) | [§1](docs/doc.zh-CN.md#1-安装与依赖) |
+| 2 | SSL format & coordinates | [§2](docs/doc.en.md#2-ssl-coordinate-system-and-entities) | [§2](docs/doc.zh-CN.md#2-ssl-坐标系与实体约定) |
+| 3 | Quick start & examples | [§3](docs/doc.en.md#3-quick-start) | [§3](docs/doc.zh-CN.md#3-快速开始) |
+| 4 | API reference (`topdown_view`, `render_view`, `render_ssl`) | [§4](docs/doc.en.md#4-api-reference) | [§4](docs/doc.zh-CN.md#4-api-参考) |
+| 5 | Auto views & floor path (`--views auto`) | [§5](docs/doc.en.md#5-advanced-workflows) | [§5](docs/doc.zh-CN.md#5-高级工作流) |
+| 6 | Output layout, `c2w`, exports | [§6](docs/doc.en.md#6-output-layout-and-coordinate-systems) | [§6](docs/doc.zh-CN.md#6-输出目录与坐标系) |
+| 7 | Semantic / depth / voxel details | [§7](docs/doc.en.md#7-export-artifacts) | [§7](docs/doc.zh-CN.md#7-导出产物详解) |
 
 
 
