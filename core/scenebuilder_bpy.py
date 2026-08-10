@@ -22,7 +22,7 @@ import numpy as np
 import time
 import hashlib
 from contextlib import contextmanager
-from typing import List, Dict, Any, Optional, Literal, Tuple, Union
+from typing import List, Dict, Any, Optional, Literal, Tuple, Union, Set
 
 # Import util data processing functions (not its mesh creation functions)
 try:
@@ -910,7 +910,8 @@ class BpySceneCtx:
     def construct_scene(self, show_wall: bool = True, show_window: bool = True, 
                        show_door: bool = True, show_ceiling: bool = True,
                        geometry_mode: str = "gltf", align_height: bool = True,
-                       rebuild: bool = False):
+                       rebuild: bool = False,
+                       exclude_box_ids: Optional[Set[str]] = None):
         """
         Build the full scene.
         
@@ -922,17 +923,21 @@ class BpySceneCtx:
                 - "bbox": Force bbox geometry for all objects
             align_height: Align wall heights to z_max
             rebuild: Rebuild scene (clear all current objects)
+            exclude_box_ids: Furniture box IDs to skip (e.g. ceiling occluders for top-down nav mask)
         """
         if rebuild:
             self.clear_scene()
 
         self.normalize_scene_data()
         total_start = time.perf_counter()
+        skip_box_ids = set(exclude_box_ids or ())
 
         self.construct_floor(show_wall=show_wall, show_window=show_window, 
                              show_door=show_door, show_ceiling=show_ceiling, align_height=align_height)
 
-        print(f"📦 Loading furniture ({len(self.context['boxes'])} objects, mode: {geometry_mode})...")
+        box_total = len(self.context["boxes"])
+        box_load_count = box_total - sum(1 for bid in self.context["boxes"] if bid in skip_box_ids)
+        print(f"📦 Loading furniture ({box_load_count}/{box_total} objects, mode: {geometry_mode})...")
         success_count = 0
         load_time = 0
         transform_time = 0
@@ -940,6 +945,8 @@ class BpySceneCtx:
         model_paths = self._asset_search_paths("model_path")
 
         for box_id, box in self.context["boxes"].items():
+            if box_id in skip_box_ids:
+                continue
             asset_id = box.get("asset_id")
             
             # --- Mode selection logic ---
@@ -1018,7 +1025,7 @@ class BpySceneCtx:
                     print(f"  ❌ {name} (bbox geometry): {e}")
 
         total_time = time.perf_counter() - total_start
-        print(f"✅ Scene build complete! Successfully added {success_count}/{len(self.context['boxes'])} objects")
+        print(f"✅ Scene build complete! Successfully added {success_count}/{box_load_count} objects")
         print(f"   Build time: {total_time:.2f}s (load: {load_time:.2f}s, transform: {transform_time:.2f}s)")
 
     def export_glb(self, output_path: str, rebuild: bool = False, **construct_kwargs):
@@ -3594,6 +3601,15 @@ class BpySceneCtx:
             util_data.write_standard_ssl_to_path(self.context, ssl_path)
 
         self.clear_scene()
+        exclude_box_ids = None
+        if render_depth:
+            exclude_box_ids = util.identify_topdown_occluding_box_ids(self.context, self.config)
+            if exclude_box_ids:
+                labels = util.describe_topdown_occluding_boxes(self.context, exclude_box_ids)
+                print(
+                    f"🚫 Skipping {len(exclude_box_ids)} ceiling occluder(s) for top-down nav mask: "
+                    + ", ".join(labels)
+                )
         self.construct_scene(
             geometry_mode=geometry_mode,
             show_wall=show_wall,
@@ -3602,6 +3618,7 @@ class BpySceneCtx:
             show_ceiling=show_ceiling,
             align_height=align_height,
             rebuild=True,
+            exclude_box_ids=exclude_box_ids,
         )
 
         for wall_info in self.mesh_nodes["walls"].values():

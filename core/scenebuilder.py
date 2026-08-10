@@ -10,7 +10,7 @@ import time
 import colorsys
 import hashlib
 import imageio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 
 try:
     from . import util, util_data, geometry_opencv as geo_cv
@@ -691,11 +691,13 @@ class SceneCtx:
 
     def construct_scene(self, show_wall: bool = True, show_window: bool = True,
                         show_door: bool = True, use_bbox_geometry: bool = False,
-                        show_ceiling: bool = True):
+                        show_ceiling: bool = True,
+                        exclude_box_ids: Optional[Set[str]] = None):
         """Build the full scene."""
         total_start = time.perf_counter()
         os.environ['PYOPENGL_PLATFORM'] = 'egl'
         self.normalize_scene_data()
+        skip_box_ids = set(exclude_box_ids or ())
 
         self.construct_floor(
             show_wall=show_wall,
@@ -705,12 +707,16 @@ class SceneCtx:
         )
         self._scene_show_ceiling = bool(show_ceiling)
 
-        print(f"📦 Loading furniture ({len(self.context['boxes'])} objects)...")
+        box_total = len(self.context["boxes"])
+        box_load_count = box_total - sum(1 for bid in self.context["boxes"] if bid in skip_box_ids)
+        print(f"📦 Loading furniture ({box_load_count}/{box_total} objects)...")
         success_count = 0
         load_time = 0
         transform_time = 0
 
         for box_id, box in self.context["boxes"].items():
+            if box_id in skip_box_ids:
+                continue
             if use_bbox_geometry or box.get("use_bbox_geometry"):
                 try:
                     bbox_mesh = self._create_bbox_geometry(box["center"], box["scale"], box["angle_z"],
@@ -776,7 +782,7 @@ class SceneCtx:
             except Exception as e:
                 print(f"  ❌ {box.get('class')}: {e}")
 
-        print(f"✅ Build complete! {success_count}/{len(self.context['boxes'])} objects succeeded (elapsed: {time.perf_counter() - total_start:.2f}s)")
+        print(f"✅ Build complete! {success_count}/{box_load_count} objects succeeded (elapsed: {time.perf_counter() - total_start:.2f}s)")
 
     def export_glb(self, output_path: str, rebuild: bool = False, **construct_kwargs):
         """Export the current scene as a GLB file."""
@@ -1709,7 +1715,16 @@ class SceneCtx:
             util_data.write_standard_ssl_to_path(self.context, ssl_path)
 
         self.clear_scene()
-        self.construct_scene(show_ceiling=show_ceiling)
+        exclude_box_ids = None
+        if render_depth:
+            exclude_box_ids = util.identify_topdown_occluding_box_ids(self.context, self.config)
+            if exclude_box_ids:
+                labels = util.describe_topdown_occluding_boxes(self.context, exclude_box_ids)
+                print(
+                    f"🚫 Skipping {len(exclude_box_ids)} ceiling occluder(s) for top-down nav mask: "
+                    + ", ".join(labels)
+                )
+        self.construct_scene(show_ceiling=show_ceiling, exclude_box_ids=exclude_box_ids)
         self.setup_lighting()
 
         meta = self.context["meta"]

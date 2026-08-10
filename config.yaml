@@ -52,6 +52,9 @@ outdoor_fov_scale: 1.1  # FOV scale factor when camera is outside room
 nav_mask_depth_tolerance_m: 0.05  # Walkable depth: camera-to-ground distance ± this value (m)
 nav_mask_inset_m: 0.15           # Inset from outer boundary (m)
 nav_mask_point_spacing_m: 0.3    # Sample spacing along inner boundary (m)
+topdown_occluder_bottom_margin_m: 0.25       # Skip bbox if bottom >= wall_height - this (m)
+topdown_occluder_min_floor_area_ratio: 0.10  # ...and XY footprint >= floor_area * this
+topdown_occluder_keyword_min_floor_area_ratio: 0.05  # Softer threshold when label hints ceiling
 
 # 5. Visible geometry mask criteria
 ratio_if_visible: 0.1             # visible mask / overall mask below this → mostly_occluded

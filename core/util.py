@@ -2997,3 +2997,90 @@ def normal_map_camera_para_fields() -> Dict[str, Any]:
         "normal_decode": "normal_opencv = (pixel_rgb / 255.0) * 2.0 - 1.0",
         "normal_invalid_mask": "depth_pixel == 0",
     }
+
+
+DEFAULT_TOPDOWN_OCCLUDER_BOTTOM_MARGIN_M = 0.25
+DEFAULT_TOPDOWN_OCCLUDER_MIN_FLOOR_AREA_RATIO = 0.10
+TOPDOWN_OCCLUDER_LABEL_KEYWORDS = ("ceiling", "顶板", "吊顶", "天花板", "顶面")
+
+
+def identify_topdown_occluding_box_ids(
+    context: Dict[str, Any],
+    config: Optional[Dict[str, Any]] = None,
+) -> Set[str]:
+    """Box IDs to skip in normalized top-down depth rendering for floor-path nav mask.
+
+    Ceiling-mounted objects with a large horizontal footprint block top-down depth
+    rays and can zero out the walkable nav mask. Uses wall height (not furniture
+    z_max) and compares XY footprint against room floor area.
+    """
+    config = config or {}
+    margin_m = float(
+        config.get("topdown_occluder_bottom_margin_m", DEFAULT_TOPDOWN_OCCLUDER_BOTTOM_MARGIN_M)
+    )
+    min_area_ratio = float(
+        config.get(
+            "topdown_occluder_min_floor_area_ratio",
+            DEFAULT_TOPDOWN_OCCLUDER_MIN_FLOOR_AREA_RATIO,
+        )
+    )
+    keyword_min_ratio = float(
+        config.get("topdown_occluder_keyword_min_floor_area_ratio", 0.05)
+    )
+
+    walls = context.get("walls") or {}
+    wall_z_max = max((float(w.get("height", 0)) for w in walls.values()), default=0.0)
+    if wall_z_max <= 0:
+        return set()
+
+    meta = context.get("meta") or {}
+    span = meta.get("span") or [0.0, 0.0]
+    floor_area = float(span[0]) * float(span[1])
+    if floor_area <= 1e-6:
+        bounds = meta.get("bounds")
+        if bounds and len(bounds) >= 4:
+            floor_area = max(
+                (float(bounds[2]) - float(bounds[0])) * (float(bounds[3]) - float(bounds[1])),
+                1e-6,
+            )
+        else:
+            floor_area = 1.0
+
+    min_xy_area = floor_area * min_area_ratio
+    keyword_min_xy = floor_area * keyword_min_ratio
+    bottom_threshold = wall_z_max - margin_m
+
+    excluded: Set[str] = set()
+    for box_id, box in (context.get("boxes") or {}).items():
+        center = box.get("center")
+        scale = box.get("scale")
+        if not center or not scale or len(center) < 3 or len(scale) < 3:
+            continue
+
+        bottom_z = float(center[2]) - float(scale[2]) / 2.0
+        xy_area = abs(float(scale[0]) * float(scale[1]))
+        label = str(box.get("label") or box.get("caption") or "").lower()
+
+        if bottom_z >= bottom_threshold and xy_area >= min_xy_area:
+            excluded.add(box_id)
+            continue
+
+        if any(kw in label for kw in TOPDOWN_OCCLUDER_LABEL_KEYWORDS):
+            if bottom_z >= wall_z_max - margin_m * 2 and xy_area >= keyword_min_xy:
+                excluded.add(box_id)
+
+    return excluded
+
+
+def describe_topdown_occluding_boxes(
+    context: Dict[str, Any],
+    box_ids: Set[str],
+) -> List[str]:
+    """Human-readable labels for excluded top-down occluder boxes."""
+    boxes = context.get("boxes") or {}
+    labels: List[str] = []
+    for box_id in sorted(box_ids):
+        box = boxes.get(box_id, {})
+        name = box.get("label") or box.get("caption") or box.get("class") or box_id[:8]
+        labels.append(str(name))
+    return labels
