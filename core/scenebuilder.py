@@ -1666,6 +1666,8 @@ class SceneCtx:
         ref_camera,
         ref_look_at,
         ref_world_up=None,
+        *,
+        exclude_box_ids=None,
     ) -> str:
         from . import ssl_opencv
 
@@ -1675,6 +1677,7 @@ class SceneCtx:
             ref_camera,
             ref_look_at,
             ref_world_up if ref_world_up is not None else [0.0, 0.0, 1.0],
+            exclude_box_ids=exclude_box_ids,
         )
 
     def normalized_topdown_view(
@@ -1711,19 +1714,15 @@ class SceneCtx:
             self.context,
             round_decimals=round_decimals,
         ) if align is None else align
+        exclude_box_ids = util.resolve_topdown_exclude_box_ids(
+            self.context, self.config, enabled=True, log_prefix="top-down view"
+        )
         if write_ssl:
-            util_data.write_standard_ssl_to_path(self.context, ssl_path)
+            util_data.write_standard_ssl_to_path(
+                self.context, ssl_path, exclude_box_ids=exclude_box_ids
+            )
 
         self.clear_scene()
-        exclude_box_ids = None
-        if render_depth:
-            exclude_box_ids = util.identify_topdown_occluding_box_ids(self.context, self.config)
-            if exclude_box_ids:
-                labels = util.describe_topdown_occluding_boxes(self.context, exclude_box_ids)
-                print(
-                    f"🚫 Skipping {len(exclude_box_ids)} ceiling occluder(s) for top-down nav mask: "
-                    + ", ".join(labels)
-                )
         self.construct_scene(show_ceiling=show_ceiling, exclude_box_ids=exclude_box_ids)
         self.setup_lighting()
 
@@ -1787,6 +1786,7 @@ class SceneCtx:
             align["camera_position_ssl"],
             align["look_at_target_ssl"],
             [0.0, 0.0, 1.0],
+            exclude_box_ids=exclude_box_ids,
         )
         print(f"✅ Pixel-aligned top-down view complete: {output_dir}")
 
@@ -1821,12 +1821,17 @@ class SceneCtx:
         world_look_w = [meta["center"][0], meta["center"][1], 0.0]
         world_up_raw = [0.0, 1.0, 0.0]
 
+        exclude_box_ids = util.resolve_topdown_exclude_box_ids(
+            self.context, self.config, enabled=True
+        )
+
         with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam_w, world_look_w, world_up_raw)
 
             if rebuild or self._scene_show_ceiling != bool(show_ceiling):
                 self._reset_render_state()
             if rebuild or self.scene is None:
+                construct_kwargs["exclude_box_ids"] = exclude_box_ids
                 self.construct_scene(**construct_kwargs)
             self.setup_lighting()
 
@@ -1901,7 +1906,10 @@ class SceneCtx:
             )
             with open(para_path, 'w') as f:
                 json.dump(camera_para, f, indent=4)
-            self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
+            self.write_opencv_ssl_for_view(
+                view_dir, world_cam_w, world_look_w, vss.world_up,
+                exclude_box_ids=exclude_box_ids,
+            )
             if export_glb and not visible_geometry:
                 self.export_glb(glb_path or os.path.splitext(output_path)[0] + ".glb")
         print(f"✅ Top-down view saved to: {output_path}")

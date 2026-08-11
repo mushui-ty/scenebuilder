@@ -14,8 +14,10 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from typing import Optional, Literal, Any, Dict, Union, List, Tuple
 
 _PKG_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -34,11 +36,11 @@ def _load_util_data_module():
     spec.loader.exec_module(mod)
     return mod
 
-
 try:
     from .core.util_data import (
         parse_scene_input,
         format_standard_ssl,
+        context_for_ssl_export,
         prepare_pixel_aligned_topdown_context,
         apply_scene_json_xy_translation,
     )
@@ -46,6 +48,7 @@ except (ImportError, ValueError):
     _util_data = _load_util_data_module()
     parse_scene_input = _util_data.parse_scene_input
     format_standard_ssl = _util_data.format_standard_ssl
+    context_for_ssl_export = _util_data.context_for_ssl_export
     prepare_pixel_aligned_topdown_context = _util_data.prepare_pixel_aligned_topdown_context
     apply_scene_json_xy_translation = _util_data.apply_scene_json_xy_translation
 
@@ -588,20 +591,48 @@ def worker_render_post(job_path: str) -> None:
     record_post_complete(output_dir)
 
 
+_WORKER_SEGV_RETRIES = 3
+_WORKER_SEGV_RETRY_DELAY_S = 3.0
+
+
+def _is_worker_segv_error(exc: subprocess.CalledProcessError) -> bool:
+    return exc.returncode == -signal.SIGSEGV
+
+
+def _spawn_worker(cmd: List[str], *, label: str) -> None:
+    """Run a render worker subprocess; retry on intermittent Blender SIGSEGV."""
+    last_exc: Optional[subprocess.CalledProcessError] = None
+    for attempt in range(1, _WORKER_SEGV_RETRIES + 1):
+        try:
+            subprocess.run(cmd, check=True)
+            return
+        except subprocess.CalledProcessError as exc:
+            last_exc = exc
+            if not _is_worker_segv_error(exc) or attempt >= _WORKER_SEGV_RETRIES:
+                raise
+            print(
+                f"⚠️  {label} crashed with SIGSEGV (attempt {attempt}/{_WORKER_SEGV_RETRIES}); "
+                f"retrying in {_WORKER_SEGV_RETRY_DELAY_S:.0f}s..."
+            )
+            time.sleep(_WORKER_SEGV_RETRY_DELAY_S)
+    if last_exc is not None:
+        raise last_exc
+
+
 def _spawn_worker_view(job_path: str, view_name: str) -> None:
-    subprocess.run([
+    _spawn_worker([
         sys.executable, "-c",
         "from scenebuilder.render_ssl import worker_render_view; "
         f"worker_render_view({job_path!r}, {view_name!r})",
-    ], check=True)
+    ], label=f"View {view_name!r}")
 
 
 def _spawn_worker_post(job_path: str) -> None:
-    subprocess.run([
+    _spawn_worker([
         sys.executable, "-c",
         "from scenebuilder.render_ssl import worker_render_post; "
         f"worker_render_post({job_path!r})",
-    ], check=True)
+    ], label="Full-scene geometry export")
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +862,19 @@ def render_ssl(
             pixel_align["dy_ssl"],
         )
 
-    standard_ssl = format_standard_ssl(ctx.context)
+    ssl_exclude_box_ids = None
+    if normalized_topdown:
+        try:
+            from .core import util as core_util
+        except (ImportError, ValueError):
+            from core import util as core_util  # type: ignore
+        ssl_exclude_box_ids = core_util.identify_topdown_occluding_box_ids(
+            ctx.context, getattr(ctx, "config", {})
+        ) or None
+
+    standard_ssl = format_standard_ssl(
+        context_for_ssl_export(ctx.context, ssl_exclude_box_ids)
+    )
     ssl_path = os.path.join(y_dir, "ssl.txt")
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(standard_ssl)

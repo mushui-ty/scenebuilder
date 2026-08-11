@@ -45,6 +45,29 @@ except ImportError:
     raise
 
 
+def configure_cycles_gpu_devices(prefs) -> str:
+    """Configure Cycles GPU devices; prefer OptiX when available, else CUDA."""
+    refresh = getattr(prefs, "refresh_devices", None)
+    if callable(refresh):
+        refresh()
+
+    for backend in ("OPTIX", "CUDA"):
+        try:
+            devices = list(prefs.get_devices_for_type(backend) or [])
+        except Exception:
+            devices = []
+        if not devices:
+            continue
+        if not any(getattr(device, "type", None) != "CPU" for device in devices):
+            continue
+        prefs.compute_device_type = backend
+        for device in devices:
+            device.use = True
+        return backend
+
+    return "NONE"
+
+
 class BpySceneCtx:
     """Scene context manager - pure Blender version"""
     
@@ -153,14 +176,15 @@ class BpySceneCtx:
             self.scene.cycles.device = 'GPU'
             
             prefs = bpy.context.preferences.addons['cycles'].preferences
-            prefs.compute_device_type = 'CUDA'
-            for device in prefs.get_devices_for_type('CUDA'):
-                device.use = True
+            gpu_backend = configure_cycles_gpu_devices(prefs)
             
             self.scene.cycles.samples = self.config.get("blender_samples", 32)
             self.scene.cycles.use_denoising = True
             self.scene.cycles.denoiser = 'OPENIMAGEDENOISE'
-            print(f"✅ Blender scene initialized (Cycles + CUDA)")
+            if gpu_backend == "NONE":
+                print("⚠️  Blender scene initialized (Cycles GPU requested, but no OptiX/CUDA device found)")
+            else:
+                print(f"✅ Blender scene initialized (Cycles + {gpu_backend})")
         else:
             # EEVEE Next settings (Blender 4.2+)
             if hasattr(self.scene, "eevee"):
@@ -1242,6 +1266,13 @@ class BpySceneCtx:
         if not visible_entries:
             print("⚠️ No visible geometry detected in multi-view sequence")
             return
+        width, height = self._render_resolution()
+        self._write_visibility_json(
+            output_dir,
+            self._legacy_visibility_records_from_entries(visible_entries),
+            width,
+            height,
+        )
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
             self.export_visible_glb(util_data.visible_glb_path(output_dir), merge_entries)
@@ -1258,6 +1289,8 @@ class BpySceneCtx:
         export_glb: bool = False,
         export_point_cloud: bool = False,
         export_voxel: bool = False,
+        *,
+        pano_resolution: int = 4096,
     ):
         """Multi-panorama merged export: keep full geometry if unobstructed from any camera; no frustum clip."""
         bpy.context.view_layer.update()
@@ -1265,6 +1298,13 @@ class BpySceneCtx:
         if not visible_entries:
             print("⚠️ No visible geometry detected in multi-view panorama")
             return
+        width, height = self._pano_dimensions(pano_resolution)
+        self._write_visibility_json(
+            output_dir,
+            self._legacy_visibility_records_from_entries(visible_entries),
+            width,
+            height,
+        )
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
             self.export_visible_glb(util_data.visible_glb_path(output_dir), merge_entries)
@@ -1635,6 +1675,7 @@ class BpySceneCtx:
             "image_size": [int(width), int(height)],
             "objects": records,
         }
+        os.makedirs(output_dir, exist_ok=True)
         path = os.path.join(output_dir, "visibility.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -3597,19 +3638,15 @@ class BpySceneCtx:
             self.context,
             round_decimals=round_decimals,
         ) if align is None else align
+        exclude_box_ids = util.resolve_topdown_exclude_box_ids(
+            self.context, self.config, enabled=True, log_prefix="top-down view"
+        )
         if write_ssl:
-            util_data.write_standard_ssl_to_path(self.context, ssl_path)
+            util_data.write_standard_ssl_to_path(
+                self.context, ssl_path, exclude_box_ids=exclude_box_ids
+            )
 
         self.clear_scene()
-        exclude_box_ids = None
-        if render_depth:
-            exclude_box_ids = util.identify_topdown_occluding_box_ids(self.context, self.config)
-            if exclude_box_ids:
-                labels = util.describe_topdown_occluding_boxes(self.context, exclude_box_ids)
-                print(
-                    f"🚫 Skipping {len(exclude_box_ids)} ceiling occluder(s) for top-down nav mask: "
-                    + ", ".join(labels)
-                )
         self.construct_scene(
             geometry_mode=geometry_mode,
             show_wall=show_wall,
@@ -3755,6 +3792,7 @@ class BpySceneCtx:
             align["camera_position_ssl"],
             align["look_at_target_ssl"],
             [0.0, 0.0, 1.0],
+            exclude_box_ids=exclude_box_ids,
         )
         print(f"✅ Pixel-aligned top-down view complete: {output_dir}")
 
@@ -3795,6 +3833,10 @@ class BpySceneCtx:
         world_look_w = [meta_w["center"][0], meta_w["center"][1], 0.0]
         world_up_raw = up_vector if up_vector else [0.0, 1.0, 0.0]
 
+        exclude_box_ids = util.resolve_topdown_exclude_box_ids(
+            self.context, self.config, enabled=True
+        )
+
         with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam_w, world_look_w, world_up_raw)
 
@@ -3809,6 +3851,7 @@ class BpySceneCtx:
                     show_ceiling=show_ceiling,
                     align_height=align_height,
                     rebuild=rebuild,
+                    exclude_box_ids=exclude_box_ids,
                 )
                 construct_time = time.perf_counter() - construct_start
 
@@ -4037,7 +4080,10 @@ class BpySceneCtx:
                 with open(para_path, 'w') as f:
                     json.dump(camera_para, f, indent=4)
             if write_ssl:
-                self.write_opencv_ssl_for_view(view_dir, world_cam_w, world_look_w, vss.world_up)
+                self.write_opencv_ssl_for_view(
+                    view_dir, world_cam_w, world_look_w, vss.world_up,
+                    exclude_box_ids=exclude_box_ids,
+                )
             save_time = time.perf_counter() - save_start
 
             total_time = time.perf_counter() - total_start
@@ -4111,6 +4157,8 @@ class BpySceneCtx:
         ref_camera,
         ref_look_at,
         ref_world_up=None,
+        *,
+        exclude_box_ids=None,
     ) -> str:
         """Export ``ssl_opencv.txt`` (OpenCV camera frame; reference camera ref_*)."""
         from . import ssl_opencv
@@ -4121,6 +4169,7 @@ class BpySceneCtx:
             ref_camera,
             ref_look_at,
             ref_world_up if ref_world_up is not None else [0.0, 0.0, 1.0],
+            exclude_box_ids=exclude_box_ids,
         )
 
     def _expand_camera_sequence_args(
@@ -4794,10 +4843,11 @@ class BpySceneCtx:
                     self.export_visible_geometry_pano_multi(
                         pano_dir,
                         camera_states,
-                    export_glb=export_glb,
-                    export_point_cloud=export_point_cloud,
-                    export_voxel=export_voxel,
-                )
+                        export_glb=export_glb,
+                        export_point_cloud=export_point_cloud,
+                        export_voxel=export_voxel,
+                        pano_resolution=pano_resolution,
+                    )
                 finally:
                     for cam_obj, cam_data in reversed(temp_cameras):
                         if cam_obj and self.scene.camera == cam_obj:
@@ -5182,9 +5232,11 @@ if __name__ == "__main__":
     # List render devices
     print("🖥️  Available render devices:")
     prefs = bpy.context.preferences.addons['cycles'].preferences
-    for device in prefs.get_devices_for_type('CUDA'):
-        status = "✅ Enabled" if device.use else "⚪ Disabled"
-        print(f"   - {device.name} (type: {device.type}) {status}")
+    for backend in ("OPTIX", "CUDA"):
+        for device in prefs.get_devices_for_type(backend):
+            status = "✅ Enabled" if device.use else "⚪ Disabled"
+            print(f"   - {device.name} (backend: {backend}, type: {device.type}) {status}")
+    print(f"   Selected backend: {configure_cycles_gpu_devices(prefs)}")
     print()
     
     # Test scene rendering

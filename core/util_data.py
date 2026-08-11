@@ -10,7 +10,7 @@ import copy
 import base64
 import math
 import numpy as np
-from typing import Dict, Any, Optional, Literal, List
+from typing import Dict, Any, Optional, Literal, List, Set
 from pathlib import Path
 from PIL import Image
 
@@ -1716,9 +1716,29 @@ def build_pixel_aligned_camera_para(
     }
 
 
-def write_standard_ssl_to_path(context: Dict[str, Any], ssl_path: str) -> str:
+def context_for_ssl_export(
+    context: Dict[str, Any],
+    exclude_box_ids: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    """Return context copy with excluded furniture boxes removed for SSL export."""
+    if not exclude_box_ids:
+        return context
+    filtered = dict(context)
+    boxes = dict(context.get("boxes") or {})
+    for box_id in exclude_box_ids:
+        boxes.pop(box_id, None)
+    filtered["boxes"] = boxes
+    return filtered
+
+
+def write_standard_ssl_to_path(
+    context: Dict[str, Any],
+    ssl_path: str,
+    *,
+    exclude_box_ids: Optional[Set[str]] = None,
+) -> str:
     os.makedirs(os.path.dirname(ssl_path) or ".", exist_ok=True)
-    ssl_text = format_standard_ssl(context)
+    ssl_text = format_standard_ssl(context_for_ssl_export(context, exclude_box_ids))
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(ssl_text)
     print(f"✅ SSL exported: {ssl_path}")

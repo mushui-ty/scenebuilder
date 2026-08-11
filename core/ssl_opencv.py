@@ -5,17 +5,40 @@ from __future__ import annotations
 import copy
 import os
 import warnings
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation as SciRotation
 
 try:
     from . import geometry_opencv as geo_cv
+except ImportError:
+    from core import geometry_opencv as geo_cv  # type: ignore
+
+try:
     from .util_data import _ssl_fmt_list, _ssl_fmt_num
 except ImportError:
-    import geometry_opencv as geo_cv  # type: ignore
     from util_data import _ssl_fmt_list, _ssl_fmt_num  # type: ignore
+
+try:
+    from .util_data import context_for_ssl_export
+except ImportError:
+    try:
+        from util_data import context_for_ssl_export  # type: ignore
+    except ImportError:
+        def context_for_ssl_export(
+            context: Dict[str, Any],
+            exclude_box_ids: Optional[Set[str]] = None,
+        ) -> Dict[str, Any]:
+            """Return context copy with excluded furniture boxes removed for SSL export."""
+            if not exclude_box_ids:
+                return context
+            filtered = dict(context)
+            boxes = dict(context.get("boxes") or {})
+            for box_id in exclude_box_ids:
+                boxes.pop(box_id, None)
+            filtered["boxes"] = boxes
+            return filtered
 
 SSL_OPENCV_FILENAME = "ssl_opencv.txt"
 OA_FRONT_LOCAL = np.array([0.0, -1.0, 0.0], dtype=float)
@@ -248,11 +271,14 @@ def write_opencv_ssl(
     camera_position,
     look_at_target,
     world_up=(0.0, 0.0, 1.0),
+    *,
+    exclude_box_ids: Optional[Set[str]] = None,
 ) -> str:
     """Write ``ssl_opencv.txt`` under ``output_dir`` (OpenCV camera reference frame)."""
     os.makedirs(output_dir, exist_ok=True)
+    export_ctx = context_for_ssl_export(context, exclude_box_ids)
     opencv_ctx, world_up_cam = build_opencv_ssl_context(
-        context,
+        export_ctx,
         camera_position,
         look_at_target,
         world_up,

@@ -3058,15 +3058,28 @@ def identify_topdown_occluding_box_ids(
             continue
 
         bottom_z = float(center[2]) - float(scale[2]) / 2.0
+        top_z = float(center[2]) + float(scale[2]) / 2.0
         xy_area = abs(float(scale[0]) * float(scale[1]))
         label = str(box.get("label") or box.get("caption") or "").lower()
 
-        if bottom_z >= bottom_threshold and xy_area >= min_xy_area:
+        # Use top or bottom: thin ceiling fixtures can have bottom below the band while
+        # still blocking the entire top-down depth pass (e.g. large ceiling panels).
+        in_upper_band = bottom_z >= bottom_threshold or top_z >= bottom_threshold
+        if in_upper_band and xy_area >= min_xy_area:
+            excluded.add(box_id)
+            continue
+
+        large_footprint_ratio = float(
+            config.get("topdown_occluder_large_footprint_ratio", 0.25)
+        )
+        near_ceiling_top = wall_z_max - margin_m * 4
+        if xy_area >= floor_area * large_footprint_ratio and top_z >= near_ceiling_top:
             excluded.add(box_id)
             continue
 
         if any(kw in label for kw in TOPDOWN_OCCLUDER_LABEL_KEYWORDS):
-            if bottom_z >= wall_z_max - margin_m * 2 and xy_area >= keyword_min_xy:
+            kw_band = wall_z_max - margin_m * 2
+            if (bottom_z >= kw_band or top_z >= kw_band) and xy_area >= keyword_min_xy:
                 excluded.add(box_id)
 
     return excluded
@@ -3084,3 +3097,24 @@ def describe_topdown_occluding_boxes(
         name = box.get("label") or box.get("caption") or box.get("class") or box_id[:8]
         labels.append(str(name))
     return labels
+
+
+def resolve_topdown_exclude_box_ids(
+    context: Dict[str, Any],
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    enabled: bool = True,
+    log_prefix: str = "top-down view",
+) -> Optional[Set[str]]:
+    """Return box IDs to skip when building a downward-looking scene (or None)."""
+    if not enabled:
+        return None
+    excluded = identify_topdown_occluding_box_ids(context, config)
+    if excluded:
+        labels = describe_topdown_occluding_boxes(context, excluded)
+        print(
+            f"🚫 Skipping {len(excluded)} ceiling occluder(s) for {log_prefix}: "
+            + ", ".join(labels)
+        )
+        return excluded
+    return None

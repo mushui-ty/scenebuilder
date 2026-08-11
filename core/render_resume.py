@@ -216,8 +216,6 @@ def _visible_geometry_artifacts_ok(
     export_point_cloud: bool,
     export_voxel: bool,
 ) -> bool:
-    if not _visibility_json_ok(view_dir):
-        return False
     return _visible_geometry_ok(
         view_dir,
         export_glb=export_glb,
@@ -318,14 +316,6 @@ def missing_view_artifacts(
         missing.add("glb")
     if visible_geometry and export_point_cloud and not _visible_ply_ok(view_dir):
         missing.add("ply")
-    if visible_geometry and (export_glb or export_point_cloud or export_voxel):
-        if not _visibility_json_ok(view_dir):
-            if export_glb:
-                missing.add("glb")
-            if export_point_cloud:
-                missing.add("ply")
-            if export_voxel:
-                missing.add("voxel")
     if export_point_cloud and not pano and not _planar_faces_ok(view_dir):
         missing.add("planar")
     if visible_geometry and export_voxel and not _voxel_ok(view_dir):
