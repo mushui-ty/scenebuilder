@@ -224,6 +224,23 @@ def build_sequence_auto_view_spec(
     }
 
 
+def _closest_path_index(points: Sequence[Sequence[float]], center_xy: Sequence[float]) -> int:
+    """Return index of the path point whose XY is closest to ``center_xy``."""
+    if not points:
+        return 0
+    cx, cy = float(center_xy[0]), float(center_xy[1])
+    best_idx = 0
+    best_dist = float("inf")
+    for idx, pt in enumerate(points):
+        dx = float(pt[0]) - cx
+        dy = float(pt[1]) - cy
+        dist = dx * dx + dy * dy
+        if dist < best_dist:
+            best_dist = dist
+            best_idx = idx
+    return best_idx
+
+
 def build_auto_views_from_path(
     path_points_ssl: Sequence[Sequence[float]],
     context: Dict[str, Any],
@@ -254,7 +271,7 @@ def build_auto_views_from_path(
         specs[name] = spec
         names.append(name)
 
-    seq_idx = rng.randrange(n)
+    seq_idx = _closest_path_index(points, bbox_center)
     seq_spec = build_sequence_auto_view_spec(
         seq_idx, points[seq_idx], bbox_center, rng, width=width, height=height
     )

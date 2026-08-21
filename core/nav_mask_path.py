@@ -7,12 +7,12 @@ import math
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import imageio.v2 as imageio
 import numpy as np
 from scipy import ndimage
 from shapely.geometry import LineString, Point, Polygon
 
 try:
+    from . import util
     from .floor_path_utils import (
         MIN_PATH_POINTS,
         compute_path_point_inward_xy,
@@ -20,6 +20,7 @@ try:
         pixel_points_to_ssl_ground,
     )
 except ImportError:
+    import util  # type: ignore
     from floor_path_utils import (  # type: ignore
         MIN_PATH_POINTS,
         compute_path_point_inward_xy,
@@ -92,7 +93,7 @@ def build_semantic_category_masks(
     with open(semantic_json_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
-    img = imageio.imread(semantic_png_path)
+    img = util.read_image_array(semantic_png_path)
     rgb = img[..., :3] if img.ndim == 3 else np.stack([img] * 3, axis=-1)
     palette, categories = _build_semantic_palette(meta)
     if len(palette) <= 1:
@@ -186,7 +187,7 @@ def build_nav_mask_from_depth(
     except ImportError:
         import util  # type: ignore
 
-    depth_u16 = imageio.imread(depth_png_path)
+    depth_u16 = util.read_image_array(depth_png_path)
     depth_m = util.decode_depth_uint16(depth_u16, float(depth_scale))
     ref_depth = _reference_floor_depth_m(camera_para)
     tol = float(tolerance_m)
@@ -573,7 +574,7 @@ def sample_path_on_nav_mask(
 def save_nav_mask_png(nav_mask: np.ndarray, output_path: str) -> None:
     vis = np.zeros((*nav_mask.shape, 3), dtype=np.uint8)
     vis[nav_mask] = (0, 220, 80)
-    imageio.imwrite(output_path, vis)
+    util.write_image_array(output_path, vis)
 
 
 def run_nav_mask_floor_path(

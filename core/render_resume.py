@@ -142,18 +142,28 @@ def _frame_artifacts_ok(
     return True
 
 
+def _pano_dir_for(view_dir: str) -> str:
+    parent = os.path.dirname(view_dir.rstrip(os.sep)) or view_dir
+    return os.path.join(parent, f"{os.path.basename(view_dir.rstrip(os.sep))}_pano")
+
+
 def _pano_complete(
     view_dir: str,
     *,
     semantic: bool,
     depth: bool,
 ) -> bool:
-    parent = os.path.dirname(view_dir.rstrip(os.sep)) or view_dir
-    pano_dir = os.path.join(parent, f"{os.path.basename(view_dir.rstrip(os.sep))}_pano")
-    frames = list_primary_frames(pano_dir)
+    frames = list_primary_frames(_pano_dir_for(view_dir))
     if not frames:
         return False
     return all(_frame_artifacts_ok(p, semantic=semantic, depth=depth) for p in frames)
+
+
+def _pano_planar_ok(view_dir: str, *, n_expected: int = 1) -> bool:
+    frames = list_primary_frames(_pano_dir_for(view_dir))
+    if len(frames) < n_expected:
+        return False
+    return all(_planar_frame_ok(p) for p in frames)
 
 
 def _visible_glb_ok(view_dir: str) -> bool:
@@ -187,10 +197,37 @@ def _visibility_json_ok(view_dir: str) -> bool:
     return os.path.isfile(os.path.join(view_dir, "visibility.json"))
 
 
+def _planar_frame_ok(png_path: str) -> bool:
+    view_dir = os.path.dirname(png_path)
+    base = os.path.splitext(os.path.basename(png_path))[0]
+    if os.path.isfile(os.path.join(view_dir, f"{base}_planar_faces.json")):
+        return True
+    return os.path.isfile(os.path.join(view_dir, f"{base}_lines.png"))
+
+
 def _planar_faces_ok(view_dir: str) -> bool:
     if os.path.isfile(os.path.join(view_dir, "planar_faces.json")):
         return True
+    if not os.path.isdir(view_dir):
+        return False
     return any(n.endswith("_lines.png") for n in os.listdir(view_dir))
+
+
+def _planar_frames_ok(
+    view_dir: str,
+    view_name: str,
+    *,
+    n_expected: int = 1,
+) -> bool:
+    if view_name == "topdown":
+        png = os.path.join(view_dir, "topdown.png")
+        if not os.path.isfile(png):
+            return False
+        return _planar_frame_ok(png)
+    frames = list_primary_frames(view_dir)
+    if len(frames) < n_expected:
+        return False
+    return all(_planar_frame_ok(p) for p in frames)
 
 
 def _visible_geometry_ok(
@@ -272,6 +309,30 @@ def _camera_para_ok(
     return len(list_primary_frames(view_dir)) >= n_expected
 
 
+def _is_video_view(auto_spec: Optional[Dict[str, Any]] = None) -> bool:
+    return bool((auto_spec or {}).get("video"))
+
+
+def _is_tangent_video_view(auto_spec: Optional[Dict[str, Any]] = None) -> bool:
+    if not _is_video_view(auto_spec):
+        return False
+    trajectory = (auto_spec or {}).get("video_trajectory")
+    if trajectory == "tangent":
+        return True
+    if trajectory is None and (auto_spec or {}).get("pano_only"):
+        return True
+    return False
+
+
+def _is_center_video_view(auto_spec: Optional[Dict[str, Any]] = None) -> bool:
+    return _is_video_view(auto_spec) and (auto_spec or {}).get("video_trajectory") == "center"
+
+
+def _artifact_view_dir(view_dir: str, auto_spec: Optional[Dict[str, Any]] = None) -> str:
+    """Primary geometry directory (perspective sequence root for all video views)."""
+    return view_dir
+
+
 def missing_view_artifacts(
     y_dir: str,
     view_name: str,
@@ -282,6 +343,9 @@ def missing_view_artifacts(
 ) -> set:
     """Return artifact keys still missing for this view: render / glb / ply / planar / voxel / ssl / pano."""
     missing: set = set()
+    is_video = _is_video_view(auto_spec)
+    is_tangent_video = _is_tangent_video_view(auto_spec)
+    is_center_video = _is_center_video_view(auto_spec)
     semantic = bool(job.get("semantic"))
     depth = bool(job.get("depth"))
     pano = bool(job.get("pano"))
@@ -292,39 +356,73 @@ def missing_view_artifacts(
     view_cameras = job.get("view_cameras") or {}
 
     view_dir = view_dir_for(y_dir, view_name, progress)
+    artifact_dir = _artifact_view_dir(view_dir, auto_spec)
     n_expected = 1 if view_name == "topdown" else expected_frame_count(
         view_name, view_cameras, auto_spec
     )
 
-    if not _render_frames_ok(
-        view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
-    ):
-        missing.add("render")
+    if is_tangent_video:
+        if not _render_frames_ok(
+            view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
+        ):
+            missing.add("render")
+        if semantic and not _semantic_frames_ok(
+            view_dir, view_name, n_expected=n_expected
+        ):
+            missing.add("semantic")
+        if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
+            missing.add("camera_para")
+        if not _pano_complete(view_dir, semantic=False, depth=False):
+            missing.add("pano")
+    elif is_center_video:
+        if not _render_frames_ok(
+            view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
+        ):
+            missing.add("render")
+        if semantic and not _semantic_frames_ok(
+            view_dir, view_name, n_expected=n_expected
+        ):
+            missing.add("semantic")
+        if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
+            missing.add("camera_para")
+    else:
+        if not _render_frames_ok(
+            view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
+        ):
+            missing.add("render")
 
-    if semantic and not _semantic_frames_ok(
-        view_dir, view_name, n_expected=n_expected
-    ):
-        missing.add("semantic")
+        if semantic and not _semantic_frames_ok(
+            view_dir, view_name, n_expected=n_expected
+        ):
+            missing.add("semantic")
 
-    if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
-        missing.add("camera_para")
+        if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
+            missing.add("camera_para")
 
-    if not os.path.isfile(os.path.join(view_dir, "ssl_opencv.txt")):
+    ssl_dir = view_dir
+    if not os.path.isfile(os.path.join(ssl_dir, "ssl_opencv.txt")):
         missing.add("ssl")
 
-    if visible_geometry and export_glb and not _visible_glb_ok(view_dir):
+    if visible_geometry and export_glb and not _visible_glb_ok(artifact_dir):
         missing.add("glb")
-    if visible_geometry and export_point_cloud and not _visible_ply_ok(view_dir):
+    if visible_geometry and export_point_cloud and not _visible_ply_ok(artifact_dir):
         missing.add("ply")
-    if export_point_cloud and not pano and not _planar_faces_ok(view_dir):
-        missing.add("planar")
-    if visible_geometry and export_voxel and not _voxel_ok(view_dir):
-        missing.add("voxel")
-    # topdown view worker pops pano and never produces a pano directory
-    if pano and view_name != "topdown" and not _pano_complete(
-        view_dir, semantic=semantic, depth=depth
+    if export_point_cloud and not is_video and not _planar_frames_ok(
+        view_dir, view_name, n_expected=n_expected
     ):
-        missing.add("pano")
+        missing.add("planar")
+    if visible_geometry and export_voxel and not _voxel_ok(artifact_dir):
+        missing.add("voxel")
+    if is_tangent_video and export_point_cloud and not _pano_planar_ok(
+        view_dir, n_expected=n_expected
+    ):
+        missing.add("pano_planar")
+    # topdown view worker pops pano and never produces a pano directory
+    if pano and view_name != "topdown" and not is_video:
+        if not _pano_complete(view_dir, semantic=semantic, depth=depth):
+            missing.add("pano")
+        elif export_point_cloud and not _pano_planar_ok(view_dir, n_expected=n_expected):
+            missing.add("pano_planar")
     return missing
 
 
@@ -340,7 +438,9 @@ def apply_partial_resume_to_kwargs(job: Dict[str, Any], missing: set) -> Dict[st
     export_visible_point_cloud = (
         want_ply and visible_geometry and ("ply" in missing)
     )
-    export_planar_faces = want_ply and ("planar" in missing)
+    export_planar_faces = want_ply and (
+        ("planar" in missing) or ("pano_planar" in missing)
+    )
 
     return {
         "export_glb": export_glb,
@@ -351,7 +451,9 @@ def apply_partial_resume_to_kwargs(job: Dict[str, Any], missing: set) -> Dict[st
         "visible_geometry": visible_geometry,
         "render_semantic": (bool(job.get("semantic")) or visible_geometry) and ("semantic" in missing),
         "render_depth": bool(job.get("depth")) and ("render" in missing),
-        "pano": bool(job.get("pano")) and ("pano" in missing),
+        "pano": bool(job.get("pano")) and (
+            ("pano" in missing) or ("pano_planar" in missing)
+        ),
         "pano_resolution": int(job.get("pano_resolution", 4096)),
         "skip_render": "render" not in missing,
         "write_ssl": "ssl" in missing,

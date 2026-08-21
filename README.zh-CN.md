@@ -85,7 +85,7 @@ ctx.render_view(
 面向数据生产与 benchmark，`render_ssl.py` 是高层入口。一次调用可以：
 
 - **像素对齐**规范化俯视坐标，并 **规划地板覆盖路径**
-- 沿路径 **自动生成相机视角**（`--views auto`），也支持预设 / 自定义相机
+- 沿路径 **自动生成相机视角**（`--views auto`），也支持 **`--video` 平滑闭环视频轨迹**、预设 / 自定义相机
 - **导出几何**：各视角可见 GLB / PLY / 256³ 体素，以及输出根目录的全场景 holo 导出
 - **导出监督信号**：语义 mask、米制深度 + 法线、等距圆柱全景图
 - **断点续跑**（用 `--no-resume` 强制全量重跑）
@@ -175,7 +175,10 @@ out_normalized/
 │   ├── planar_faces.json             # [--ply]
 │   ├── glb/                          # [--visible_geometry --glb]
 │   │   ├── scene_visible.glb
-│   │   └── scene_visible_opencv.glb
+│   │   ├── scene_visible_opencv.glb
+│   │   ├── scene_visible_viewvis_point_tri.npz   # 序列：每三角形 × 每相机点级可见性
+│   │   ├── scene_visible_viewvis_object_tri.npz # 序列：每三角形 × 每相机物体级可见性
+│   │   └── scene_visible_viewvis_tri.json
 │   ├── pointcloud/                   # [--visible_geometry --ply]
 │   │   ├── scene_visible.ply
 │   │   ├── scene_visible_opencv.ply
@@ -199,13 +202,73 @@ out_normalized/
 │   └── {timestamp}_pano_camera_para.json
 ├── auto_path_0008_seq/               # auto 三帧序列
 │   ├── {timestamp}_000.png … _002.png
-│   └── …（每帧 depth / semantic / 可见几何）
-└── auto_path_0008_seq_pano/        # [--pano] 序列对应的全景目录（以首帧为参考）
+│   ├── {timestamp}_*_depth.png       # [--depth]
+│   ├── glb/scene_visible.glb
+│   ├── glb/scene_visible_viewvis_*_tri.npz  # [--visible_geometry --glb]
+│   ├── pointcloud/scene_visible.ply         # [--visible_geometry --ply]
+│   ├── pointcloud/scene_visible_viewvis_*.npz
+│   └── …
+├── video_tangent_{N}/                # [--video] 切线轨迹：透视 RGB + 始终输出全景
+│   ├── {timestamp}.png …             # [--depth] [--semantic] 等同普通序列
+│   └── …
+├── video_tangent_{N}_pano/           # 切线轨迹全景（始终输出，与 --pano 无关）
+├── video_center_{N}/                 # [--video] 看向场景中心：仅透视 RGB
+│   └── …
 ```
+
+## Video 轨迹（`--video`）
+
+`--video` 沿 `topdown_normalized/` 地板闭环路径生成 **两条**平滑序列（帧数 N 按路径弧长自动计算，默认 **每帧约 0.2m**，`--video_spacing` 可调），与 sparse auto 视角（`auto_path_*`）独立：
+
+| 轨迹 | 目录 | RGB | 全景 |
+| ---- | ---- | --- | ---- |
+| **切线** | `video_tangent_{N}/` + `video_tangent_{N}_pano/` | 透视 RGB；`--depth` / `--semantic` 按 CLI | **始终输出**（与 `--pano` 无关）；看向为**切线为主 + 平滑偏向房间中心** |
+| **中心** | `video_center_{N}/` | 透视 RGB；`--depth` / `--semantic` 按 CLI | **不输出**（即使传 `--pano`） |
+
+| 模式 | 命令 | 流程 |
+| ---- | ---- | ---- |
+| **仅 video** | `--video`（不传 `--views`） | `topdown_normalized` + 路径规划 → 只渲染 `video_tangent_{N}` / `video_center_{N}`；**跳过** sparse auto 与常规 `topdown/` |
+| **auto + video** | `--views auto --video` | 保留 sparse auto + `topdown/` + 追加 video |
+
+帧数：默认按路径弧长 ÷ `--video_spacing`（0.2m）自动计算；也可 `--video_frames N` 固定每条轨迹帧数（≥3）。路径点统一按 **SSL XY 逆时针** 排序。
+
+轨迹 manifest 写入 `Y/auto_views.json`（含 `camera_positions` / `look_at_targets`）；resume 复用 manifest。**几何导出**（`--glb`、`--ply`、`--visible_geometry`、`--voxel` 等）仍按 CLI 正常控制。
+
+```bash
+python render_ssl.py --ssl scene.txt --output out --video \
+  --glb --ply --visible_geometry --video_spacing 0.2
+```
+
+详见 [§5.1.1 Video 轨迹](docs/doc.zh-CN.md#511-video-轨迹--video)。
 
 完整目录说明见 [§6 输出目录与坐标系](docs/doc.zh-CN.md#6-输出目录与坐标系)。
 
 也支持 `--camera_position`、`--look_at`、可选 `--up_vector` 自定义相机；视线与默认 up `[0,0,1]` 共线时会自动回退为 `[0,1,0]`。
+
+## 按视角分解可见几何（`split_viewvis_geometry.py`）
+
+多帧序列（`*_seq/`，如 `left_seq`）会导出**各帧视锥并集**的 `scene_visible.ply` / `scene_visible.glb`，以及 `viewvis` NPZ sidecar（每行一个点/三角形，每列一帧相机）。矩阵含义见 [§7.1.2](docs/doc.zh-CN.md#712-多相机序列可见性-sidecarviewvis)。
+
+使用 **`split_viewvis_geometry.py`** 将合并文件拆成**每帧一个 PLY/GLB**，只保留该视角下可见的元素：
+
+```bash
+# 点云（世界系或 OpenCV 副本，行序一致）
+python split_viewvis_geometry.py left_seq/pointcloud/scene_visible_opencv.ply view
+python split_viewvis_geometry.py left_seq/pointcloud/scene_visible.ply object
+
+# 网格（世界系或 OpenCV GLB）
+python split_viewvis_geometry.py left_seq/glb/scene_visible_opencv.glb view
+python split_viewvis_geometry.py left_seq/glb/scene_visible.glb object
+```
+
+| 模式 | 使用的 NPZ | 含义 |
+| ---- | ---------- | ---- |
+| **`view`** | `scene_visible_viewvis_point*.npz` | **点级遮挡** — 视锥内且未被遮挡（深度图 / 射线） |
+| **`object`** | `scene_visible_viewvis_object*.npz` | **物体级导出规则** — 保留在该相机下判定为可见的物体上的全部采样点 |
+
+脚本会在同目录（`pointcloud/` 或 `glb/`）自动查找 sidecar。输出：输入文件旁的 `{文件名}_by_{模式}/`，内含每帧 `{相机时间戳}.ply` / `.glb` 及 `manifest.json`（保留数量统计）。实现：`core/viewvis_split.py`。
+
+可选 `-o /path/to/output_dir` 指定输出目录。
 
 ## 文档
 
@@ -219,7 +282,7 @@ out_normalized/
 | 2 | SSL 格式与坐标系 | [§2](docs/doc.zh-CN.md#2-ssl-坐标系与实体约定) | [§2](docs/doc.en.md#2-ssl-coordinate-system-and-entities) |
 | 3 | 快速开始与示例 | [§3](docs/doc.zh-CN.md#3-快速开始) | [§3](docs/doc.en.md#3-quick-start) |
 | 4 | API 参考（`topdown_view` / `render_view` / `render_ssl`） | [§4](docs/doc.zh-CN.md#4-api-参考) | [§4](docs/doc.en.md#4-api-reference) |
-| 5 | 自动视角与地板路径（`--views auto`） | [§5](docs/doc.zh-CN.md#5-高级工作流) | [§5](docs/doc.en.md#5-advanced-workflows) |
+| 5 | 自动视角、Video 轨迹与地板路径 | [§5](docs/doc.zh-CN.md#5-高级工作流) | [§5](docs/doc.en.md#5-advanced-workflows) |
 | 6 | 输出目录、`c2w` 与导出产物 | [§6](docs/doc.zh-CN.md#6-输出目录与坐标系) | [§6](docs/doc.en.md#6-output-layout-and-coordinate-systems) |
 | 7 | 语义 / 深度 / 体素详解 | [§7](docs/doc.zh-CN.md#7-导出产物详解) | [§7](docs/doc.en.md#7-export-artifacts) |
 

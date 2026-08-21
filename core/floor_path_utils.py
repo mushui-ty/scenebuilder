@@ -2,10 +2,39 @@
 
 from __future__ import annotations
 
+import math
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 MIN_PATH_POINTS = 8
+
+
+def _signed_area_xy_ring(xy: List[List[float]]) -> float:
+    """Signed area in SSL XY; positive = counter-clockwise (+Z up)."""
+    if len(xy) < 3:
+        return 0.0
+    area = 0.0
+    for i in range(len(xy)):
+        x0, y0 = float(xy[i][0]), float(xy[i][1])
+        x1, y1 = float(xy[(i + 1) % len(xy)][0]), float(xy[(i + 1) % len(xy)][1])
+        area += x0 * y1 - x1 * y0
+    return 0.5 * area
+
+
+def ensure_closed_path_ccw_ssl(
+    path_points_ssl: Sequence[Sequence[float]],
+) -> List[List[float]]:
+    """Return path waypoints ordered counter-clockwise in SSL XY (+Z up)."""
+    points = [list(p) for p in path_points_ssl]
+    if len(points) < 3:
+        return points
+    if math.hypot(points[0][0] - points[-1][0], points[0][1] - points[-1][1]) < 1e-6:
+        ring = points[:-1]
+    else:
+        ring = points
+    if _signed_area_xy_ring(ring) < 0.0:
+        ring = list(reversed(ring))
+    return [list(p) for p in ring]
 
 
 def _resolve_ssl_path(output_dir: str) -> Optional[str]:

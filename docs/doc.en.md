@@ -341,6 +341,7 @@ See **§4** for parameters; **§6** for output directories; **§7** for export f
 | Custom camera perspective | `BpySceneCtx.render_view` (§4.2) |
 | Batch multi-view / benchmark | `render_ssl()` or `render_ssl.py` (§4.3) |
 | Auto path-driven views | `render_ssl(..., views="auto")` (§5.1, includes normalized_topdown) |
+| Video closed-loop trajectories | `render_ssl(..., video=True)` or `--video` (§5.1.1) |
 
 
 
@@ -577,6 +578,8 @@ def render_ssl(
     auto_fov: bool = True,
     manual_fov: Optional[float] = None,
     resume: bool = True,               # resume from checkpoint; CLI uses --no-resume to disable
+    video: bool = False,               # floor-path video trajectories (§5.1.1)
+    video_frame_spacing: float = 0.2,  # arc-length spacing between video pano frames (m)
 ) -> Tuple[str, str, Optional[dict]]
 ```
 
@@ -612,6 +615,8 @@ def render_ssl(
 | `--no_floor_path` | `floor_path=False` | Skip path sampling in `topdown_normalized/` |
 | `--samples N` | `samples` | Blender sample count |
 | `--no-resume` | `resume=False` | Disable resume, force re-render completed views |
+| `--video` | `video=True` | Tangent video along floor path (§5.1.1); alone or with `--views auto` |
+| `--video_spacing M` | `video_frame_spacing` | Arc-length spacing between video pano frames (m), default 0.2; N≈loop length/M |
 
 
 **Preset view names** (`views` list elements): `topdown`, `front`, `behind`, `left`, `right`, `leftfront`, `rightfront`, `leftbehind`, `rightbehind`, `left_seq`. Camera positions are auto-computed from scene `meta` (similar rules to §3.2), `look_at` is `[center_x, center_y, z_max/2]`.
@@ -620,7 +625,9 @@ def render_ssl(
 | Parameter | Description |
 | ----------------------------------- | ------------------------------------------------------------------------------ |
 | `views=None` | Only writes `data.json` / optional full-scene geometry (needs `holo_geometry`), **renders no views** |
-| `views="auto"` | Forces `normalized_topdown=True` + `floor_path=True`; renders `topdown` + auto-generated path views |
+| `views="auto"` | Forces `normalized_topdown=True` + `floor_path=True`; renders `topdown` + sparse auto path views (§5.1) |
+| `video=True` / `--video` | Forces `normalized_topdown=True` + `floor_path=True`; renders video trajectories (§5.1.1). Alone: skips sparse auto and `topdown/`; with `views="auto"`: appends video |
+| `video_frame_spacing` / `--video_spacing` | Arc-length spacing between video pano frames (m), default 0.2; frame count from closed path length |
 | `normalized_topdown` | Sole output root `Y={output_root}_normalized`; pixel-align SSL first, then `Y/topdown_normalized/` |
 | `export_glb` / `export_point_cloud` / `export_voxel` | Geometry type flags; **do not write alone**, require `visible_geometry` (per-view) or `holo_geometry` (root) |
 | `visible_geometry` | Per-view frustum GLB/PLY/voxels (§7.1 / §7.5) |
@@ -700,7 +707,8 @@ Equivalent to `render_ssl(..., normalized_topdown=True, views=None)`. When `floo
 | `floor_path` / `--no_floor_path` | Whether to run nav_mask path in `topdown_normalized/` (default True) |
 | `topdown_normalized/` resolution | **Fixed 1000×1000**, not configurable (SpatialFactory Stage 1) |
 | `normalized_topdown_show_ceiling` | Whether to render ceiling in normalization pass |
-| `views="auto"` | **Implicitly** `normalized_topdown=True` + `floor_path=True`, plus extra `topdown/` + auto views (§5.1) |
+| `views="auto"` | **Implicitly** `normalized_topdown=True` + `floor_path=True`, plus extra `topdown/` + sparse auto views (§5.1) |
+| `--video` | **Implicitly** `normalized_topdown=True` + `floor_path=True`; video-only renders video trajectories (§5.1.1); with `--views auto` appends video |
 
 
 Can be **combined** with `--views topdown front left_seq`: normalize first, then render regular multi-view under `Y/` (coordinate system is already normalized SSL).
@@ -774,7 +782,7 @@ python scenebuilder/render_ssl.py --ssl scene.txt \
 
 **Type B — Three-frame sequence (one** `render_view`** call)**
 
-- **Randomly** pick one point `(x, y, 0)` from `n` waypoints, index `k`
+- Pick the waypoint whose **XY is closest to the scene bbox center** among `n` points, index `k`
 - Fixed camera position `(x, y, 1.5)`; initial `look_at` = bbox center
 - Three-frame `look_at` (same camera position):
   - Frame 1: yaw left **10° ~ 40°**
@@ -795,8 +803,8 @@ In auto mode, Step 3 `**topdown/**`, `**auto_path_***`, `**auto_path_*_seq**` al
 | `--depth` | ✅ | ✅ per frame | ✅ |
 | `--semantic` | ✅ | ✅ per frame | ✅ |
 | `--pano` | ✅ | ✅ per frame | ❌ |
-| `--glb` + `--visible_geometry` | ✅ | ✅ multi-frame union | ✅ |
-| `--ply` + `--visible_geometry` | ✅ | ✅ multi-frame union | ✅ |
+| `--glb` + `--visible_geometry` | ✅ | ✅ multi-frame union + `viewvis_*_tri.npz` (§7.1.2) | ✅ |
+| `--ply` + `--visible_geometry` | ✅ | ✅ multi-frame union + `viewvis_*.npz` (§7.1.2) | ✅ |
 | `--voxel` + `--visible_geometry` | ✅ | ✅ multi-frame union | ✅ |
 | `--ply` (no visible_geometry) | ✅ planar_faces | ✅ per frame | ✅ |
 
@@ -814,6 +822,51 @@ out_normalized/
 ```
 
 > Manual sequences (e.g. `left_seq`) still use directory name `{timestamp}_seq/`.
+
+
+
+### 5.1.1 Video trajectories (`--video`)
+
+One smooth **tangent** closed-loop sequence along `path_points_ssl` from `topdown_normalized/` (`core/video_views.py`). Independent of §5.1 sparse auto.
+
+#### Two usage modes
+
+| Mode | CLI | Step 3 renders |
+| ---- | --- | -------------- |
+| **Video only** | `--video` (omit `--views`) | Only `video_{N}` / `video_{N}_pano/`; **no** sparse auto, **no** regular `topdown/` |
+| **Auto + video** | `--views auto --video` | Regular `topdown/` + sparse auto + video |
+
+Both modes implicitly enable `normalized_topdown=True` and `floor_path=True`.
+
+#### Frames and trajectory
+
+- **N = round(closed-path arc length / spacing)**, default spacing **0.2 m** (`--video_spacing`), minimum 3 frames
+- Directory `video_{N}`; pano frames in **`video_{N}_pano/`**
+- Look along path **tangent**; height `z ∈ [1.0, 1.5]` m and FOV `60°–90°` sampled once each
+
+#### RGB vs geometry
+
+| Kind | Video behavior |
+| ---- | -------------- |
+| **RGB** | **Pano only** (equirectangular); ignores `--pano` / `--depth` / `--semantic` |
+| **Geometry** | Still controlled by `--glb` / `--ply` / `--visible_geometry` / `--voxel`; written under `video_{N}_pano/` |
+
+Manifest → `Y/auto_views.json`; resume reuses trajectories without re-randomizing.
+
+```bash
+python scenebuilder/render_ssl.py --ssl scene.txt --output out --video \
+  --glb --ply --visible_geometry --video_spacing 0.2
+```
+
+#### Output example (video only)
+
+```
+out_normalized/
+├── topdown_normalized/
+├── auto_views.json
+├── video_40/
+└── video_40_pano/
+```
 
 
 
@@ -929,9 +982,11 @@ Y/                                    # {output} or {output}_normalized
 │   ├── nav_mask*.png                 # [floor_path]
 │   ├── floor_path_ssl.txt            # [floor_path]
 │   └── topdown_floor_path.png        # [floor_path]
-├── auto_views.json                   # [--views auto]
+├── auto_views.json                   # [--views auto] or [--video]
 ├── auto_path_0000/ …                 # [--views auto] single frame
 ├── auto_path_0008_seq/               # [--views auto] three-frame sequence
+├── video_{N}/                        # [--video]
+├── video_{N}_pano/                   # [--video] pano sequence
 ├── {timestamp}_seq/                  # left_seq etc. manual sequences
 ├── topdown/                          # [--views topdown] 1024² regular top-down
 │   ├── topdown.png
@@ -993,7 +1048,7 @@ Each view is constructed/rendered in world (or normalized) SSL. With `--visible_
   - Normals: `n_cam = normalize(R @ n_world)` (rotate only, no translation)
   - ASCII vertices are OpenCV `(ox, oy, oz, nx, ny, nz)` (no glTF axis transform)
 - OpenCV axes: +X right, +Y down, +Z into scene.
-- `**left_seq**` and other multi-frame sequences: OpenCV copies use **first frame** camera as reference; visible geometry is union of all frame frustums.
+- `**left_seq**` and other multi-frame sequences: OpenCV copies use **first frame** camera as reference; visible geometry is union of all frame frustums. With `--visible_geometry`, sequence dirs also get `viewvis` sidecars under `pointcloud/` (`--ply`) and/or `glb/` (`--glb`) — §7.1.2.
 - `metadata_visible.json` / `metadata.json` may record `"path_opencv": "scene_visible_opencv.ply"` etc. for merged point clouds.
 - `planar_faces.json`, depth/semantic PNGs still use world SSL or pixel coords aligned with render image.
 - Per-view directories **no longer** write `{view}/ssl.txt` (scene SSL only at output root Y); each view dir auto-writes `**ssl_opencv.txt**` (OpenCV camera frame, see §6.4).
@@ -1321,6 +1376,7 @@ Implementation: `core/ssl_opencv.py`; called by `BpySceneCtx.write_opencv_ssl_fo
 | `output_root/pointcloud/`      | World SSL | **All** objects in scene (`--holo_geometry --ply`, post stage) |
 | `{view}/pointcloud/*.ply`        | World SSL | **Visible** objects for that view (requires `--visible_geometry --ply`) |
 | `{view}/pointcloud/*_opencv.ply` | OpenCV (that view/first-frame camera) | Same geometry as above, in OpenCV camera frame |
+| `{seq}/pointcloud/scene_visible_viewvis_*.npz` | N/A (0/1 flags) | **Multi-camera sequence only** (`*_seq/`): per-point visibility vs each frame; row *i* aligns with PLY line *i*+1 (see §7.1.2) |
 | `output_root/voxel/`           | World SSL | Full-scene 256³ occupancy (`--holo_geometry --voxel`) |
 | `{view}/voxel/occupancy_*.npz`   | World SSL / OpenCV camera | Visible 256³ occupancy for that view (`--visible_geometry --voxel`) |
 | `{view}/planar_faces.json`       | World SSL (3D vertices) | Wall/door/window/floor/ceiling inner surfaces (requires `--ply`) |
@@ -1427,6 +1483,87 @@ Independent from `--visible_geometry`: enable either or both (per-view visible +
 # Both
 --glb --ply --visible_geometry --holo_geometry --voxel
 ```
+
+---
+
+### 7.1.2 Multi-View Sequence Visibility Sidecars (`viewvis`)
+
+When `render_view` receives a **camera sequence** (nested lists, directory `*_seq/`) with **>1** frame and `--visible_geometry`, merged geometry is the **union** of all frame frustums (§7.1). Extra sidecar files annotate each **sample element** against each camera frame.
+
+**Not written for single-frame views.**
+
+#### Point cloud (`--visible_geometry --ply`)
+
+| File | Visibility type | `visibility[i, k] == 1` |
+| ---- | ----------------- | ------------------------ |
+| `pointcloud/scene_visible_viewvis_point.npz` | **Point-level (occlusion)** | Sample point *i* in frame *k* frustum and not occluded (depth or ray cast) |
+| `pointcloud/scene_visible_viewvis_object.npz` | **Object-level (export rule)** | Point *i*'s object passes §7.1 from camera *k* and point *i* is in frustum |
+
+Row *i* aligns with PLY vertex *i*+1 in `scene_visible.ply` / `scene_visible_opencv.ply` (same order, any coordinate frame). Metadata: `pointcloud/scene_visible_viewvis.json`.
+
+#### Mesh / GLB (`--visible_geometry --glb`)
+
+| File | Visibility type | `visibility[i, k] == 1` |
+| ---- | ----------------- | ------------------------ |
+| `glb/scene_visible_viewvis_point_tri.npz` | **Point-level (occlusion)** | Triangle *i* centroid in frustum and not occluded |
+| `glb/scene_visible_viewvis_object_tri.npz` | **Object-level (export rule)** | Triangle *i*'s object passes §7.1 from camera *k* and centroid in frustum |
+
+Row *i* is triangle *i* in **`scene_visible.glb` export order** (same loop as `export_visible_glb`: entry → record → triangle). Sample position = **triangle centroid**. One sidecar pair applies to both `scene_visible.glb` and `scene_visible_opencv.glb`. Metadata: `glb/scene_visible_viewvis_tri.json`.
+
+#### NPZ layout (point cloud or mesh)
+
+```python
+import numpy as np
+
+data = np.load("pointcloud/scene_visible_viewvis_point.npz")  # or glb/..._point_tri.npz
+vis = data["visibility"]       # uint8, shape (N, K)
+frames = data["camera_frames"] # length K
+# vis[i, k] → element i vs camera frames[k]
+```
+
+#### Requirements and performance
+
+| Item | Detail |
+| ---- | ------ |
+| Trigger | Sequence **>1** frame + `--visible_geometry` + (`--ply` and/or `--glb`) |
+| Recommended | `--depth` per frame for fast point-level sidecars (§7.4.1) |
+| Without depth | Point-level sidecars fallback to ray cast (slower) |
+| Object-level sidecars | Object ray visibility per camera + frustum; low overhead |
+| Implementation | `core/viewvis_export.py`; PLY from `export_visible_point_cloud()`, mesh from `export_visible_glb()` |
+
+Example sequence directory:
+
+```
+auto_path_0023_seq/
+├── 1735123456789.png
+├── 1735123456789_depth.png
+├── 1735123456789_camera_para.json
+├── …
+├── glb/scene_visible.glb
+├── glb/scene_visible_opencv.glb
+├── glb/scene_visible_viewvis_point_tri.npz
+├── glb/scene_visible_viewvis_object_tri.npz
+├── glb/scene_visible_viewvis_tri.json
+├── pointcloud/scene_visible.ply              # if --ply
+├── pointcloud/scene_visible_viewvis_*.npz
+└── metadata_visible.json
+```
+
+#### 7.1.3 Split union geometry by camera (`split_viewvis_geometry.py`)
+
+After §7.1.2 sidecars exist, run the standalone script to materialize **per-frame subsets** of the merged PLY/GLB (one file per `camera_frames[k]`):
+
+```bash
+python split_viewvis_geometry.py left_seq/pointcloud/scene_visible_opencv.ply view
+python split_viewvis_geometry.py left_seq/glb/scene_visible_opencv.glb object
+```
+
+| CLI mode | Sidecar | Subset rule |
+| -------- | ------- | ----------- |
+| `view` | `*_viewvis_point*.npz` | Row *i* kept for frame *k* when `visibility[i,k]==1` (point-level occlusion) |
+| `object` | `*_viewvis_object*.npz` | Row *i* kept when object-level export rule + frustum pass for frame *k* |
+
+Output directory (default): `{input_stem}_by_{mode}/` beside the input file; files named `{camera_frame}.ply` or `.glb`; `manifest.json` lists kept/total counts. Library: `core/viewvis_split.py`. See also [README § Split merged visible geometry](../README.md#split-merged-visible-geometry-by-camera-split_viewvis_geometrypy).
 
 ---
 

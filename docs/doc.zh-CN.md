@@ -341,6 +341,7 @@ ctx.normalized_topdown_view(
 | 自定义相机透视图          | `BpySceneCtx.render_view`（§4.2）                              |
 | 批量多视角 / benchmark | `render_ssl()` 或 `render_ssl.py`（§4.3）                       |
 | auto 路径驱动视角       | `render_ssl(..., views="auto")`（§5.1，内含 normalized_topdown）  |
+| video 闭环轨迹          | `render_ssl(..., video=True)` 或 `--video`（§5.1.1）              |
 
 
 
@@ -577,6 +578,8 @@ def render_ssl(
     auto_fov: bool = True,
     manual_fov: Optional[float] = None,
     resume: bool = True,               # 断点续跑；CLI 用 --no-resume 关闭
+    video: bool = False,               # 沿地板路径渲染 video 轨迹（§5.1.1）
+    video_frame_spacing: float = 0.2,  # video 帧弧长间距（米）
 ) -> Tuple[str, str, Optional[dict]]
 ```
 
@@ -612,6 +615,8 @@ def render_ssl(
 | `--no_floor_path`      | `floor_path=False`        | 跳过 `topdown_normalized/` 路径采样        |
 | `--samples N`          | `samples`                 | Blender 采样数                          |
 | `--no-resume`          | `resume=False`            | 禁用断点续跑，强制重渲染已完成视角                 |
+| `--video`              | `video=True`              | 沿地板路径渲染切线 video（§5.1.1）；可单独使用或与 `--views auto` 叠加 |
+| `--video_spacing M`    | `video_frame_spacing`     | video 全景帧弧长间距（米），默认 0.2；帧数 N≈路径周长/M |
 
 
 **预设视角名**（`views` 列表元素）：`topdown`, `front`, `behind`, `left`, `right`, `leftfront`, `rightfront`, `leftbehind`, `rightbehind`, `left_seq`。相机位置由场景 `meta` 自动推算（与 §3.2 类似规则），`look_at` 为 `[center_x, center_y, z_max/2]`。
@@ -620,7 +625,9 @@ def render_ssl(
 | 参数                                  | 说明                                                                             |
 | ----------------------------------- | ------------------------------------------------------------------------------ |
 | `views=None`                        | 只写 `data.json` / 可选全场景几何（需 `holo_geometry`），**不渲染任何视角**                                         |
-| `views="auto"`                      | 强制 `normalized_topdown=True` + `floor_path=True`；渲染 `topdown` + 路径自动生成视角       |
+| `views="auto"`                      | 强制 `normalized_topdown=True` + `floor_path=True`；渲染 `topdown` + 路径自动生成 sparse auto 视角（§5.1） |
+| `video=True` / `--video`            | 强制 `normalized_topdown=True` + `floor_path=True`；渲染 video 轨迹（§5.1.1）。单独使用时跳过 sparse auto 与 `topdown/`；与 `views="auto"` 叠加时在 auto 基础上追加 video |
+| `video_frame_spacing` / `--video_spacing` | video 全景帧弧长间距（米），默认 0.2；帧数由闭环路径长度自动计算 |
 | `normalized_topdown`                | 唯一输出根 `Y={output_root}_normalized`；先 pixel-align SSL，再 `Y/topdown_normalized/` |
 | `export_glb` / `export_point_cloud` / `export_voxel` | 几何类型开关；**不单独写盘**，须配合 `visible_geometry`（各视角）或 `holo_geometry`（根目录） |
 | `visible_geometry`                  | 各视角视锥内 GLB/PLY/体素（§7.1 / §7.5）                     |
@@ -700,7 +707,8 @@ def render_normalized_topdown(
 | `floor_path` / `--no_floor_path`              | 是否在 `topdown_normalized/` 跑 nav_mask 路径（默认 True）                                      |
 | `topdown_normalized/` 分辨率                     | **固定 1000×1000**，不可配置（SpatialFactory Stage 1）                                        |
 | `normalized_topdown_show_ceiling`             | 规范化 pass 是否渲染天花                                                                       |
-| `views="auto"`                                | **隐式** `normalized_topdown=True` + `floor_path=True`，并额外渲染 `topdown/` + auto 视角（§5.1） |
+| `views="auto"`                                | **隐式** `normalized_topdown=True` + `floor_path=True`，并额外渲染 `topdown/` + sparse auto 视角（§5.1） |
+| `--video`                                     | **隐式** `normalized_topdown=True` + `floor_path=True`；仅 video 时只渲染 video 轨迹（§5.1.1）；与 `--views auto` 叠加时追加 video |
 
 
 可与 `--views topdown front left_seq` **叠加**：先规范化，再在 `Y/` 下渲染常规多视角（坐标系已是规范化 SSL）。
@@ -774,7 +782,7 @@ python scenebuilder/render_ssl.py --ssl scene.txt \
 
 **类型 B — 三帧序列（一次** `render_view`**）**
 
-- 从 `n` 个路点中**随机**选一点 `(x, y, 0)`，记索引为 `k`
+- 从 `n` 个路点中选 **XY 离场景 bbox 中心最近** 的一点，记索引为 `k`
 - 相机位置固定 `(x, y, 1.5)`；`look_at` 初始为 bbox 中心
 - 三帧 `look_at`（同相机位置）：
   - 帧 1：向左偏航 **10° ~ 40°**
@@ -795,8 +803,8 @@ auto 模式下 Step 3 的 `**topdown/**`、`**auto_path_***`、`**auto_path_*_se
 | `--depth`                      | ✅              | ✅ 每帧    | ✅                 |
 | `--semantic`                   | ✅              | ✅ 每帧    | ✅                 |
 | `--pano`                       | ✅              | ✅ 每帧    | ❌                 |
-| `--glb` + `--visible_geometry` | ✅              | ✅ 多帧并集  | ✅                 |
-| `--ply` + `--visible_geometry` | ✅              | ✅ 多帧并集  | ✅                 |
+| `--glb` + `--visible_geometry` | ✅              | ✅ 多帧并集 + `viewvis_*_tri.npz`（§7.1.2） | ✅                 |
+| `--ply` + `--visible_geometry` | ✅              | ✅ 多帧并集 + `viewvis_*.npz`（§7.1.2） | ✅                 |
 | `--voxel` + `--visible_geometry` | ✅            | ✅ 多帧并集  | ✅                 |
 | `--ply`（无 visible_geometry）    | ✅ planar_faces | ✅ 每帧    | ✅                 |
 
@@ -814,6 +822,52 @@ out_normalized/
 ```
 
 > 手动序列（如 `left_seq`）目录名仍为 `{timestamp}_seq/`。
+
+
+
+### 5.1.1 Video 轨迹（`--video`）
+
+沿 `topdown_normalized/` 的地板闭环 `path_points_ssl` 生成**一条**切线方向平滑序列，实现见 `core/video_views.py`。与 §5.1 sparse auto **独立**。
+
+#### 两种使用模式
+
+| 模式 | CLI | Step 3 渲染内容 |
+| ---- | --- | --------------- |
+| **仅 video** | `--video`（不传 `--views`） | 只渲染 `video_{N}` / `video_{N}_pano/`；**不**渲染 sparse auto、**不**渲染常规 `topdown/` |
+| **auto + video** | `--views auto --video` | 常规 `topdown/` + sparse auto + 追加 video |
+
+两种模式均隐式开启 `normalized_topdown=True`、`floor_path=True`。
+
+#### 帧数与轨迹
+
+- 帧数 **N = round(闭环路径弧长 / spacing)**，默认 `spacing=0.2` m（`--video_spacing`），最小 3 帧
+- 目录名 `video_{N}`；全景帧在 **`video_{N}_pano/`**
+- 看向：沿路径前进**切线**方向
+- 高度 `z ∈ [1.0, 1.5]` m、FOV `60°~90°` 各随机一次，全程恒定
+
+#### RGB vs 几何
+
+| 类型 | video 行为 |
+| ---- | ---------- |
+| **RGB** | **仅全景图**（equirectangular）；忽略 `--pano` / `--depth` / `--semantic` |
+| **几何** | 仍受 `--glb` / `--ply` / `--visible_geometry` / `--voxel` 控制，写入 `video_{N}_pano/` |
+
+轨迹 manifest → `Y/auto_views.json`（`camera_positions`、`look_at_targets`、…）；resume 复用，不重新随机。
+
+```bash
+python scenebuilder/render_ssl.py --ssl scene.txt --output out --video \
+  --glb --ply --visible_geometry --video_spacing 0.2
+```
+
+#### 输出示例（仅 video）
+
+```
+out_normalized/
+├── topdown_normalized/
+├── auto_views.json
+├── video_40/
+└── video_40_pano/               # 40 帧全景（示例：8m 周长 / 0.2m）
+```
 
 
 
@@ -929,9 +983,11 @@ Y/                                    # {output} 或 {output}_normalized
 │   ├── nav_mask*.png                 # [floor_path]
 │   ├── floor_path_ssl.txt            # [floor_path]
 │   └── topdown_floor_path.png        # [floor_path]
-├── auto_views.json                   # [--views auto]
+├── auto_views.json                   # [--views auto] 或 [--video]
 ├── auto_path_0000/ …                 # [--views auto] 单帧
 ├── auto_path_0008_seq/               # [--views auto] 三帧序列
+├── video_{N}/                        # [--video]
+├── video_{N}_pano/                   # [--video] 全景序列
 ├── {timestamp}_seq/                  # left_seq 等手动序列
 ├── topdown/                          # [--views topdown] 1024² 常规俯视图
 │   ├── topdown.png
@@ -993,7 +1049,7 @@ python scenebuilder/render_ssl.py --ssl path/to/ssl.txt \
   - 法线：`n_cam = normalize(R @ n_world)`（只旋转、不平移）
   - ASCII 顶点即为 OpenCV `(ox, oy, oz, nx, ny, nz)`（无 glTF 轴变换）
 - OpenCV 轴向：+X 右、+Y 下、+Z 向场景深处。
-- `**left_seq` 等多帧序列**：OpenCV 副本以**序列首帧**相机为参考系；可见几何为各帧视锥并集。
+- `**left_seq` 等多帧序列**：OpenCV 副本以**序列首帧**相机为参考系；可见几何为各帧视锥并集。若 `--visible_geometry`，序列目录还会在 `pointcloud/`（`--ply`）和/或 `glb/`（`--glb`）下写 `viewvis` sidecar（§7.1.2）。
 - `metadata_visible.json` / `metadata.json` 中可为合并点云记录 `"path_opencv": "scene_visible_opencv.ply"` 等字段。
 - `planar_faces.json`、深度/语义 PNG 仍用世界 SSL 或与渲染图对齐的像素坐标。
 - 各视角目录**不再**写出 `{视角}/ssl.txt`（场景 SSL 仅在输出根目录 Y）；每个视角目录自动写出 `**ssl_opencv.txt`**（OpenCV 相机系，见 §6.4）。
@@ -1321,6 +1377,7 @@ Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.42, -0.15, 0.02], s
 | `output_root/pointcloud/`      | 世界 SSL           | 场景内**所有**物体（`--holo_geometry --ply`，post 阶段）          |
 | `{视角}/pointcloud/*.ply`        | 世界 SSL           | 该视角**可见**物体（需 `--visible_geometry --ply`） |
 | `{视角}/pointcloud/*_opencv.ply` | OpenCV（该视角/首帧相机） | 与上一行相同几何，换到 OpenCV 相机系              |
+| `{seq}/pointcloud/scene_visible_viewvis_*.npz` | 无（0/1 标记） | **仅多相机序列**（`*_seq/`）：每点相对各帧的可见性；第 *i* 行与 PLY 第 *i*+1 行对齐（§7.1.2） |
 | `output_root/voxel/`           | 世界 SSL           | 全场景 256³ 占用场（`--holo_geometry --voxel`） |
 | `{视角}/voxel/occupancy_*.npz`   | 世界 SSL / OpenCV 相机系 | 该视角可见 256³ 占用场（`--visible_geometry --voxel`） |
 | `{视角}/planar_faces.json`       | 世界 SSL（3D 顶点）    | 墙/门/窗/地板/天花内表面（需 `--ply`）           |
@@ -1427,6 +1484,87 @@ floor、ceiling、walls、doors、windows、boxes 均参与可见性判定与视
 # 两者都要
 --glb --ply --visible_geometry --holo_geometry --voxel
 ```
+
+---
+
+### 7.1.2 多相机序列可见性 sidecar（`viewvis`）
+
+当 `render_view` 传入**相机序列**（嵌套列表，目录 `*_seq/`）且帧数 **>1**，并开启 `--visible_geometry` 时，合并几何仍是各帧视锥**并集**（§7.1）。会额外写出 sidecar，对每个**采样元素**相对每一帧相机打 0/1 标注。
+
+**单帧视角不写出。**
+
+#### 点云（`--visible_geometry --ply`）
+
+| 文件 | 可见性类型 | `visibility[i, k] == 1` |
+| ---- | ---------- | ------------------------ |
+| `pointcloud/scene_visible_viewvis_point.npz` | **点级（遮挡）** | 采样点 *i* 在帧 *k* 视锥内且未被遮挡 |
+| `pointcloud/scene_visible_viewvis_object.npz` | **物体级（导出规则）** | 点 *i* 所属物体在相机 *k* 通过 §7.1，且点在视锥内 |
+
+第 *i* 行与 `scene_visible.ply` / `scene_visible_opencv.ply` 第 *i*+1 顶点对齐。元数据：`pointcloud/scene_visible_viewvis.json`。
+
+#### Mesh / GLB（`--visible_geometry --glb`）
+
+| 文件 | 可见性类型 | `visibility[i, k] == 1` |
+| ---- | ---------- | ------------------------ |
+| `glb/scene_visible_viewvis_point_tri.npz` | **点级（遮挡）** | 三角形 *i* 重心在视锥内且未被遮挡 |
+| `glb/scene_visible_viewvis_object_tri.npz` | **物体级（导出规则）** | 三角形 *i* 所属物体在相机 *k* 通过 §7.1，且重心在视锥内 |
+
+第 *i* 行对应 **`scene_visible.glb` 导出顺序**中的第 *i* 个三角形（`export_visible_glb` 的 entry → record → triangle 循环）。采样位置为**三角形重心**。一份 sidecar 同时适用于 `scene_visible.glb` 与 `scene_visible_opencv.glb`。元数据：`glb/scene_visible_viewvis_tri.json`。
+
+#### NPZ 结构（点云或 mesh 通用）
+
+```python
+import numpy as np
+
+data = np.load("glb/scene_visible_viewvis_point_tri.npz")  # 或 pointcloud/..._point.npz
+vis = data["visibility"]       # uint8, shape (N, K)
+frames = data["camera_frames"]
+# vis[i, k] → 元素 i 在 frames[k] 相机下是否可见
+```
+
+#### 依赖与性能
+
+| 项 | 说明 |
+| --- | --- |
+| 触发 | 序列 **>1** 帧 + `--visible_geometry` +（`--ply` 和/或 `--glb`） |
+| 建议 | 开启 `--depth` 做点级 sidecar（§7.4.1） |
+| 无 depth | 点级 sidecar 射线 fallback，较慢 |
+| 物体级 sidecar | 每相机物体级射线 + 视锥，开销小 |
+| 实现 | `core/viewvis_export.py`；PLY 由 `export_visible_point_cloud()`，mesh 由 `export_visible_glb()` 调用 |
+
+序列目录示例：
+
+```
+auto_path_0023_seq/
+├── 1735123456789.png
+├── 1735123456789_depth.png
+├── 1735123456789_camera_para.json
+├── …
+├── glb/scene_visible.glb
+├── glb/scene_visible_opencv.glb
+├── glb/scene_visible_viewvis_point_tri.npz
+├── glb/scene_visible_viewvis_object_tri.npz
+├── glb/scene_visible_viewvis_tri.json
+├── pointcloud/scene_visible.ply              # 若 --ply
+├── pointcloud/scene_visible_viewvis_*.npz
+└── metadata_visible.json
+```
+
+#### 7.1.3 按视角分解并集几何（`split_viewvis_geometry.py`）
+
+在 §7.1.2 sidecar 就绪后，运行独立脚本，从合并 PLY/GLB 中导出**每帧一个子集**（与 `camera_frames[k]` 一一对应）：
+
+```bash
+python split_viewvis_geometry.py left_seq/pointcloud/scene_visible_opencv.ply view
+python split_viewvis_geometry.py left_seq/glb/scene_visible_opencv.glb object
+```
+
+| CLI 模式 | Sidecar | 保留规则 |
+| -------- | ------- | -------- |
+| `view` | `*_viewvis_point*.npz` | 当 `visibility[i,k]==1` 时保留第 *i* 行（点级遮挡） |
+| `object` | `*_viewvis_object*.npz` | 物体级导出规则 + 视锥通过时保留第 *i* 行 |
+
+默认输出目录：输入文件旁的 `{文件名}_by_{模式}/`；文件名为 `{相机时间戳}.ply` / `.glb`；`manifest.json` 记录保留/总数。库：`core/viewvis_split.py`。另见 [README § 按视角分解](../README.zh-CN.md#按视角分解可见几何split_viewvis_geometrypy)。
 
 ---
 

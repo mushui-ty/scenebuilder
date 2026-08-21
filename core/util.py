@@ -22,6 +22,25 @@ import colorsys
 import time
 
 
+def read_image_array(path: str) -> np.ndarray:
+    """Read an image file into a numpy array.
+
+    Uses Pillow directly so versions like ``9.5.0.post2`` do not break imageio's
+    Pillow plugin version parser (``ValueError: invalid literal for int() ... 'post2'``).
+    """
+    from PIL import Image
+
+    with Image.open(path) as img:
+        return np.asarray(img)
+
+
+def write_image_array(path: str, arr: np.ndarray) -> None:
+    """Write a numpy image array to disk via Pillow."""
+    from PIL import Image
+
+    Image.fromarray(np.asarray(arr)).save(path)
+
+
 def allocate_millis_stamp(exclude=None) -> str:
     """Allocate a millisecond timestamp string; stamps in exclude are skipped (separates dir names from image names)."""
     blocked = set(exclude or ())

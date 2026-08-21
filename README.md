@@ -87,7 +87,7 @@ ctx.render_view(
 For data production and benchmark runs, `render_ssl.py` is the high-level entry point. One invocation can:
 
 - **Normalize** the scene to a pixel-aligned topdown frame and **plan a floor coverage path**
-- **Render auto cameras** along that path (`--views auto`), plus preset / custom views
+- **Render auto cameras** along that path (`--views auto`), plus **`--video` smooth closed-loop trajectories**, preset / custom views
 - **Export geometry**: per-view visible GLB / PLY / 256³ voxels, and full-scene holo exports at the output root
 - **Export supervision**: semantic masks, metric depth + normals, equirectangular panoramas
 - **Resume** interrupted jobs (`--no-resume` to force a full rerun)
@@ -177,7 +177,10 @@ out_normalized/
 │   ├── planar_faces.json             # [--ply]
 │   ├── glb/                          # [--visible_geometry --glb]
 │   │   ├── scene_visible.glb
-│   │   └── scene_visible_opencv.glb
+│   │   ├── scene_visible_opencv.glb
+│   │   ├── scene_visible_viewvis_point_tri.npz   # sequence: per-triangle occlusion vs each camera
+│   │   ├── scene_visible_viewvis_object_tri.npz  # sequence: per-triangle object-level vs each camera
+│   │   └── scene_visible_viewvis_tri.json
 │   ├── pointcloud/                   # [--visible_geometry --ply]
 │   │   ├── scene_visible.ply
 │   │   ├── scene_visible_opencv.ply
@@ -201,13 +204,67 @@ out_normalized/
 │   └── {timestamp}_pano_camera_para.json
 ├── auto_path_0008_seq/               # auto three-frame sequence
 │   ├── {timestamp}_000.png … _002.png
-│   └── … (depth / semantic / visible geometry per frame)
-└── auto_path_0008_seq_pano/        # [--pano] panorama for sequence (first-frame ref)
+│   ├── {timestamp}_*_depth.png       # [--depth]
+│   ├── glb/scene_visible.glb
+│   ├── glb/scene_visible_viewvis_*_tri.npz  # [--visible_geometry --glb]
+│   ├── pointcloud/scene_visible.ply         # [--visible_geometry --ply]
+│   ├── pointcloud/scene_visible_viewvis_*.npz
+│   └── …
+├── auto_path_0008_seq_pano/        # [--pano] panorama for sequence (first-frame ref)
+├── video_{N}/                      # [--video] tangent trajectory root (usually no perspective RGB)
+├── video_{N}_pano/                 # [--video] pano sequence (~0.2m arc spacing; N auto-computed)
+│   ├── {timestamp}.png …
+│   └── …
 ```
+
+## Video trajectories (`--video`)
+
+`--video` builds **one** smooth tangent closed-loop sequence along the floor path from `topdown_normalized/`. It renders **pano RGB only** (equirectangular); frame count is computed from path arc length (default **~0.2 m spacing**, tunable via `--video_spacing`). Independent of sparse auto views (`auto_path_*`).
+
+| Mode | Command | Pipeline |
+| ---- | ------- | -------- |
+| **Video only** | `--video` (omit `--views`) | `topdown_normalized` + path planning → `video_{N}_pano/` only; **skips** sparse auto and regular `topdown/` |
+| **Auto + video** | `--views auto --video` | Keeps sparse auto + `topdown/` + appends video |
+
+Directories: `video_{N}/` (sequence root, usually empty of perspective RGB) + `video_{N}_pano/` (pano frames). Trajectory manifest → `Y/auto_views.json`; resume reuses it.
+
+**RGB**: regardless of `--pano` / `--depth` / `--semantic`, video views output **panorama images only**. **Geometry exports** (`--glb`, `--ply`, `--visible_geometry`, `--voxel`, …) still follow CLI flags and land under `video_{N}_pano/`.
+
+```bash
+python render_ssl.py --ssl scene.txt --output out --video \
+  --glb --ply --visible_geometry --video_spacing 0.2
+```
+
+See [§5.1.1 Video trajectories](docs/doc.en.md#511-video-trajectories--video).
 
 Full directory reference: [§6 Output layout](docs/doc.en.md#6-output-layout-and-coordinate-systems).
 
 Custom cameras are also supported via `--camera_position`, `--look_at`, and optional `--up_vector` (auto-fallback to `[0,1,0]` when the view direction is collinear with default up `[0,0,1]`).
+
+## Split merged visible geometry by camera (`split_viewvis_geometry.py`)
+
+Multi-frame sequences (`*_seq/`, e.g. `left_seq`) export a **union** `scene_visible.ply` / `scene_visible.glb` plus `viewvis` NPZ sidecars (one row per point or triangle, one column per camera frame). See [§7.1.2](docs/doc.en.md#712-multi-view-sequence-visibility-sidecars-viewvis) for how those matrices are produced.
+
+Use **`split_viewvis_geometry.py`** to split the merged file into **one PLY/GLB per frame**, keeping only elements visible from that camera:
+
+```bash
+# Point cloud (world or OpenCV copy — same row order)
+python split_viewvis_geometry.py left_seq/pointcloud/scene_visible_opencv.ply view
+python split_viewvis_geometry.py left_seq/pointcloud/scene_visible.ply object
+
+# Mesh (world or OpenCV GLB)
+python split_viewvis_geometry.py left_seq/glb/scene_visible_opencv.glb view
+python split_viewvis_geometry.py left_seq/glb/scene_visible.glb object
+```
+
+| Mode | NPZ used | Meaning |
+| ---- | -------- | ------- |
+| **`view`** | `scene_visible_viewvis_point*.npz` | **Point-level occlusion** — keep samples in frustum and not occluded (depth / ray cast) |
+| **`object`** | `scene_visible_viewvis_object*.npz` | **Object-level export rule** — keep all samples belonging to objects visible from that camera (in frustum) |
+
+The script auto-detects sidecars in the same folder (`pointcloud/` or `glb/`). Output: `{input_stem}_by_{mode}/` next to the input file, with `{camera_frame}.ply` or `.glb` per frame and `manifest.json` (kept counts). Implementation: `core/viewvis_split.py`.
+
+Optional: `-o /path/to/output_dir` to override the default output folder.
 
 ## Documentation
 
@@ -221,7 +278,7 @@ Read in this order:
 | 2 | SSL format & coordinates | [§2](docs/doc.en.md#2-ssl-coordinate-system-and-entities) | [§2](docs/doc.zh-CN.md#2-ssl-坐标系与实体约定) |
 | 3 | Quick start & examples | [§3](docs/doc.en.md#3-quick-start) | [§3](docs/doc.zh-CN.md#3-快速开始) |
 | 4 | API reference (`topdown_view`, `render_view`, `render_ssl`) | [§4](docs/doc.en.md#4-api-reference) | [§4](docs/doc.zh-CN.md#4-api-参考) |
-| 5 | Auto views & floor path (`--views auto`) | [§5](docs/doc.en.md#5-advanced-workflows) | [§5](docs/doc.zh-CN.md#5-高级工作流) |
+| 5 | Auto views, video trajectories & floor path | [§5](docs/doc.en.md#5-advanced-workflows) | [§5](docs/doc.zh-CN.md#5-高级工作流) |
 | 6 | Output layout, `c2w`, exports | [§6](docs/doc.en.md#6-output-layout-and-coordinate-systems) | [§6](docs/doc.zh-CN.md#6-输出目录与坐标系) |
 | 7 | Semantic / depth / voxel details | [§7](docs/doc.en.md#7-export-artifacts) | [§7](docs/doc.zh-CN.md#7-导出产物详解) |
 

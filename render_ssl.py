@@ -83,6 +83,33 @@ def _resolve_views_to_run(views: ViewsSpec, view_cameras: dict) -> List[str]:
     return names
 
 
+def _path_points_ssl_from_floor(
+    y_dir: str,
+    floor_result: Optional[Dict[str, Any]],
+) -> List[List[float]]:
+    path_points = (floor_result or {}).get("path_points_ssl") or []
+    if path_points:
+        return path_points
+    try:
+        from .core.render_resume import load_floor_result_from_disk
+    except (ImportError, ValueError):
+        from core.render_resume import load_floor_result_from_disk  # type: ignore
+    disk = load_floor_result_from_disk(y_dir)
+    return (disk or {}).get("path_points_ssl") or []
+
+
+def _video_view_names(names: List[str]) -> List[str]:
+    return [n for n in names if n.startswith("video_")]
+
+
+def _video_manifest_ready(names: List[str]) -> bool:
+    try:
+        from .core.video_views import video_manifest_complete
+    except (ImportError, ValueError):
+        from core.video_views import video_manifest_complete  # type: ignore
+    return video_manifest_complete(names)
+
+
 def _run_auto_views_from_path(
     y_dir: str,
     floor_result: Optional[Dict[str, Any]],
@@ -91,39 +118,116 @@ def _run_auto_views_from_path(
     resume: bool = True,
     width: int = 1000,
     height: int = 1000,
+    sparse_auto: bool = True,
+    video: bool = False,
+    video_frame_spacing: float = 0.2,
+    video_frames: Optional[int] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
-    """Build auto-view specs from the floor path and write auto_views.json."""
-    if resume:
-        try:
-            from .core.render_resume import load_auto_views_manifest
-        except (ImportError, ValueError):
-            from core.render_resume import load_auto_views_manifest  # type: ignore
-        specs, names = load_auto_views_manifest(y_dir)
-        if specs:
-            print(f"📂 Loaded {len(names)} auto views from existing auto_views.json")
-            return specs, names
+    """Build path-driven view specs and write auto_views.json.
 
+    ``sparse_auto=True`` (``--views auto``): sparse auto_path_* + optional video.
+    ``sparse_auto=False`` (``--video`` only): video trajectories only.
+    """
     try:
         from .core.auto_views import build_auto_views_from_path, write_auto_views_manifest
     except (ImportError, ValueError):
         from core.auto_views import build_auto_views_from_path, write_auto_views_manifest  # type: ignore
+    try:
+        from .core.render_resume import load_auto_views_manifest
+    except (ImportError, ValueError):
+        from core.render_resume import load_auto_views_manifest  # type: ignore
 
-    if floor_result is None:
-        print("⚠️  No floor_path result; auto views unavailable")
-        return {}, []
-    path_points = floor_result.get("path_points_ssl") or []
-    if not path_points:
-        print("⚠️  path_points_ssl is empty; auto views unavailable")
+    specs: Dict[str, Dict[str, Any]] = {}
+    names: List[str] = []
+    loaded = False
+    if resume:
+        specs, names = load_auto_views_manifest(y_dir)
+        if specs:
+            loaded = True
+            print(f"📂 Loaded {len(names)} auto views from existing auto_views.json")
+
+    path_points = _path_points_ssl_from_floor(y_dir, floor_result)
+    if path_points:
+        try:
+            from .core.floor_path_utils import ensure_closed_path_ccw_ssl
+        except (ImportError, ValueError):
+            from core.floor_path_utils import ensure_closed_path_ccw_ssl  # type: ignore
+        path_points = ensure_closed_path_ccw_ssl(path_points)
+
+    has_sparse = any(n.startswith("auto_path_") for n in names)
+    if sparse_auto and not has_sparse:
+        if not path_points:
+            print("⚠️  No floor_path result; auto views unavailable")
+            return {}, []
+        specs, names = build_auto_views_from_path(path_points, context, width=width, height=height)
+        manifest = write_auto_views_manifest(y_dir, specs)
+        n_path = len(path_points)
+        n_single = sum(1 for n in names if not n.endswith("_seq") and not n.startswith("video_"))
+        print(
+            f"🎯 views=auto: {n_path} path points → "
+            f"{n_single} single-frame views + 1 three-frame sequence; manifest → {manifest}"
+        )
+    elif not sparse_auto and not video:
         return {}, []
 
-    specs, names = build_auto_views_from_path(path_points, context, width=width, height=height)
-    manifest = write_auto_views_manifest(y_dir, specs)
-    n_path = len(path_points)
-    n_single = sum(1 for n in names if not n.endswith("_seq"))
-    print(
-        f"🎯 views=auto: {n_path} path points → "
-        f"{n_single} single-frame views + 1 three-frame sequence; manifest → {manifest}"
-    )
+    if video and not _video_manifest_ready(names):
+        if not path_points:
+            print("⚠️  --video: path_points_ssl is empty; video views skipped")
+        else:
+            try:
+                from .core.video_views import (
+                    build_video_views_from_path,
+                    strip_legacy_video_entries,
+                    video_manifest_complete,
+                )
+            except (ImportError, ValueError):
+                from core.video_views import (  # type: ignore
+                    build_video_views_from_path,
+                    strip_legacy_video_entries,
+                    video_manifest_complete,
+                )
+            if not video_manifest_complete(names):
+                strip_legacy_video_entries(specs, names)
+            video_specs, video_names = build_video_views_from_path(
+                path_points,
+                context,
+                frame_spacing_m=video_frame_spacing,
+                n_frames=video_frames,
+                width=width,
+                height=height,
+            )
+            for name in video_names:
+                if name not in specs:
+                    specs[name] = video_specs[name]
+                    names.append(name)
+            manifest = write_auto_views_manifest(y_dir, specs)
+            n_vf = len((video_specs.get(video_names[0]) or {}).get("camera_positions") or [])
+            path_len = 0.0
+            try:
+                from .core.video_views import closed_path_length_m
+            except (ImportError, ValueError):
+                from core.video_views import closed_path_length_m  # type: ignore
+            try:
+                path_len = closed_path_length_m(path_points)
+            except ValueError:
+                pass
+            frame_note = (
+                f"fixed {n_vf} frames"
+                if video_frames is not None
+                else f"spacing≈{video_frame_spacing}m"
+            )
+            print(
+                f"🎬 --video: added tangent + center trajectories "
+                f"({n_vf} frames each, path≈{path_len:.2f}m, {frame_note}) → {manifest}"
+            )
+    elif video and loaded and _video_view_names(names):
+        print(f"📂 Reusing {len(_video_view_names(names))} video trajectories from auto_views.json")
+
+    if not sparse_auto:
+        video_names = _video_view_names(names)
+        specs = {n: specs[n] for n in video_names if n in specs}
+        names = video_names
+
     return specs, names
 
 
@@ -228,6 +332,17 @@ def _build_custom_view_spec(
     return "custom", spec
 
 
+def _apply_video_render_flags(spec: Dict[str, Any], target: Dict[str, Any]) -> None:
+    """Tangent video always renders pano; center video never does."""
+    if not spec.get("video"):
+        return
+    if spec.get("video_trajectory") == "center":
+        target["pano"] = False
+    else:
+        target["pano"] = True
+    target.pop("pano_only", None)
+
+
 def _render_view_spec(
     ctx,
     output_dir: str,
@@ -255,6 +370,8 @@ def _render_view_spec(
         common["auto_fov"] = False
     else:
         common["auto_fov"] = bool(camera_kwargs.get("auto_fov", True))
+
+    _apply_video_render_flags(spec, common)
 
     if spec["type"] == "single":
         single_kwargs = dict(
@@ -470,6 +587,8 @@ def worker_render_view(job_path: str, view_name: str) -> None:
     if view_name in auto_specs:
         spec = dict(auto_specs[view_name])
         _apply_job_view_size(job, spec)
+        extra = dict(extra)
+        _apply_video_render_flags(spec, extra)
         _render_auto_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
         view_dir = view_dir_for(output_dir, view_name)
         record_view_complete(
@@ -778,6 +897,9 @@ def render_ssl(
     camera_position: Any = None,
     look_at: Any = None,
     up_vector: Any = None,
+    video: bool = False,
+    video_frame_spacing: float = 0.2,
+    video_frames: Optional[int] = None,
 ):
     """Render a scene. ``input_text`` may be standard SSL text or a JSON string.
 
@@ -789,6 +911,7 @@ def render_ssl(
     - Automatically render pixel-aligned top-down + floor path under ``Y/topdown_normalized/``
     - Then render ``topdown/``, sequence views, etc. under Y per ``views`` (``views=None`` skips preset views)
     - ``views="auto"``: force normalization + floor path, then render regular topdown + path-driven auto views
+    - ``video=True`` (``--video`` alone or with ``views="auto"``): normalization + floor path; alone skips sparse auto / regular topdown and renders video trajectories only
 
     When ``camera_position`` / ``look_at`` are provided, append a custom single frame (``custom/``)
     or sequence (``custom_seq/``) after the ``views`` specified above finish.
@@ -812,6 +935,9 @@ def render_ssl(
     if visible_geometry:
         semantic = True
     if views == "auto":
+        normalized_topdown = True
+        floor_path = True
+    if video:
         normalized_topdown = True
         floor_path = True
     if outpaint_image_dir is None:
@@ -944,12 +1070,21 @@ def render_ssl(
     auto_view_names: List[str] = []
     custom_view_specs: Dict[str, Dict[str, Any]] = {}
     custom_view_names: List[str] = []
-    if views == "auto":
+    if views == "auto" or video:
         if backend != "bpy":
-            print("⚠️  views=auto currently only supports backend=bpy; skipped auto views")
+            print("⚠️  views=auto / --video currently only supports backend=bpy; skipped path views")
         else:
             auto_view_specs, auto_view_names = _run_auto_views_from_path(
-                y_dir, floor_result, ctx.context, resume=resume, width=width, height=height
+                y_dir,
+                floor_result,
+                ctx.context,
+                resume=resume,
+                width=width,
+                height=height,
+                sparse_auto=(views == "auto"),
+                video=video,
+                video_frame_spacing=video_frame_spacing,
+                video_frames=video_frames,
             )
 
     if camera_position is not None:
@@ -1005,8 +1140,13 @@ def render_ssl(
     views_to_run = _resolve_views_to_run(views, view_cameras)
     if views == "auto":
         if backend == "bpy":
-            # Regular topdown (Y/topdown/) + path-driven auto views
+            # Regular topdown (Y/topdown/) + path-driven auto views (+ video when --video)
             views_to_run = ["topdown"] + list(auto_view_names)
+        else:
+            views_to_run = []
+    elif video:
+        if backend == "bpy":
+            views_to_run = list(auto_view_names)
         else:
             views_to_run = []
 
@@ -1026,8 +1166,10 @@ def render_ssl(
         for view_name in views_to_run:
             print(f"🔄 Subprocess rendering: {view_name}")
             _spawn_worker_view(job_path, view_name)
-    elif views == "auto":
+    elif not views_to_run and views == "auto":
         print("⏭️  Auto views not generated (backend does not support bpy)")
+    elif not views_to_run and video:
+        print("⏭️  Video views not generated (backend does not support bpy)")
     elif not views_to_run and normalized_topdown:
         print("⏭️  No views specified; skipping multi-view rendering")
 
@@ -1280,6 +1422,27 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         action="store_true",
         help="Disable resume; force re-render all views and exports",
     )
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Render tangent + center closed-loop videos along the floor path. "
+             "Tangent view always includes pano; center view is perspective-only. "
+             "Use alone for video-only (normalized topdown + path planning, no sparse auto views), "
+             "or with --views auto to append on top of sparse auto views",
+    )
+    parser.add_argument(
+        "--video_frames",
+        type=int,
+        default=None,
+        help="Fixed frame count per video trajectory (≥3). "
+             "If omitted, frame count is computed from path arc length / --video_spacing",
+    )
+    parser.add_argument(
+        "--video_spacing",
+        type=float,
+        default=0.2,
+        help="Target arc-length spacing between video frames in meters (default: 0.2)",
+    )
 
     args = parser.parse_args()
     input_modes = [name for name, val in (
@@ -1313,6 +1476,20 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
             parser.error("--views auto cannot be combined with other views")
         views = list(args.views)
 
+    if args.video:
+        normalized_topdown = True
+        floor_path = True
+        if views is None:
+            print("ℹ️  --video only → normalized_topdown + floor path + video (skip sparse auto views)")
+        elif views == "auto":
+            print("ℹ️  views=auto + --video → sparse auto views + video")
+        else:
+            parser.error("--video can be used alone (omit --views) or with --views auto")
+    if args.video_spacing <= 0:
+        parser.error("--video_spacing must be positive")
+    if args.video_frames is not None and args.video_frames < 3:
+        parser.error("--video_frames must be at least 3")
+
     render_kwargs = dict(
         backend=args.backend,
         output_root=output_dir,
@@ -1338,6 +1515,9 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         height=args.height,
         auto_fov=not args.no_auto_fov,
         manual_fov=args.manual_fov,
+        video=args.video,
+        video_frame_spacing=args.video_spacing,
+        video_frames=args.video_frames,
     )
     if args.samples is not None:
         render_kwargs["samples"] = args.samples
@@ -1380,5 +1560,5 @@ if __name__ == "__main__":
     main()
 
 '''
-python /root/utils/scenebuilder/render_ssl.py --ssl_id 310449449_4 --ssl_collection_dir /data/mushui/datasets/manycore/spatiallm_raw --views auto --output /root/utils/scenebuilder/out/310449449_4/out1 --assets /data/mushui/datasets/Manycore-Future/simplified --hole_assets /data/mushui/datasets/Manycore-Future/holes   --glb --ply --visible_geometry --semantic --depth --pano --voxel --holo_geometry
+python /data/mushui/scenebuilder/render_ssl.py --ssl_id 246597155_2 --ssl_collection_dir /data/mushui/datasets/manycore/spatiallm_raw --output /data/mushui/scenebuilder/out/246597155_2/out3 --assets /data/mushui/datasets/Manycore-Future/simplified --hole_assets /data/mushui/datasets/Manycore-Future/holes   --pano --glb --ply --visible_geometry --semantic --depth --voxel --holo_geometry --video --video_frames 2
 '''

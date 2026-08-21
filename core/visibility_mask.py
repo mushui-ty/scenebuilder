@@ -30,9 +30,12 @@ def semantic_masks_index_path(view_dir: str) -> str:
 
 
 def count_mask_pixels(mask_path: str) -> int:
-    import imageio
+    try:
+        from . import util
+    except ImportError:
+        import util  # type: ignore
 
-    mask = imageio.imread(mask_path)
+    mask = util.read_image_array(mask_path)
     if mask.ndim == 3:
         mask = mask[..., 0]
     return int(np.count_nonzero(np.asarray(mask, dtype=np.uint8)))

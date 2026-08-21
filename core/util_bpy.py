@@ -19,6 +19,11 @@ except ImportError:  # pragma: no cover
 
 import numpy as np
 
+try:
+    from . import util
+except ImportError:  # pragma: no cover
+    import util  # type: ignore
+
 
 def _preload_bpy() -> None:
     """Silently preload bpy, suppressing harmless Swig ABI warnings from NumPy 1.x/2.x."""
@@ -55,14 +60,82 @@ _preload_bpy()
 
 try:
     import bpy
+    import bmesh
     from mathutils import Vector, Matrix  # type: ignore[import]
 except ImportError:  # pragma: no cover
     bpy = None
+    bmesh = None
     Vector = None
     Matrix = None
 
 
-def create_floor_mesh_bpy(scene_collection, vertices, thickness=0.1, name="Floor", texture_scale=1.0):
+STRUCTURAL_SUBDIVIDE_CELL = 0.18
+STRUCTURAL_SUBDIVIDE_MAX_CUTS = 20
+STRUCTURAL_SUBDIVIDE_MIN_CUTS = 2
+
+# Floor API aliases (same tuning as walls).
+FLOOR_TOP_SUBDIVIDE_CELL = STRUCTURAL_SUBDIVIDE_CELL
+FLOOR_TOP_SUBDIVIDE_MAX_CUTS = STRUCTURAL_SUBDIVIDE_MAX_CUTS
+FLOOR_TOP_SUBDIVIDE_MIN_CUTS = STRUCTURAL_SUBDIVIDE_MIN_CUTS
+
+
+def _structural_subdivide_cuts(span: float, cell: float, min_cuts: int, max_cuts: int) -> int:
+    """Pick subdiv cuts from a characteristic length (m); yields hundreds–~2000 tris per large face."""
+    if span <= 1e-3 or cell <= 1e-3:
+        return min_cuts
+    return max(min_cuts, min(max_cuts, int(round(span / cell))))
+
+
+def _floor_top_subdivide_cuts(span: float, cell: float, min_cuts: int, max_cuts: int) -> int:
+    return _structural_subdivide_cuts(span, cell, min_cuts, max_cuts)
+
+
+def _subdivide_mesh_bpy(
+    mesh,
+    span: float,
+    *,
+    cell: float = STRUCTURAL_SUBDIVIDE_CELL,
+    min_cuts: int = STRUCTURAL_SUBDIVIDE_MIN_CUTS,
+    max_cuts: int = STRUCTURAL_SUBDIVIDE_MAX_CUTS,
+) -> None:
+    """Triangulate and subdivide mesh faces for visibility ray sampling (UVs interpolate)."""
+    if bpy is None or bmesh is None or mesh is None:
+        return
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    bm.faces.ensure_lookup_table()
+    bmesh.ops.triangulate(bm, faces=bm.faces[:])
+    subdivide_cuts = _structural_subdivide_cuts(span, float(cell), int(min_cuts), int(max_cuts))
+    bmesh.ops.subdivide_edges(
+        bm,
+        edges=bm.edges[:],
+        cuts=subdivide_cuts,
+        use_grid_fill=True,
+    )
+    bm.to_mesh(mesh)
+    bm.free()
+    mesh.update(calc_edges=True)
+
+
+def create_floor_mesh_bpy(
+    scene_collection,
+    vertices,
+    thickness=0.1,
+    name="Floor",
+    texture_scale=1.0,
+    top_subdivide_cell=FLOOR_TOP_SUBDIVIDE_CELL,
+    top_subdivide_max_cuts=FLOOR_TOP_SUBDIVIDE_MAX_CUTS,
+    top_subdivide_min_cuts=FLOOR_TOP_SUBDIVIDE_MIN_CUTS,
+):
+    """Create floor mesh with a subdivided top for per-view ray visibility tests.
+
+    The room outline starts as one n-gon (only a handful of triangles after triangulation).
+    That is too coarse for ray sampling: every centroid can sit under furniture. We
+    triangulate and subdivide the top face before extrusion so centroids spread across
+    the floor; typical rooms end up with hundreds to ~2000 top triangles (~10× coarser
+    defaults) — still negligible vs furniture GLBs. Visibility uses the same ray-cast
+    path as all other categories.
+    """
     if bpy is None or len(vertices) < 3:
         return None
 
@@ -83,22 +156,28 @@ def create_floor_mesh_bpy(scene_collection, vertices, thickness=0.1, name="Floor
     mesh.from_pydata(verts, [], faces)
     mesh.update()
 
-    # Add floor UV coordinates (x, y)
     uv_layer = mesh.uv_layers.new(name="UVMap")
     for poly in mesh.polygons:
         for loop_index in poly.loop_indices:
             v_idx = mesh.loops[loop_index].vertex_index
-            vx, vy, _ = verts[v_idx]
+            vx, vy, _ = mesh.vertices[v_idx].co
             uv_layer.data[loop_index].uv = (vx * texture_scale, vy * texture_scale)
 
-    bpy.ops.object.select_all(action='DESELECT')
-    obj.select_set(True)
-    bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.mesh.extrude_region_move(TRANSFORM_OT_translate={"value": (0.0, 0.0, -thickness)})
-    bpy.ops.object.mode_set(mode='OBJECT')
-
+    span = max(float(xs.max() - xs.min()), float(ys.max() - ys.min()), 1e-3)
+    _subdivide_mesh_bpy(
+        mesh,
+        span,
+        cell=top_subdivide_cell,
+        min_cuts=top_subdivide_min_cuts,
+        max_cuts=top_subdivide_max_cuts,
+    )
+    bm = bmesh.new()
+    bm.from_mesh(mesh)
+    extruded = bmesh.ops.extrude_face_region(bm, geom=bm.faces[:])
+    extruded_verts = [elem for elem in extruded["geom"] if isinstance(elem, bmesh.types.BMVert)]
+    bmesh.ops.translate(bm, vec=(0.0, 0.0, -float(thickness)), verts=extruded_verts)
+    bm.to_mesh(mesh)
+    bm.free()
     mesh.update(calc_edges=True)
     if not mesh.uv_layers:
         mesh.uv_layers.new(name="UVMap")
@@ -243,6 +322,9 @@ def create_single_wall_mesh_bpy(scene_collection, s, e, height, orientation,
                 uv_layer.data[loop_index].uv = (u * texture_scale, vz * texture_scale)
             else:
                 uv_layer.data[loop_index].uv = ((vx + vy) * texture_scale, vz * texture_scale)
+
+    wall_span = max(float(wall_length), float(height), 1e-3)
+    _subdivide_mesh_bpy(mesh, wall_span)
 
     if openings:
         for opening_data, opening_type in openings:
@@ -1131,7 +1213,7 @@ def _load_depth_exr(path: str) -> np.ndarray:
         raw = exr.channel(channel_name, Imath.PixelType(Imath.PixelType.FLOAT))
         return np.frombuffer(raw, dtype=np.float32).reshape(height, width).astype(np.float64)
 
-    depth = imageio.imread(path)
+    depth = util.read_image_array(path)
     if depth.ndim == 3:
         depth = depth[:, :, 0]
     return np.asarray(depth, dtype=np.float64)
@@ -1187,7 +1269,7 @@ def _load_rgb_exr(path: str) -> np.ndarray:
     if bpy is not None:
         return _load_rgb_exr_via_bpy(path)
 
-    img = imageio.imread(path)
+    img = util.read_image_array(path)
     arr = np.asarray(img, dtype=np.float64)
     if arr.ndim == 2:
         arr = np.stack([arr, arr, arr], axis=-1)
