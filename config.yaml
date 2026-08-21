@@ -61,3 +61,7 @@ topdown_occluder_large_footprint_ratio: 0.25  # Also skip if top near ceiling an
 ratio_if_visible: 0.1             # visible mask / overall mask below this → mostly_occluded
 min_overall_pixels: 16            # overall mask pixels below this skip visibility ratio and geometry export
 
+# 6. Bbox point-cloud sampling (volume-tiered; min/mid = 10%/50% of max)
+box_point_samples_max: 5000       # >=1m³ bbox; 0.125-1m³ → 50%-100%; <0.125m³ → 10%-50%
+samples_per_object: 5000          # Non-bbox objects (walls, floor, doors, ...)
+

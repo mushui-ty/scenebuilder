@@ -1084,12 +1084,16 @@ class BpySceneCtx:
             self.construct_scene(rebuild=True, **kwargs)
 
         os.makedirs(output_dir, exist_ok=True)
-        default_samples = 5000
-        box_samples = 5000
+        default_samples = int(self.config.get("samples_per_object", 5000))
+        max_box_samples = int(self.config.get("box_point_samples_max", 5000))
         metadata = {
             "samples_per_object": default_samples,
-            "box_samples_per_object": box_samples,
-            "box_sampling_strategy": "surface_area_50_ses_50",
+            "box_samples_max": max_box_samples,
+            "box_samples_min": int(round(max_box_samples * 0.1)),
+            "box_samples_mid": int(round(max_box_samples * 0.5)),
+            "box_volume_max_m3": util_data.BOX_POINT_VOLUME_MAX_M3,
+            "box_volume_mid_m3": util_data.BOX_POINT_VOLUME_MID_M3,
+            "box_sampling_strategy": "volume_tiered_surface_area_50_ses_50",
             "door_window_sampling_strategy": "surface_area_50_ses_50",
             "ses_angle_threshold_degrees": 30.0,
             "objects": [],
@@ -1148,7 +1152,13 @@ class BpySceneCtx:
                 extra = {"label": label}
                 if asset_id is not None:
                     extra["asset_id"] = asset_id
-                sample_count = box_samples if category == "boxes" else default_samples
+                if category == "boxes":
+                    box_data = info.get("box_data") or self.context.get("boxes", {}).get(object_id, {})
+                    volume_m3 = util_data.bbox_volume_m3(box_data.get("scale"))
+                    sample_count = util_data.box_point_samples_for_volume(volume_m3, max_samples=max_box_samples)
+                    extra["volume_m3"] = round(volume_m3, 6)
+                else:
+                    sample_count = default_samples
                 export_one(category, object_id, info.get("node"), filename, sample_count, extra)
 
         if all_points:
@@ -1533,18 +1543,34 @@ class BpySceneCtx:
         pointcloud_dir = util_data.geometry_pointcloud_dir(view_dir)
         os.makedirs(pointcloud_dir, exist_ok=True)
         merge_entries = merge_entries if merge_entries is not None else visible_entries
-        default_samples = 5000
-        box_samples = 5000
+        default_samples = int(self.config.get("samples_per_object", 5000))
+        max_box_samples = int(self.config.get("box_point_samples_max", 5000))
         metadata = {
             "samples_per_object": default_samples,
-            "box_samples_per_object": box_samples,
+            "box_samples_max": max_box_samples,
+            "box_samples_min": int(round(max_box_samples * 0.1)),
+            "box_samples_mid": int(round(max_box_samples * 0.5)),
+            "box_volume_max_m3": util_data.BOX_POINT_VOLUME_MAX_M3,
+            "box_volume_mid_m3": util_data.BOX_POINT_VOLUME_MID_M3,
+            "box_sampling_strategy": "volume_tiered_surface_area_50_ses_50",
             "objects": [],
             "visible_geometry": True,
         }
         opencv_ply_count = 0
 
+        def _sample_count_for_entry(entry: Dict[str, Any]) -> int:
+            if entry["category"] != "boxes":
+                return default_samples
+            box_data = self.context.get("boxes", {}).get(entry["id"], {})
+            mesh_info = self.mesh_nodes.get("boxes", {}).get(entry["id"], {})
+            if not box_data:
+                box_data = mesh_info.get("box_data") or {}
+            return util_data.box_point_samples_for_scale(
+                box_data.get("scale"), max_samples=max_box_samples
+            )
+
         for entry in visible_entries:
-            sample_count = box_samples if entry["category"] == "boxes" else default_samples
+            sample_count = _sample_count_for_entry(entry)
             points, colors, normals = self._sample_visible_records(entry["records"], entry["camera_obj"], sample_count)
             if len(points) == 0:
                 continue
@@ -1572,7 +1598,7 @@ class BpySceneCtx:
         merge_normals = []
         merge_object_indices: List[int] = []
         for obj_idx, entry in enumerate(merge_entries):
-            sample_count = box_samples if entry["category"] == "boxes" else default_samples
+            sample_count = _sample_count_for_entry(entry)
             points, colors, normals = self._sample_visible_records(entry["records"], entry["camera_obj"], sample_count)
             if len(points) == 0:
                 continue

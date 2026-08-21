@@ -18,6 +18,40 @@ from PIL import Image
 NORMALIZED_TOPDOWN_WIDTH = 1000
 NORMALIZED_TOPDOWN_HEIGHT = 1000
 
+# Bbox point-cloud volume tiers (m³): >=1 → max; [0.125, 1) → 50%-100% max; [0, 0.125) → 10%-50% max.
+BOX_POINT_VOLUME_MAX_M3 = 1.0
+BOX_POINT_VOLUME_MID_M3 = 0.125  # 0.5 m cube
+
+
+def bbox_volume_m3(scale) -> float:
+    """Axis-aligned bbox volume from SSL scale [sx, sy, sz] in meters."""
+    if scale is None:
+        return 0.0
+    arr = np.asarray(scale, dtype=float).reshape(-1)
+    if arr.size < 3:
+        return 0.0
+    return float(abs(arr[0] * arr[1] * arr[2]))
+
+
+def box_point_samples_for_volume(volume_m3: float, max_samples: int = 5000) -> int:
+    """Map bbox volume to sample count; min/mid/max scale with ``max_samples`` (default 5000)."""
+    max_samples = max(1, int(max_samples))
+    min_samples = max(1, int(round(max_samples * 0.1)))
+    mid_samples = max(min_samples, int(round(max_samples * 0.5)))
+
+    volume = max(0.0, float(volume_m3))
+    if volume >= BOX_POINT_VOLUME_MAX_M3:
+        return max_samples
+    if volume >= BOX_POINT_VOLUME_MID_M3:
+        t = (volume - BOX_POINT_VOLUME_MID_M3) / (BOX_POINT_VOLUME_MAX_M3 - BOX_POINT_VOLUME_MID_M3)
+        return int(round(mid_samples + t * (max_samples - mid_samples)))
+    t = volume / BOX_POINT_VOLUME_MID_M3 if BOX_POINT_VOLUME_MID_M3 > 0 else 0.0
+    return int(round(min_samples + t * (mid_samples - min_samples)))
+
+
+def box_point_samples_for_scale(scale, max_samples: int = 5000) -> int:
+    return box_point_samples_for_volume(bbox_volume_m3(scale), max_samples=max_samples)
+
 
 def _import_core_util():
     """Support package-relative imports and render_ssl loading util_data via importlib."""
