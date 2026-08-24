@@ -1513,6 +1513,14 @@ def visible_glb_path(view_dir: str) -> str:
     return os.path.join(geometry_glb_dir(view_dir), "scene_visible.glb")
 
 
+def visible_glb_manifest_path(view_dir: str) -> str:
+    return os.path.join(geometry_glb_dir(view_dir), "manifest.json")
+
+
+def visible_glb_by_object_dir(view_dir: str) -> str:
+    return os.path.join(geometry_glb_dir(view_dir), "by_object")
+
+
 def visible_merged_ply_path(view_dir: str) -> str:
     return os.path.join(geometry_pointcloud_dir(view_dir), "scene_visible.ply")
 

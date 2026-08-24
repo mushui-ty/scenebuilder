@@ -167,10 +167,33 @@ def _pano_planar_ok(view_dir: str, *, n_expected: int = 1) -> bool:
 
 
 def _visible_glb_ok(view_dir: str) -> bool:
-    if os.path.isfile(util_data.visible_glb_path(view_dir)):
+    merged = util_data.visible_glb_path(view_dir)
+    if os.path.isfile(merged) and os.path.getsize(merged) > 1024:
         return True
     # Legacy: GLB at view root (pre glb/ subdir).
-    return os.path.isfile(os.path.join(view_dir, "scene_visible.glb"))
+    legacy = os.path.join(view_dir, "scene_visible.glb")
+    if os.path.isfile(legacy) and os.path.getsize(legacy) > 1024:
+        return True
+    manifest_path = util_data.visible_glb_manifest_path(view_dir)
+    if not os.path.isfile(manifest_path):
+        return False
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        objects = manifest.get("objects") or []
+        if not objects:
+            return False
+        glb_root = util_data.geometry_glb_dir(view_dir)
+        for item in objects:
+            rel = item.get("path")
+            if not rel:
+                return False
+            part = os.path.join(glb_root, rel)
+            if not os.path.isfile(part) or os.path.getsize(part) <= 0:
+                return False
+        return True
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
 
 
 def _visible_ply_ok(view_dir: str) -> bool:
@@ -328,6 +351,30 @@ def _is_center_video_view(auto_spec: Optional[Dict[str, Any]] = None) -> bool:
     return _is_video_view(auto_spec) and (auto_spec or {}).get("video_trajectory") == "center"
 
 
+def _auto_path_needs_pano(
+    view_name: str,
+    job: Dict[str, Any],
+    auto_spec: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Whether this auto_path single view should render panorama artifacts."""
+    if not bool(job.get("pano")):
+        return False
+    if not view_name.startswith("auto_path_") or view_name.endswith("_seq"):
+        return False
+    if auto_spec is not None and "render_pano" in auto_spec:
+        return bool(auto_spec.get("render_pano"))
+    try:
+        from .auto_views import select_auto_path_pano_view_names
+    except ImportError:
+        from auto_views import select_auto_path_pano_view_names  # type: ignore
+    auto_specs = job.get("auto_view_specs") or {}
+    selected = select_auto_path_pano_view_names(
+        auto_specs,
+        int(job.get("pano_num", 3)),
+    )
+    return view_name in selected
+
+
 def _artifact_view_dir(view_dir: str, auto_spec: Optional[Dict[str, Any]] = None) -> str:
     """Primary geometry directory (perspective sequence root for all video views)."""
     return view_dir
@@ -362,18 +409,23 @@ def missing_view_artifacts(
     )
 
     if is_tangent_video:
-        if not _render_frames_ok(
-            view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
-        ):
-            missing.add("render")
-        if semantic and not _semantic_frames_ok(
-            view_dir, view_name, n_expected=n_expected
-        ):
-            missing.add("semantic")
-        if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
-            missing.add("camera_para")
-        if not _pano_complete(view_dir, semantic=False, depth=False):
-            missing.add("pano")
+        pano_only = bool((auto_spec or {}).get("pano_only"))
+        if pano_only:
+            if not _pano_complete(view_dir, semantic=semantic, depth=depth):
+                missing.add("pano")
+        else:
+            if not _render_frames_ok(
+                view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
+            ):
+                missing.add("render")
+            if semantic and not _semantic_frames_ok(
+                view_dir, view_name, n_expected=n_expected
+            ):
+                missing.add("semantic")
+            if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
+                missing.add("camera_para")
+            if not _pano_complete(view_dir, semantic=False, depth=False):
+                missing.add("pano")
     elif is_center_video:
         if not _render_frames_ok(
             view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
@@ -385,6 +437,8 @@ def missing_view_artifacts(
             missing.add("semantic")
         if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
             missing.add("camera_para")
+        if pano and not _pano_complete(view_dir, semantic=semantic, depth=depth):
+            missing.add("pano")
     else:
         if not _render_frames_ok(
             view_dir, view_name, semantic=semantic, depth=depth, n_expected=n_expected
@@ -400,6 +454,8 @@ def missing_view_artifacts(
             missing.add("camera_para")
 
     ssl_dir = view_dir
+    if is_tangent_video and bool((auto_spec or {}).get("pano_only")):
+        ssl_dir = _pano_dir_for(view_dir)
     if not os.path.isfile(os.path.join(ssl_dir, "ssl_opencv.txt")):
         missing.add("ssl")
 
@@ -413,16 +469,22 @@ def missing_view_artifacts(
         missing.add("planar")
     if visible_geometry and export_voxel and not _voxel_ok(artifact_dir):
         missing.add("voxel")
-    if is_tangent_video and export_point_cloud and not _pano_planar_ok(
-        view_dir, n_expected=n_expected
+    if (
+        export_point_cloud
+        and (
+            is_tangent_video
+            or (is_center_video and pano)
+        )
+        and not _pano_planar_ok(view_dir, n_expected=n_expected)
     ):
         missing.add("pano_planar")
     # topdown view worker pops pano and never produces a pano directory
     if pano and view_name != "topdown" and not is_video:
-        if not _pano_complete(view_dir, semantic=semantic, depth=depth):
-            missing.add("pano")
-        elif export_point_cloud and not _pano_planar_ok(view_dir, n_expected=n_expected):
-            missing.add("pano_planar")
+        if _auto_path_needs_pano(view_name, job, auto_spec):
+            if not _pano_complete(view_dir, semantic=semantic, depth=depth):
+                missing.add("pano")
+            elif export_point_cloud and not _pano_planar_ok(view_dir, n_expected=n_expected):
+                missing.add("pano_planar")
     return missing
 
 

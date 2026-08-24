@@ -20,6 +20,12 @@ import json
 import hashlib
 import colorsys
 import time
+from datetime import datetime
+
+
+def log_timestamp() -> str:
+    """Wall-clock timestamp for render progress logs."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def read_image_array(path: str) -> np.ndarray:

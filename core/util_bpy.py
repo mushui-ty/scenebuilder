@@ -7,8 +7,10 @@ import colorsys
 import glob
 import hashlib
 import contextlib
+import logging
 import math
 import shutil
+import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -657,8 +659,7 @@ def load_mesh_to_origin(asset_id: int, model_root: Union[str, List[str]]):
         # Record object pointers before import to identify newly added objects afterward
         before_ids = {obj.as_pointer() for obj in bpy.data.objects}
         try:
-            # Suppress Blender internal glTF import logs
-            with contextlib.redirect_stdout(None), contextlib.redirect_stderr(None):
+            with quiet_stdio():
                 bpy.ops.import_scene.gltf(
                     filepath=candidate,
                 )
@@ -1025,6 +1026,117 @@ def restore_object_transparency(record):
             pass
 
 
+@contextlib.contextmanager
+def quiet_stdio(*, suppress_logging: bool = True):
+    """Suppress stdout/stderr, including Blender C-level logs (Saved:, cycles progress)."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    saved_out = os.dup(1)
+    saved_err = os.dup(2)
+    devnull_file = open(os.devnull, "w")
+    loggers: List[Tuple[logging.Logger, int]] = []
+    root_old_level = logging.root.level
+
+    try:
+        os.dup2(devnull_fd, 1)
+        os.dup2(devnull_fd, 2)
+        if suppress_logging:
+            logging.root.setLevel(logging.CRITICAL + 1)
+            for name in ("io_scene_gltf2", "io_scene_gltf", "bpy"):
+                lg = logging.getLogger(name)
+                loggers.append((lg, lg.level))
+                lg.setLevel(logging.CRITICAL + 1)
+        with contextlib.redirect_stdout(devnull_file), contextlib.redirect_stderr(devnull_file):
+            yield
+    finally:
+        devnull_file.close()
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+        os.close(devnull_fd)
+        logging.root.setLevel(root_old_level)
+        for lg, old_level in loggers:
+            lg.setLevel(old_level)
+
+
+def export_gltf(filepath: str, *, quiet: bool = True, **kwargs) -> None:
+    """Export glTF/GLB via Blender addon, optionally suppressing verbose addon logs."""
+    if bpy is None:
+        raise RuntimeError("bpy unavailable")
+
+    def _export() -> None:
+        try:
+            bpy.ops.export_scene.gltf(filepath=filepath, **kwargs)
+        except TypeError:
+            fallback = dict(kwargs)
+            for key in ("export_format", "export_apply"):
+                fallback.pop(key, None)
+            if fallback:
+                bpy.ops.export_scene.gltf(filepath=filepath, **fallback)
+            else:
+                bpy.ops.export_scene.gltf(filepath=filepath)
+
+    if quiet:
+        with quiet_stdio():
+            _export()
+    else:
+        _export()
+
+
+def render_frame(*, write_still: bool = True, quiet: bool = True) -> None:
+    """Run bpy.ops.render.render, optionally silencing Blender progress output."""
+    if bpy is None:
+        raise RuntimeError("bpy unavailable")
+    if quiet:
+        with quiet_stdio():
+            bpy.ops.render.render(write_still=write_still)
+    else:
+        bpy.ops.render.render(write_still=write_still)
+
+
+def render_still_rgb_uint8(scene=None, *, quiet: bool = True) -> np.ndarray:
+    """Render current frame to uint8 RGB (top-down) without writing a file when possible."""
+    if bpy is None:
+        raise RuntimeError("bpy unavailable")
+    scene = scene or bpy.context.scene
+
+    render_frame(write_still=False, quiet=quiet)
+
+    img = bpy.data.images.get("Render Result")
+    if img is not None:
+        width, height = img.size
+        if width > 0 and height > 0:
+            pixels = np.array(img.pixels[:], dtype=np.float32).reshape(height, width, 4)
+            rgb = (np.clip(pixels[:, :, :3], 0.0, 1.0) * 255.0).astype(np.uint8)
+            # Blender stores pixels bottom-up; flip to match PNG / PIL convention.
+            return rgb[::-1, :, :]
+
+    # Cycles cleanup may remove Render Result; fall back to a quiet temp PNG.
+    import tempfile
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".scenebuilder_sem_")
+    os.close(fd)
+    render = scene.render
+    backup = (render.filepath, render.image_settings.file_format)
+    try:
+        render.filepath = tmp_path
+        render.image_settings.file_format = "PNG"
+        render_frame(write_still=True, quiet=quiet)
+        semantic_rgb = util.read_image_array(tmp_path)
+        if semantic_rgb.ndim == 2:
+            semantic_rgb = np.stack([semantic_rgb] * 3, axis=-1)
+        return np.asarray(semantic_rgb[..., :3], dtype=np.uint8)
+    finally:
+        render.filepath, render.image_settings.file_format = backup
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 def render_depth_exr(scene, depth_path: str):
     if bpy is None or scene is None:
         return False
@@ -1044,7 +1156,7 @@ def render_depth_exr(scene, depth_path: str):
         image_settings.color_mode = 'BW'
         if hasattr(image_settings, "color_depth"):
             image_settings.color_depth = '32'
-        bpy.ops.render.render(write_still=True)
+        render_frame(write_still=True)
         return True
     finally:
         render.filepath = backup[0]
@@ -1449,7 +1561,7 @@ def render_color_and_depth_png(
         if hasattr(image_settings, "color_depth"):
             image_settings.color_depth = "8"
 
-        bpy.ops.render.render(write_still=True)
+        render_frame(write_still=True)
 
         depth_files = sorted(glob.glob(os.path.join(temp_dir, "depth*.exr")))
         if not depth_files:
@@ -1488,7 +1600,7 @@ def render_color_and_depth_png(
             render.filepath = color_path
             image_settings.file_format = "PNG"
             image_settings.color_mode = "RGBA"
-            bpy.ops.render.render(write_still=True)
+            render_frame(write_still=True)
         print("⚠️ ray_cast fallback path does not export normal map (Cycles Normal pass only)")
         return render_depth_png(scene, depth_path, skip_objects=skip_objects)
     finally:

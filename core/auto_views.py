@@ -12,8 +12,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-AUTO_VIEW_WIDTH = 1000
-AUTO_VIEW_HEIGHT = 1000
+AUTO_VIEW_WIDTH = 500
+AUTO_VIEW_HEIGHT = 500
+AUTO_PATH_PANO_NUM_DEFAULT = 3
 PATH_SAMPLE_STRIDE = 4
 PATH_SAMPLE_MID_MIN = 40
 PATH_SAMPLE_MID_MAX = 100
@@ -42,6 +43,37 @@ def _evenly_spaced_indices(n_points: int, target_count: int) -> List[int]:
             seen.add(idx)
             deduped.append(idx)
     return deduped
+
+
+def list_auto_path_single_view_names(specs: Dict[str, Any]) -> List[str]:
+    """Sorted auto_path single-frame view names (excludes ``*_seq``)."""
+    return sorted(
+        n for n in specs
+        if n.startswith("auto_path_") and not n.endswith("_seq")
+    )
+
+
+def select_auto_path_pano_view_names(
+    specs: Dict[str, Any],
+    pano_num: int = AUTO_PATH_PANO_NUM_DEFAULT,
+) -> List[str]:
+    """Pick ``pano_num`` evenly spaced auto_path singles for panorama (+ optional pano geometry)."""
+    names = list_auto_path_single_view_names(specs)
+    if not names:
+        return []
+    indices = _evenly_spaced_indices(len(names), max(1, int(pano_num)))
+    return [names[i] for i in indices]
+
+
+def apply_auto_path_pano_flags(
+    specs: Dict[str, Any],
+    pano_num: int = AUTO_PATH_PANO_NUM_DEFAULT,
+) -> List[str]:
+    """Set ``render_pano`` on auto_path single specs; return selected view names."""
+    selected = set(select_auto_path_pano_view_names(specs, pano_num))
+    for name in list_auto_path_single_view_names(specs):
+        specs[name]["render_pano"] = name in selected
+    return sorted(selected)
 
 
 def sample_path_indices(n_points: int, stride: int = PATH_SAMPLE_STRIDE) -> List[int]:
@@ -87,7 +119,7 @@ def scene_bbox_center(context: Dict[str, Any]) -> List[float]:
 def random_camera_z(
     rng: random.Random,
     wall_z_max: float,
-    lo: float = 0.5,
+    lo: float = 1.5,
     hi: float = 2.5,
 ) -> float:
     """Sample camera height, ensuring it stays below max wall height."""
@@ -249,6 +281,7 @@ def build_auto_views_from_path(
     stride: int = PATH_SAMPLE_STRIDE,
     width: int = AUTO_VIEW_WIDTH,
     height: int = AUTO_VIEW_HEIGHT,
+    pano_num: int = AUTO_PATH_PANO_NUM_DEFAULT,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Build all view specs for auto mode. Returns (name→spec, render order name list)."""
     rng = rng or random.Random()
@@ -278,6 +311,8 @@ def build_auto_views_from_path(
     seq_name = seq_spec.pop("_view_name")
     specs[seq_name] = seq_spec
     names.append(seq_name)
+
+    apply_auto_path_pano_flags(specs, pano_num)
 
     return specs, names
 

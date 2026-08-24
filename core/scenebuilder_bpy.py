@@ -92,6 +92,7 @@ class BpySceneCtx:
         # Model cache: asset_id -> master_collection
         self.asset_cache = {}
         self.asset_bounds = {}
+        self._master_load_new_count = 0
         self._point_cloud_material_cache = {}
         self._point_cloud_image_cache = {}
         self._semantic_view_cache: Dict[str, Tuple[Any, List[Dict[str, Any]], Dict[Tuple[str, str], int]]] = {}
@@ -233,6 +234,8 @@ class BpySceneCtx:
                 except (ReferenceError, AttributeError):
                     pass
         self.asset_cache = {}
+        self.asset_bounds = {}
+        self._master_load_new_count = 0
         self._point_cloud_material_cache = {}
         self._point_cloud_image_cache = {}
         # -------------------
@@ -565,7 +568,7 @@ class BpySceneCtx:
             # After import, unlink master Collection from scene (keep datablock)
             self.scene.collection.children.unlink(new_coll)
             self.asset_cache[asset_id] = new_coll
-            print(f"📦 [Master load] {asset_id} loaded successfully and cached (Size: {master_bounds[1]-master_bounds[0] if master_bounds else 'None'})")
+            self._master_load_new_count += 1
             return new_coll
         else:
             # Import failed; clean up
@@ -954,6 +957,7 @@ class BpySceneCtx:
         if rebuild:
             self.clear_scene()
 
+        self._master_load_new_count = 0
         self.normalize_scene_data()
         total_start = time.perf_counter()
         skip_box_ids = set(exclude_box_ids or ())
@@ -1051,6 +1055,8 @@ class BpySceneCtx:
                     print(f"  ❌ {name} (bbox geometry): {e}")
 
         total_time = time.perf_counter() - total_start
+        if self._master_load_new_count:
+            print(f"📦 Master GLB: 新加载 {self._master_load_new_count} 个 unique assets（已缓存供 instancing）")
         print(f"✅ Scene build complete! Successfully added {success_count}/{box_load_count} objects")
         print(f"   Build time: {total_time:.2f}s (load: {load_time:.2f}s, transform: {transform_time:.2f}s)")
 
@@ -1062,14 +1068,7 @@ class BpySceneCtx:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         bpy.context.view_layer.update()
 
-        try:
-            bpy.ops.export_scene.gltf(
-                filepath=output_path,
-                export_format='GLB',
-            )
-        except TypeError:
-            # Handle parameter differences across Blender versions; .glb still exports binary glTF.
-            bpy.ops.export_scene.gltf(filepath=output_path)
+        util_bpy.export_gltf(output_path, export_format='GLB')
 
         print(f"✅ GLB exported: {output_path}")
         return output_path
@@ -1421,6 +1420,72 @@ class BpySceneCtx:
 
         return occlusion_fn
 
+    @staticmethod
+    def _visible_glb_export_ok(filepath: str, min_bytes: int = 1024) -> bool:
+        return os.path.isfile(filepath) and os.path.getsize(filepath) > min_bytes
+
+    def _bpy_export_gltf_selection(self, filepath: str, objects: List[Any]) -> None:
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in objects:
+            obj.select_set(True)
+        bpy.context.view_layer.objects.active = objects[0]
+        bpy.context.view_layer.update()
+        util_bpy.export_gltf(
+            filepath,
+            export_format='GLB',
+            use_selection=True,
+        )
+
+    def _export_visible_glb_by_object(
+        self,
+        merged_output_path: str,
+        object_pairs: List[Tuple[Dict[str, Any], Any]],
+        fallback_reason: str,
+    ) -> None:
+        glb_dir = os.path.dirname(merged_output_path) or "."
+        by_object_dir = os.path.join(glb_dir, "by_object")
+        os.makedirs(by_object_dir, exist_ok=True)
+        manifest_objects: List[Dict[str, Any]] = []
+        for entry, obj in object_pairs:
+            part_name = f"{obj.name}.glb"
+            part_path = os.path.join(by_object_dir, part_name)
+            try:
+                self._bpy_export_gltf_selection(part_path, [obj])
+            except RuntimeError as exc:
+                print(f"⚠️ Per-object GLB skipped {part_name}: {exc}")
+                continue
+            if not self._visible_glb_export_ok(part_path):
+                print(f"⚠️ Per-object GLB empty or invalid: {part_name}")
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+                continue
+            manifest_objects.append({
+                "category": entry["category"],
+                "id": entry["id"],
+                "path": os.path.join("by_object", part_name),
+            })
+        if not manifest_objects:
+            print("⚠️ Per-object GLB fallback produced no files")
+            return
+        manifest = {
+            "format": "per_object_glb",
+            "merged_glb_attempted": os.path.basename(merged_output_path),
+            "fallback_reason": fallback_reason,
+            "objects": manifest_objects,
+            "notes": (
+                "Merged scene_visible.glb export failed (often Blender 4GB GLB buffer limit). "
+                "viewvis NPZ triangle row order still follows visible_entries export order."
+            ),
+        }
+        manifest_path = os.path.join(glb_dir, "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        print(
+            f"✅ Visible GLB fallback: {len(manifest_objects)} per-object files + {manifest_path}"
+        )
+
     def export_visible_glb(
         self,
         output_path: str,
@@ -1430,6 +1495,7 @@ class BpySceneCtx:
     ):
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         temp_objects = []
+        object_pairs: List[Tuple[Dict[str, Any], Any]] = []
         prev_selection = list(bpy.context.selected_objects)
         prev_active = bpy.context.view_layer.objects.active
         try:
@@ -1485,23 +1551,39 @@ class BpySceneCtx:
                 self.scene_collection.objects.link(obj)
                 obj.select_set(True)
                 temp_objects.append(obj)
+                object_pairs.append((entry, obj))
 
             if not temp_objects:
                 print("⚠️ scene_visible.glb skipped: no geometry after clipping")
                 return
-            bpy.context.view_layer.objects.active = temp_objects[0]
-            bpy.context.view_layer.update()
+            merged_ok = False
+            merge_error = ""
             try:
-                bpy.ops.export_scene.gltf(
-                    filepath=output_path,
-                    export_format='GLB',
-                    use_selection=True,
+                self._bpy_export_gltf_selection(output_path, temp_objects)
+                if self._visible_glb_export_ok(output_path):
+                    merged_ok = True
+                else:
+                    merge_error = "merged GLB missing or too small after export"
+            except RuntimeError as exc:
+                merge_error = str(exc)
+
+            if merged_ok:
+                print(f"✅ Visible GLB exported: {output_path}")
+                ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
+                self._export_glb_opencv_copy(output_path, ref_camera, temp_objects)
+            else:
+                print(
+                    f"⚠️ Merged scene_visible.glb failed"
+                    f"{f': {merge_error}' if merge_error else ''}; "
+                    "falling back to per-object GLB"
                 )
-            except TypeError:
-                bpy.ops.export_scene.gltf(filepath=output_path, use_selection=True)
-            print(f"✅ Visible GLB exported: {output_path}")
-            ref_camera = visible_entries[0].get("camera_obj") if visible_entries else None
-            self._export_glb_opencv_copy(output_path, ref_camera, temp_objects)
+                if os.path.isfile(output_path):
+                    try:
+                        os.remove(output_path)
+                    except OSError:
+                        pass
+                self._export_visible_glb_by_object(output_path, object_pairs, merge_error or "unknown")
+
             if camera_states and len(camera_states) > 1 and frame_infos:
                 view_dir = os.path.dirname(os.path.dirname(output_path))
                 centroids, tri_object_indices = self._collect_visible_triangle_centroids_with_indices(
@@ -3608,14 +3690,6 @@ class BpySceneCtx:
         temp_dir: Optional[str] = None,
     ) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         """Render full-scene semantic image (caller should have switched to EEVEE)."""
-        import imageio
-        import tempfile
-
-        temp_dir = temp_dir or "."
-        os.makedirs(temp_dir, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".scenebuilder_sem_", dir=temp_dir)
-        os.close(fd)
-
         render = self.scene.render
         render_backup = (render.filepath, render.image_settings.file_format, render.film_transparent)
         objects: List[Dict[str, Any]] = []
@@ -3641,14 +3715,8 @@ class BpySceneCtx:
                 node.hide_render = True
                 hidden_nodes.append(node)
 
-            render.filepath = tmp_path
-            render.image_settings.file_format = "PNG"
             render.film_transparent = False
-            bpy.ops.render.render(write_still=True)
-            semantic_rgb = util.read_image_array(tmp_path)
-            if semantic_rgb.ndim == 2:
-                semantic_rgb = np.stack([semantic_rgb] * 3, axis=-1)
-            semantic_rgb = np.asarray(semantic_rgb[..., :3], dtype=np.uint8)
+            semantic_rgb = util_bpy.render_still_rgb_uint8(self.scene, quiet=True)
             util.attach_semantic_bbox_2d(objects, semantic_rgb)
             return semantic_rgb, objects
         finally:
@@ -3665,10 +3733,6 @@ class BpySceneCtx:
                 vs = self.scene.view_settings
                 vs.view_transform, vs.look, vs.exposure, vs.gamma = view_backup
             render.filepath, render.image_settings.file_format, render.film_transparent = render_backup
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
     def _render_isolated_semantic_mask(
         self,
@@ -3686,12 +3750,8 @@ class BpySceneCtx:
             import visibility_mask as vm  # type: ignore
 
         import imageio
-        import tempfile
 
         os.makedirs(os.path.dirname(mask_path) or ".", exist_ok=True)
-        os.makedirs(temp_dir, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(suffix=".png", prefix=".scenebuilder_iso_sem_", dir=temp_dir)
-        os.close(fd)
 
         render = self.scene.render
         render_backup = (render.filepath, render.image_settings.file_format, render.film_transparent)
@@ -3727,14 +3787,8 @@ class BpySceneCtx:
             if not rendered:
                 return 0
 
-            render.filepath = tmp_path
-            render.image_settings.file_format = "PNG"
             render.film_transparent = False
-            bpy.ops.render.render(write_still=True)
-            semantic_rgb = util.read_image_array(tmp_path)
-            if semantic_rgb.ndim == 2:
-                semantic_rgb = np.stack([semantic_rgb] * 3, axis=-1)
-            semantic_rgb = np.asarray(semantic_rgb[..., :3], dtype=np.uint8)
+            semantic_rgb = util_bpy.render_still_rgb_uint8(self.scene, quiet=True)
             mask = vm.binary_mask_from_isolated_semantic(
                 semantic_rgb,
                 target_color=color,
@@ -3756,10 +3810,6 @@ class BpySceneCtx:
                 vs = self.scene.view_settings
                 vs.view_transform, vs.look, vs.exposure, vs.gamma = view_backup
             render.filepath, render.image_settings.file_format, render.film_transparent = render_backup
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
 
     def render_semantic_bundle(
         self,
@@ -3788,29 +3838,33 @@ class BpySceneCtx:
         masks_dir = vm.semantic_masks_dir(view_dir)
         os.makedirs(masks_dir, exist_ok=True)
 
+        mask_targets = list(self._iter_semantic_scene_nodes())
+        print(f"🎨 Rendering semantic map + {len(mask_targets)} isolated masks...")
+
         with self._semantic_render_engine():
-            semantic_rgb, objects = self._render_semantic_to_array(temp_dir=view_dir)
-            overall_pixels_map: Dict[Tuple[str, str], int] = {}
-            index_objects: List[Dict[str, Any]] = []
-            for _color_key, node, object_meta in self._iter_semantic_scene_nodes():
-                category = str(object_meta.get("category", ""))
-                entity_id = object_meta.get("entity_id")
-                if entity_id is None:
-                    entity_id = object_meta.get("label")
-                entity_id = str(entity_id)
-                color = tuple(int(c) for c in object_meta.get("color", (0, 0, 0)))
-                mask_path = vm.semantic_mask_path(view_dir, category, entity_id)
-                overall_pixels = self._render_isolated_semantic_mask(
-                    node, color, mask_path, temp_dir=view_dir
-                )
-                overall_pixels_map[(category, entity_id)] = overall_pixels
-                index_objects.append({
-                    "category": category,
-                    "id": entity_id,
-                    "label": object_meta.get("label", entity_id),
-                    "overall_pixels": int(overall_pixels),
-                    "mask": vm.semantic_mask_relpath(category, entity_id),
-                })
+            with util_bpy.quiet_stdio():
+                semantic_rgb, objects = self._render_semantic_to_array(temp_dir=view_dir)
+                overall_pixels_map: Dict[Tuple[str, str], int] = {}
+                index_objects: List[Dict[str, Any]] = []
+                for _color_key, node, object_meta in mask_targets:
+                    category = str(object_meta.get("category", ""))
+                    entity_id = object_meta.get("entity_id")
+                    if entity_id is None:
+                        entity_id = object_meta.get("label")
+                    entity_id = str(entity_id)
+                    color = tuple(int(c) for c in object_meta.get("color", (0, 0, 0)))
+                    mask_path = vm.semantic_mask_path(view_dir, category, entity_id)
+                    overall_pixels = self._render_isolated_semantic_mask(
+                        node, color, mask_path, temp_dir=view_dir
+                    )
+                    overall_pixels_map[(category, entity_id)] = overall_pixels
+                    index_objects.append({
+                        "category": category,
+                        "id": entity_id,
+                        "label": object_meta.get("label", entity_id),
+                        "overall_pixels": int(overall_pixels),
+                        "mask": vm.semantic_mask_relpath(category, entity_id),
+                    })
 
         with open(vm.semantic_masks_index_path(view_dir), "w", encoding="utf-8") as f:
             json.dump({"objects": index_objects}, f, indent=2, ensure_ascii=False)
@@ -3994,7 +4048,7 @@ class BpySceneCtx:
                     self.scene, png_path, depth_path, skip_objects=transparent_objects
                 )
             else:
-                bpy.ops.render.render(write_still=True)
+                util_bpy.render_frame(write_still=True)
             if render_semantic or visible_geometry:
                 self.render_semantic_bundle(png_path, save_artifacts=True)
         finally:
@@ -4251,7 +4305,7 @@ class BpySceneCtx:
                     )
                     render_time = time.perf_counter() - render_start
                 else:
-                    bpy.ops.render.render(write_still=True)
+                    util_bpy.render_frame(write_still=True)
                     render_time = time.perf_counter() - render_start
                 if skip_render and visible_geometry:
                     skipped_geom = []
@@ -4651,7 +4705,7 @@ class BpySceneCtx:
             camera_obj, camera_data, prev_camera = self._create_render_camera(
                 camera_matrix, float(np.pi), width, height, panoramic=True
             )
-            print(f"🎬 Panorama rendering ({width}x{height}, EQUIRECTANGULAR 360x180)...")
+            print(f"⏱️ [{util.log_timestamp()}] Panorama render ({width}×{height}, EQUIRECTANGULAR 360×180)...")
             self.scene.render.filepath = pano_output_path
             render = self.scene.render
             render.image_settings.color_mode = 'RGBA'
@@ -4666,7 +4720,7 @@ class BpySceneCtx:
                     self.scene, pano_output_path, depth_path, skip_objects=transparent_objects
                 )
             else:
-                bpy.ops.render.render(write_still=True)
+                util_bpy.render_frame(write_still=True)
 
             if render_semantic or visible_geometry:
                 self.render_semantic_bundle(pano_output_path, save_artifacts=True)
@@ -4843,6 +4897,28 @@ class BpySceneCtx:
         total_start = time.perf_counter()
         seq_dir, dir_stamp = util.allocate_sequence_view_output_dir(output_root, view_dir_name)
         used_frame_stamps = {dir_stamp}
+        n_frames = len(camera_positions)
+
+        if view_dir_name:
+            ts = util.log_timestamp()
+            if view_dir_name.startswith("video_center_"):
+                pano_h = max(1, int(pano_resolution) // 2)
+                if pano_only:
+                    print(
+                        f"⏱️ [{ts}] Video pano render: {view_dir_name} "
+                        f"({n_frames} frames, {pano_resolution}×{pano_h})"
+                    )
+                else:
+                    pano_note = f", +pano {pano_resolution}×{pano_h}" if pano else ""
+                    print(
+                        f"⏱️ [{ts}] Video render: {view_dir_name} "
+                        f"({n_frames} frames, persp {width}×{height}{pano_note})"
+                    )
+            elif view_dir_name.startswith("auto_path_") and view_dir_name.endswith("_seq"):
+                print(
+                    f"⏱️ [{ts}] auto_path sequence: {view_dir_name} "
+                    f"({n_frames} frames, {width}×{height})"
+                )
 
         world_cam0 = list(camera_positions[0])
         world_look0 = list(look_at_targets[0])
@@ -4885,7 +4961,7 @@ class BpySceneCtx:
             z_max = self.context["meta"]["z_max"]
             frame_states = []
             pano_frame_states = []
-            n_frames = len(camera_positions)
+            video_pano_logged = False
             do_visible_ply = visible_geometry and export_point_cloud
             if export_visible_point_cloud is not None:
                 do_visible_ply = bool(export_visible_point_cloud)
@@ -4946,12 +5022,12 @@ class BpySceneCtx:
                             output_path,
                             camera_matrix,
                             pano_resolution=pano_resolution,
-                            render_depth=False,
-                            render_semantic=False,
+                            render_depth=render_depth,
+                            render_semantic=render_semantic,
                             visible_geometry=False,
                             export_glb=False,
-                            export_point_cloud=False,
-                            export_voxel=False,
+                            export_point_cloud=do_visible_ply,
+                            export_voxel=export_voxel,
                             transparent_objects=transparent_objects,
                             vss=vss,
                             world_cam_w=world_cam,
@@ -4967,7 +5043,7 @@ class BpySceneCtx:
                             opencv_ref_camera=world_cam0,
                             opencv_ref_look=world_look0,
                             opencv_ref_up=world_up0,
-                            export_planar_faces=False,
+                            export_planar_faces=do_planar,
                         )
                         pano_frame_states.append({
                             "camera_matrix": camera_matrix.copy(),
@@ -5011,7 +5087,7 @@ class BpySceneCtx:
                             self.scene, output_path, depth_path, skip_objects=transparent_objects
                         )
                     else:
-                        bpy.ops.render.render(write_still=True)
+                        util_bpy.render_frame(write_still=True)
 
                     if do_planar:
                         self.export_planar_faces_and_lines(
@@ -5053,6 +5129,17 @@ class BpySceneCtx:
                         with open(para_path, 'w') as f:
                             json.dump(camera_para, f, indent=4)
                     if pano:
+                        if (
+                            view_dir_name
+                            and view_dir_name.startswith("video_center_")
+                            and not video_pano_logged
+                        ):
+                            pano_w, pano_h = self._pano_dimensions(pano_resolution)
+                            print(
+                                f"⏱️ [{util.log_timestamp()}] Video pano pass: {view_dir_name} "
+                                f"({n_frames} frames, {pano_w}×{pano_h})"
+                            )
+                            video_pano_logged = True
                         self._render_pano_view_pass(
                             output_path,
                             camera_matrix,
@@ -5246,6 +5333,11 @@ class BpySceneCtx:
 
         total_start = time.perf_counter()
 
+        if view_dir_name and view_dir_name.startswith("auto_path_") and not view_dir_name.endswith("_seq"):
+            print(
+                f"⏱️ [{util.log_timestamp()}] auto_path render: {view_dir_name} ({width}×{height})"
+            )
+
         with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam_w, world_look_w, world_up_raw)
 
@@ -5414,7 +5506,7 @@ class BpySceneCtx:
                     )
                     render_time = time.perf_counter() - render_start
                 else:
-                    bpy.ops.render.render(write_still=True)
+                    util_bpy.render_frame(write_still=True)
                     render_time = time.perf_counter() - render_start
                 if skip_render and visible_geometry:
                     skipped_geom = []

@@ -122,6 +122,7 @@ def _run_auto_views_from_path(
     video: bool = False,
     video_frame_spacing: float = 0.2,
     video_frames: Optional[int] = None,
+    pano_num: int = 3,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Build path-driven view specs and write auto_views.json.
 
@@ -159,7 +160,9 @@ def _run_auto_views_from_path(
         if not path_points:
             print("⚠️  No floor_path result; auto views unavailable")
             return {}, []
-        specs, names = build_auto_views_from_path(path_points, context, width=width, height=height)
+        specs, names = build_auto_views_from_path(
+            path_points, context, width=width, height=height, pano_num=pano_num
+        )
         manifest = write_auto_views_manifest(y_dir, specs)
         n_path = len(path_points)
         n_single = sum(1 for n in names if not n.endswith("_seq") and not n.startswith("video_"))
@@ -167,27 +170,41 @@ def _run_auto_views_from_path(
             f"🎯 views=auto: {n_path} path points → "
             f"{n_single} single-frame views + 1 three-frame sequence; manifest → {manifest}"
         )
+    elif sparse_auto and has_sparse and _refresh_auto_path_resolutions(specs, names):
+        write_auto_views_manifest(y_dir, specs)
     elif not sparse_auto and not video:
         return {}, []
 
-    if video and not _video_manifest_ready(names):
-        if not path_points:
-            print("⚠️  --video: path_points_ssl is empty; video views skipped")
-        else:
-            try:
-                from .core.video_views import (
-                    build_video_views_from_path,
-                    strip_legacy_video_entries,
-                    video_manifest_complete,
-                )
-            except (ImportError, ValueError):
-                from core.video_views import (  # type: ignore
-                    build_video_views_from_path,
-                    strip_legacy_video_entries,
-                    video_manifest_complete,
-                )
-            if not video_manifest_complete(names):
-                strip_legacy_video_entries(specs, names)
+    if sparse_auto and specs:
+        try:
+            from .core.auto_views import apply_auto_path_pano_flags, list_auto_path_single_view_names
+        except (ImportError, ValueError):
+            from core.auto_views import apply_auto_path_pano_flags, list_auto_path_single_view_names  # type: ignore
+        pano_views = apply_auto_path_pano_flags(specs, pano_num)
+        n_single = len(list_auto_path_single_view_names(specs))
+        if n_single:
+            print(
+                f"🌐 auto_path pano sampling: {len(pano_views)}/{n_single} views "
+                f"(pano_num={pano_num}) → {', '.join(pano_views)}"
+            )
+            write_auto_views_manifest(y_dir, specs)
+
+    if video and path_points:
+        try:
+            from .core.video_views import (
+                build_video_views_from_path,
+                strip_legacy_video_entries,
+                video_specs_current,
+            )
+        except (ImportError, ValueError):
+            from core.video_views import (  # type: ignore
+                build_video_views_from_path,
+                strip_legacy_video_entries,
+                video_specs_current,
+            )
+        if not video_specs_current(specs, names):
+            strip_legacy_video_entries(specs, names)
+            _drop_video_view_specs(specs, names)
             video_specs, video_names = build_video_views_from_path(
                 path_points,
                 context,
@@ -197,8 +214,8 @@ def _run_auto_views_from_path(
                 height=height,
             )
             for name in video_names:
-                if name not in specs:
-                    specs[name] = video_specs[name]
+                specs[name] = video_specs[name]
+                if name not in names:
                     names.append(name)
             manifest = write_auto_views_manifest(y_dir, specs)
             n_vf = len((video_specs.get(video_names[0]) or {}).get("camera_positions") or [])
@@ -217,11 +234,13 @@ def _run_auto_views_from_path(
                 else f"spacing≈{video_frame_spacing}m"
             )
             print(
-                f"🎬 --video: added tangent + center trajectories "
-                f"({n_vf} frames each, path≈{path_len:.2f}m, {frame_note}) → {manifest}"
+                f"🎬 --video: path≈{path_len:.1f}m → center look-at persp 896×896 "
+                f"(+ pano 1024×512 with --pano, {frame_note}); manifest → {manifest}"
             )
-    elif video and loaded and _video_view_names(names):
-        print(f"📂 Reusing {len(_video_view_names(names))} video trajectories from auto_views.json")
+        elif loaded:
+            print(f"📂 Reusing {len(_video_view_names(names))} video trajectories from auto_views.json")
+    elif video and not path_points:
+        print("⚠️  --video: path_points_ssl is empty; video views skipped")
 
     if not sparse_auto:
         video_names = _video_view_names(names)
@@ -332,15 +351,39 @@ def _build_custom_view_spec(
     return "custom", spec
 
 
+def _apply_auto_path_pano_gate(
+    view_name: str,
+    spec: Dict[str, Any],
+    extra: dict,
+    job: dict,
+) -> None:
+    """Only selected auto_path singles render pano (+ pano geometry); video views unchanged."""
+    if not view_name.startswith("auto_path_") or view_name.endswith("_seq"):
+        return
+    try:
+        from .core.render_resume import _auto_path_needs_pano
+    except (ImportError, ValueError):
+        from core.render_resume import _auto_path_needs_pano  # type: ignore
+    if not _auto_path_needs_pano(view_name, job, spec):
+        extra["pano"] = False
+
+
 def _apply_video_render_flags(spec: Dict[str, Any], target: Dict[str, Any]) -> None:
-    """Tangent video always renders pano; center video never does."""
+    """Video views: center pano follows --pano; legacy tangent = pano-only."""
     if not spec.get("video"):
         return
     if spec.get("video_trajectory") == "center":
-        target["pano"] = False
+        target.pop("pano_only", None)
+        # Keep pano from job (--pano); do not force True
+        target["pano"] = bool(target.get("pano", False))
     else:
         target["pano"] = True
-    target.pop("pano_only", None)
+        if spec.get("pano_only"):
+            target["pano_only"] = True
+        else:
+            target.pop("pano_only", None)
+    if spec.get("pano_resolution") is not None:
+        target["pano_resolution"] = int(spec["pano_resolution"])
 
 
 def _render_view_spec(
@@ -413,6 +456,41 @@ def _render_auto_view_spec(
 # ---------------------------------------------------------------------------
 # Subprocess workers (one process per view)
 # ---------------------------------------------------------------------------
+
+def _describe_view_start(view_name: str, spec: Optional[Dict[str, Any]] = None, job: Optional[dict] = None) -> str:
+    """Human-readable label for view-start timing logs."""
+    spec = spec or {}
+    w, h = spec.get("width"), spec.get("height")
+    size = f"{w}×{h}" if w and h else "?×?"
+
+    if view_name.startswith("auto_path_"):
+        if view_name.endswith("_seq"):
+            n = len(spec.get("camera_positions") or [])
+            return f"auto_path sequence ({n or '?'} frames, {size})"
+        pano_note = ""
+        if (job or {}).get("pano") and spec.get("render_pano"):
+            pano_res = (job or {}).get("pano_resolution", 4096)
+            pano_note = f", +pano {pano_res}×{int(pano_res) // 2}"
+        return f"auto_path ({size}{pano_note})"
+
+    if view_name.startswith("video_center_"):
+        n = spec.get("video_frames", "?")
+        pano_res = spec.get("pano_resolution") or (job or {}).get("pano_resolution", 1024)
+        if spec.get("pano_only"):
+            return f"video pano-only ({n} frames, {pano_res}×{int(pano_res) // 2})"
+        label = f"video center ({n} frames, persp {size})"
+        if (job or {}).get("pano"):
+            label += f", +pano {pano_res}×{int(pano_res) // 2}"
+        return label
+
+    if view_name.startswith("video_tangent_"):
+        n = spec.get("video_frames", "?")
+        return f"video tangent pano ({n} frames)"
+
+    if view_name == "topdown":
+        return "topdown"
+    return view_name
+
 
 def _load_job(job_path: str) -> dict:
     with open(job_path, "r", encoding="utf-8") as f:
@@ -528,12 +606,47 @@ def _view_camera_kwargs(job: dict) -> dict:
 
 
 def _apply_job_view_size(job: dict, spec: Dict[str, Any]) -> None:
-    """Override auto/custom view spec resolution from render_ssl job settings."""
-    spec["width"] = int(job.get("width", 1000))
-    spec["height"] = int(job.get("height", 1000))
+    """Override auto/custom view spec resolution only when CLI explicitly sets --width/--height."""
+    if not job.get("explicit_view_size"):
+        return
+    spec["width"] = int(job["width"])
+    spec["height"] = int(job["height"])
     manual_fov = job.get("manual_fov")
     if manual_fov is not None:
         spec["manual_fov"] = float(manual_fov)
+
+
+def _refresh_auto_path_resolutions(
+    specs: Dict[str, Dict[str, Any]],
+    names: List[str],
+) -> bool:
+    """Sync auto_path_* specs to current AUTO_VIEW_WIDTH/HEIGHT constants."""
+    try:
+        from .core.auto_views import AUTO_VIEW_WIDTH, AUTO_VIEW_HEIGHT
+    except (ImportError, ValueError):
+        from core.auto_views import AUTO_VIEW_WIDTH, AUTO_VIEW_HEIGHT  # type: ignore
+    patched = False
+    for name in names:
+        if not name.startswith("auto_path_"):
+            continue
+        spec = specs.get(name)
+        if not spec:
+            continue
+        if int(spec.get("width", 0)) != AUTO_VIEW_WIDTH or int(spec.get("height", 0)) != AUTO_VIEW_HEIGHT:
+            spec["width"] = AUTO_VIEW_WIDTH
+            spec["height"] = AUTO_VIEW_HEIGHT
+            patched = True
+    return patched
+
+
+def _drop_video_view_specs(
+    specs: Dict[str, Dict[str, Any]],
+    names: List[str],
+) -> None:
+    for name in list(names):
+        if name.startswith("video_"):
+            specs.pop(name, None)
+            names.remove(name)
 
 
 def worker_render_view(job_path: str, view_name: str) -> None:
@@ -584,76 +697,98 @@ def worker_render_view(job_path: str, view_name: str) -> None:
 
     camera_kwargs = _view_camera_kwargs(job)
 
-    if view_name in auto_specs:
-        spec = dict(auto_specs[view_name])
-        _apply_job_view_size(job, spec)
-        extra = dict(extra)
-        _apply_video_render_flags(spec, extra)
-        _render_auto_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
-        view_dir = view_dir_for(output_dir, view_name)
-        record_view_complete(
-            output_dir,
-            view_name,
-            view_dir=view_dir,
-            main_pngs=list_primary_frames(view_dir),
-        )
-        return
+    try:
+        from .core import util
+    except (ImportError, ValueError):
+        from core import util  # type: ignore
 
-    if view_name in custom_specs:
-        spec = dict(custom_specs[view_name])
-        _apply_job_view_size(job, spec)
-        _render_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
-        view_dir = view_dir_for(output_dir, view_name)
-        record_view_complete(
-            output_dir,
-            view_name,
-            view_dir=view_dir,
-            main_pngs=list_primary_frames(view_dir),
-        )
-        return
+    view_start = time.perf_counter()
+    view_label = _describe_view_start(view_name, view_spec, job)
+    print(f"⏱️ [{util.log_timestamp()}] Start view: {view_name} — {view_label}")
 
-    if view_name == "topdown":
-        extra.pop("pano", None)
-        extra.pop("pano_resolution", None)
-        ctx.topdown_view(
-            output_dir,
-            show_ceiling=False,
+    try:
+        if view_name in auto_specs:
+            spec = dict(auto_specs[view_name])
+            _apply_job_view_size(job, spec)
+            extra = dict(extra)
+            _apply_video_render_flags(spec, extra)
+            _apply_auto_path_pano_gate(view_name, spec, extra, job)
+            _render_auto_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
+            view_dir = view_dir_for(output_dir, view_name)
+            if spec.get("pano_only"):
+                try:
+                    from .core.render_resume import _pano_dir_for
+                except (ImportError, ValueError):
+                    from core.render_resume import _pano_dir_for  # type: ignore
+                main_pngs = list_primary_frames(_pano_dir_for(view_dir))
+            else:
+                main_pngs = list_primary_frames(view_dir)
+            record_view_complete(
+                output_dir,
+                view_name,
+                view_dir=view_dir,
+                main_pngs=main_pngs,
+            )
+            return
+
+        if view_name in custom_specs:
+            spec = dict(custom_specs[view_name])
+            _apply_job_view_size(job, spec)
+            _render_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
+            view_dir = view_dir_for(output_dir, view_name)
+            record_view_complete(
+                output_dir,
+                view_name,
+                view_dir=view_dir,
+                main_pngs=list_primary_frames(view_dir),
+            )
+            return
+
+        if view_name == "topdown":
+            extra.pop("pano", None)
+            extra.pop("pano_resolution", None)
+            ctx.topdown_view(
+                output_dir,
+                show_ceiling=False,
+                rebuild=True,
+                use_HDRI=False,
+                **_view_camera_kwargs(job),
+                **extra,
+            )
+            view_dir = view_dir_for(output_dir, "topdown")
+            record_view_complete(
+                output_dir,
+                "topdown",
+                view_dir=view_dir,
+                main_pngs=list_primary_frames(view_dir),
+            )
+            return
+
+        look_at = job["look_at"]
+        view_cameras = job["view_cameras"]
+        if view_name not in view_cameras:
+            raise ValueError(f"Unknown view: {view_name}")
+
+        ctx.render_view(
+            output_path=output_dir,
+            camera_position=view_cameras[view_name],
+            look_at_target=look_at,
             rebuild=True,
             use_HDRI=False,
+            view_dir_name=view_dir_name_for(view_name),
             **_view_camera_kwargs(job),
             **extra,
         )
-        view_dir = view_dir_for(output_dir, "topdown")
+        view_dir = view_dir_for(output_dir, view_name)
         record_view_complete(
             output_dir,
-            "topdown",
+            view_name,
             view_dir=view_dir,
             main_pngs=list_primary_frames(view_dir),
         )
-        return
-
-    look_at = job["look_at"]
-    view_cameras = job["view_cameras"]
-    if view_name not in view_cameras:
-        raise ValueError(f"Unknown view: {view_name}")
-
-    ctx.render_view(
-        output_path=output_dir,
-        camera_position=view_cameras[view_name],
-        look_at_target=look_at,
-        rebuild=True,
-        use_HDRI=False,
-        view_dir_name=view_dir_name_for(view_name),
-        **_view_camera_kwargs(job),
-        **extra,
-    )
-    view_dir = view_dir_for(output_dir, view_name)
-    record_view_complete(
-        output_dir,
-        view_name,
-        view_dir=view_dir,
-        main_pngs=list_primary_frames(view_dir),
-    )
+    finally:
+        elapsed = time.perf_counter() - view_start
+        print(f"⏱️ [{util.log_timestamp()}] Done view: {view_name} ({elapsed:.1f}s)")
 
 
 def worker_render_post(job_path: str) -> None:
@@ -718,12 +853,22 @@ def _is_worker_segv_error(exc: subprocess.CalledProcessError) -> bool:
     return exc.returncode == -signal.SIGSEGV
 
 
+def _worker_env() -> dict:
+    """Subprocess env: inherit parent PYTHONPATH and ensure scenebuilder package is importable."""
+    env = os.environ.copy()
+    prefix_paths = [_PKG_PARENT, _PKG_ROOT]
+    existing = env.get("PYTHONPATH", "")
+    merged = os.pathsep.join(prefix_paths + ([existing] if existing else []))
+    env["PYTHONPATH"] = merged
+    return env
+
+
 def _spawn_worker(cmd: List[str], *, label: str) -> None:
     """Run a render worker subprocess; retry on intermittent Blender SIGSEGV."""
     last_exc: Optional[subprocess.CalledProcessError] = None
     for attempt in range(1, _WORKER_SEGV_RETRIES + 1):
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, env=_worker_env())
             return
         except subprocess.CalledProcessError as exc:
             last_exc = exc
@@ -885,6 +1030,7 @@ def render_ssl(
     depth: bool = False,
     pano: bool = False,
     pano_resolution: int = 4096,
+    pano_num: int = 3,
     samples: Optional[int] = None,
     normalized_topdown: bool = False,
     floor_path: bool = True,
@@ -926,6 +1072,7 @@ def render_ssl(
     """
     width = int(width)
     height = int(height)
+    explicit_view_size = width != 1000 or height != 1000
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be positive integers")
     if manual_fov is not None and float(manual_fov) <= 0:
@@ -1085,6 +1232,7 @@ def render_ssl(
                 video=video,
                 video_frame_spacing=video_frame_spacing,
                 video_frames=video_frames,
+                pano_num=pano_num,
             )
 
     if camera_position is not None:
@@ -1124,8 +1272,10 @@ def render_ssl(
         "depth": depth,
         "pano": pano,
         "pano_resolution": int(pano_resolution),
+        "pano_num": max(1, int(pano_num)),
         "width": int(width),
         "height": int(height),
+        "explicit_view_size": bool(explicit_view_size),
         "auto_fov": bool(auto_fov),
         "manual_fov": float(manual_fov) if manual_fov is not None else None,
         "look_at": look_at,
@@ -1160,12 +1310,16 @@ def render_ssl(
         )
         if skipped_views:
             print(f"⏭️  Skipped {len(skipped_views)} completed views: {', '.join(skipped_views)}")
-    if views_to_run:
-        step = "Step 3: " if normalized_topdown else ""
-        print(f"🎨 {step}Multi-view rendering → {y_dir} ({len(views_to_run)} subprocesses)")
-        for view_name in views_to_run:
-            print(f"🔄 Subprocess rendering: {view_name}")
-            _spawn_worker_view(job_path, view_name)
+        if views_to_run:
+            step = "Step 3: " if normalized_topdown else ""
+            print(f"🎨 {step}Multi-view rendering → {y_dir} ({len(views_to_run)} subprocesses)")
+            try:
+                from .core import util
+            except (ImportError, ValueError):
+                from core import util  # type: ignore
+            for view_name in views_to_run:
+                print(f"🔄 [{util.log_timestamp()}] Subprocess rendering: {view_name}")
+                _spawn_worker_view(job_path, view_name)
     elif not views_to_run and views == "auto":
         print("⏭️  Auto views not generated (backend does not support bpy)")
     elif not views_to_run and video:
@@ -1403,6 +1557,13 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
                         help="For render_view perspectives, also export sibling dir {millis_timestamp}_pano (not for topdown)")
     parser.add_argument("--pano_resolution", type=int, default=4096,
                         help="Panorama horizontal resolution; only with --pano; height is half (default: 4096, i.e. 4096x2048)")
+    parser.add_argument(
+        "--pano_num",
+        type=int,
+        default=3,
+        help="With --pano and --views auto: evenly sample this many auto_path singles for pano "
+             "(default: 3; persp render still runs for all auto_path views)",
+    )
     parser.add_argument("--width", type=int, default=1000,
                         help="Render width for views (default: 1000; same semantics as render_view)")
     parser.add_argument("--height", type=int, default=1000,
@@ -1425,8 +1586,8 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     parser.add_argument(
         "--video",
         action="store_true",
-        help="Render tangent + center closed-loop videos along the floor path. "
-             "Tangent view always includes pano; center view is perspective-only. "
+        help="Render center-look closed-loop video along the floor path "
+             "(perspective 896×896; pano 1024×512 only with --pano). "
              "Use alone for video-only (normalized topdown + path planning, no sparse auto views), "
              "or with --views auto to append on top of sparse auto views",
     )
@@ -1489,6 +1650,8 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         parser.error("--video_spacing must be positive")
     if args.video_frames is not None and args.video_frames < 3:
         parser.error("--video_frames must be at least 3")
+    if args.pano_num < 1:
+        parser.error("--pano_num must be at least 1")
 
     render_kwargs = dict(
         backend=args.backend,
@@ -1508,6 +1671,7 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         depth=args.depth,
         pano=args.pano,
         pano_resolution=args.pano_resolution,
+        pano_num=args.pano_num,
         normalized_topdown=normalized_topdown,
         floor_path=floor_path,
         resume=not args.no_resume,

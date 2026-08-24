@@ -25,8 +25,12 @@ from .auto_views import (
 
 VIDEO_FRAME_SPACING_M = 0.2
 VIDEO_MIN_FRAMES = 3
-VIDEO_HEIGHT_LO = 1.0
-VIDEO_HEIGHT_HI = 1.5
+VIDEO_HEIGHT_LO = 1.3
+VIDEO_HEIGHT_HI = 1.8
+VIDEO_CENTER_WIDTH = 896
+VIDEO_CENTER_HEIGHT = 896
+VIDEO_PANO_RESOLUTION = 1024
+VIDEO_TANGENT_PANO_RESOLUTION = VIDEO_PANO_RESOLUTION  # legacy alias
 VIDEO_TANGENT_LOOK_DIST = 3.0
 VIDEO_TANGENT_SMOOTH_WINDOW = 9
 VIDEO_TANGENT_CENTER_BIAS = 0.35
@@ -218,8 +222,10 @@ def _base_video_spec(
     frame_spacing_m: float,
     video_pano: bool,
     view_name: str,
+    pano_only: bool = False,
+    pano_resolution: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return {
+    spec: Dict[str, Any] = {
         "type": "sequence",
         "video": True,
         "video_trajectory": trajectory,
@@ -235,6 +241,11 @@ def _base_video_spec(
         "height": int(height),
         "_view_name": view_name,
     }
+    if pano_only:
+        spec["pano_only"] = True
+    if pano_resolution is not None:
+        spec["pano_resolution"] = int(pano_resolution)
+    return spec
 
 
 def build_video_view_specs(
@@ -246,35 +257,19 @@ def build_video_view_specs(
     width: int = AUTO_VIEW_WIDTH,
     height: int = AUTO_VIEW_HEIGHT,
     frame_spacing_m: float = VIDEO_FRAME_SPACING_M,
+    center_width: int = VIDEO_CENTER_WIDTH,
+    center_height: int = VIDEO_CENTER_HEIGHT,
+    pano_resolution: int = VIDEO_PANO_RESOLUTION,
 ) -> Dict[str, Dict[str, Any]]:
-    """Build tangent + center video sequence specs."""
+    """Build center-look video sequence spec (perspective; pano when --pano)."""
     bbox_center = scene_bbox_center(context)
-    tangent_z = _camera_height(rng)
     center_z = _camera_height(rng)
-    tangent_fov = random_fov_deg(rng)
     center_fov = random_fov_deg(rng)
-    tangent_cam, tangent_look = build_video_trajectory_tangent(
-        path_points_ssl, n_frames, tangent_z, bbox_center
-    )
     center_cam, center_look = build_video_trajectory_center(
         path_points_ssl, n_frames, center_z, bbox_center
     )
-    tangent_name = f"video_tangent_{n_frames}"
     center_name = f"video_center_{n_frames}"
-    specs = {
-        tangent_name: _base_video_spec(
-            trajectory="tangent",
-            n_frames=n_frames,
-            camera_z=tangent_z,
-            fov=tangent_fov,
-            cam_positions=tangent_cam,
-            look_targets=tangent_look,
-            width=width,
-            height=height,
-            frame_spacing_m=frame_spacing_m,
-            video_pano=True,
-            view_name=tangent_name,
-        ),
+    return {
         center_name: _base_video_spec(
             trajectory="center",
             n_frames=n_frames,
@@ -282,26 +277,46 @@ def build_video_view_specs(
             fov=center_fov,
             cam_positions=center_cam,
             look_targets=center_look,
-            width=width,
-            height=height,
+            width=center_width,
+            height=center_height,
             frame_spacing_m=frame_spacing_m,
             video_pano=False,
             view_name=center_name,
+            pano_resolution=pano_resolution,
         ),
     }
-    specs[tangent_name]["video_tangent_center_bias"] = float(VIDEO_TANGENT_CENTER_BIAS)
-    specs[tangent_name]["look_at_center"] = list(bbox_center)
-    return specs
 
 
 _LEGACY_VIDEO_RE = re.compile(r"^video_\d+$")
 
 
 def video_manifest_complete(names: Sequence[str]) -> bool:
-    """True when both tangent and center trajectories are present in the manifest."""
-    has_tangent = any(n.startswith("video_tangent_") for n in names)
-    has_center = any(n.startswith("video_center_") for n in names)
-    return has_tangent and has_center
+    """True when a center-look video trajectory is present."""
+    return any(n.startswith("video_center_") for n in names)
+
+
+def video_specs_current(
+    specs: Dict[str, Dict[str, Any]],
+    names: Sequence[str],
+) -> bool:
+    """True when cached video specs match current resolution / trajectory settings."""
+    if not video_manifest_complete(names):
+        return False
+    if any(n.startswith("video_tangent_") for n in names):
+        return False
+    for name in names:
+        if not name.startswith("video_center_"):
+            continue
+        spec = specs.get(name) or {}
+        if int(spec.get("width", 0)) != VIDEO_CENTER_WIDTH:
+            return False
+        if int(spec.get("height", 0)) != VIDEO_CENTER_HEIGHT:
+            return False
+        if int(spec.get("pano_resolution", 0)) != VIDEO_PANO_RESOLUTION:
+            return False
+        if spec.get("pano_only"):
+            return False
+    return True
 
 
 def strip_legacy_video_entries(
@@ -325,7 +340,7 @@ def build_video_views_from_path(
     width: int = AUTO_VIEW_WIDTH,
     height: int = AUTO_VIEW_HEIGHT,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
-    """Build tangent + center video sequence specs. Returns (name→spec, render order)."""
+    """Build center-look video sequence spec. Returns (name→spec, render order)."""
     rng = rng or random.Random()
     spacing_m = max(1e-3, float(frame_spacing_m))
     n_frames = max(VIDEO_MIN_FRAMES, int(n_frames)) if n_frames is not None else compute_video_frame_count(
@@ -342,5 +357,5 @@ def build_video_views_from_path(
     )
     for spec in specs.values():
         spec.pop("_view_name", None)
-    names = ["video_tangent_{}".format(n_frames), "video_center_{}".format(n_frames)]
-    return specs, names
+    center_name = f"video_center_{n_frames}"
+    return specs, [center_name]
