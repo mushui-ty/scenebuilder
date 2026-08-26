@@ -1271,6 +1271,7 @@ class BpySceneCtx:
         export_point_cloud: bool = False,
         export_voxel: bool = False,
         frame_infos: Optional[List[Dict[str, Any]]] = None,
+        skip_merged_glb: bool = False,
     ):
         """Multi-camera merged export: keep if visible from any view; frustum clip is union across views."""
         bpy.context.view_layer.update()
@@ -1292,6 +1293,7 @@ class BpySceneCtx:
                 merge_entries,
                 camera_states=camera_states if len(camera_states) > 1 else None,
                 frame_infos=frame_infos,
+                skip_merged_glb=skip_merged_glb,
             )
         if export_point_cloud:
             self.export_visible_point_cloud(
@@ -1314,6 +1316,7 @@ class BpySceneCtx:
         export_voxel: bool = False,
         *,
         pano_resolution: int = 4096,
+        skip_merged_glb: bool = False,
     ):
         """Multi-panorama merged export: keep full geometry if unobstructed from any camera; no frustum clip."""
         bpy.context.view_layer.update()
@@ -1330,7 +1333,11 @@ class BpySceneCtx:
         )
         merge_entries = [e for e in visible_entries if e.get("in_merged_export", True)]
         if export_glb:
-            self.export_visible_glb(util_data.visible_glb_path(output_dir), merge_entries)
+            self.export_visible_glb(
+                util_data.visible_glb_path(output_dir),
+                merge_entries,
+                skip_merged_glb=skip_merged_glb,
+            )
         if export_point_cloud:
             self.export_visible_point_cloud(output_dir, visible_entries, merge_entries)
         if export_voxel:
@@ -1492,6 +1499,8 @@ class BpySceneCtx:
         visible_entries: List[Dict[str, Any]],
         camera_states: Optional[List[Tuple[Any, set]]] = None,
         frame_infos: Optional[List[Dict[str, Any]]] = None,
+        *,
+        skip_merged_glb: bool = False,
     ):
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         temp_objects = []
@@ -1558,14 +1567,17 @@ class BpySceneCtx:
                 return
             merged_ok = False
             merge_error = ""
-            try:
-                self._bpy_export_gltf_selection(output_path, temp_objects)
-                if self._visible_glb_export_ok(output_path):
-                    merged_ok = True
-                else:
-                    merge_error = "merged GLB missing or too small after export"
-            except RuntimeError as exc:
-                merge_error = str(exc)
+            if skip_merged_glb:
+                merge_error = "skipped merged GLB (video / large sequence)"
+            else:
+                try:
+                    self._bpy_export_gltf_selection(output_path, temp_objects)
+                    if self._visible_glb_export_ok(output_path):
+                        merged_ok = True
+                    else:
+                        merge_error = "merged GLB missing or too small after export"
+                except RuntimeError as exc:
+                    merge_error = str(exc)
 
             if merged_ok:
                 print(f"✅ Visible GLB exported: {output_path}")
@@ -3816,8 +3828,9 @@ class BpySceneCtx:
         output_path: str,
         *,
         save_artifacts: bool = True,
+        isolated_masks: bool = True,
     ) -> Tuple[np.ndarray, List[Dict[str, Any]], Dict[Tuple[str, str], int]]:
-        """Full-scene semantic + per-object isolated masks; EEVEE for perspective, Cycles for equirectangular panorama."""
+        """Full-scene semantic + optional per-object isolated masks."""
         try:
             from . import visibility_mask as vm
         except ImportError:
@@ -3839,35 +3852,48 @@ class BpySceneCtx:
         os.makedirs(masks_dir, exist_ok=True)
 
         mask_targets = list(self._iter_semantic_scene_nodes())
-        print(f"🎨 Rendering semantic map + {len(mask_targets)} isolated masks...")
+        if isolated_masks:
+            print(f"🎨 Rendering semantic map + {len(mask_targets)} isolated masks...")
+        else:
+            print(f"🎨 Rendering semantic map ({len(mask_targets)} objects, no isolated masks)...")
 
         with self._semantic_render_engine():
             with util_bpy.quiet_stdio():
                 semantic_rgb, objects = self._render_semantic_to_array(temp_dir=view_dir)
                 overall_pixels_map: Dict[Tuple[str, str], int] = {}
                 index_objects: List[Dict[str, Any]] = []
-                for _color_key, node, object_meta in mask_targets:
-                    category = str(object_meta.get("category", ""))
-                    entity_id = object_meta.get("entity_id")
-                    if entity_id is None:
-                        entity_id = object_meta.get("label")
-                    entity_id = str(entity_id)
-                    color = tuple(int(c) for c in object_meta.get("color", (0, 0, 0)))
-                    mask_path = vm.semantic_mask_path(view_dir, category, entity_id)
-                    overall_pixels = self._render_isolated_semantic_mask(
-                        node, color, mask_path, temp_dir=view_dir
-                    )
-                    overall_pixels_map[(category, entity_id)] = overall_pixels
-                    index_objects.append({
-                        "category": category,
-                        "id": entity_id,
-                        "label": object_meta.get("label", entity_id),
-                        "overall_pixels": int(overall_pixels),
-                        "mask": vm.semantic_mask_relpath(category, entity_id),
-                    })
+                if isolated_masks:
+                    for _color_key, node, object_meta in mask_targets:
+                        category = str(object_meta.get("category", ""))
+                        entity_id = object_meta.get("entity_id")
+                        if entity_id is None:
+                            entity_id = object_meta.get("label")
+                        entity_id = str(entity_id)
+                        color = tuple(int(c) for c in object_meta.get("color", (0, 0, 0)))
+                        mask_path = vm.semantic_mask_path(view_dir, category, entity_id)
+                        overall_pixels = self._render_isolated_semantic_mask(
+                            node, color, mask_path, temp_dir=view_dir
+                        )
+                        overall_pixels_map[(category, entity_id)] = overall_pixels
+                        index_objects.append({
+                            "category": category,
+                            "id": entity_id,
+                            "label": object_meta.get("label", entity_id),
+                            "overall_pixels": int(overall_pixels),
+                            "mask": vm.semantic_mask_relpath(category, entity_id),
+                        })
+                else:
+                    for obj in objects:
+                        category = str(obj.get("category", ""))
+                        entity_id = str(obj.get("entity_id") or obj.get("label", ""))
+                        color = tuple(int(c) for c in obj.get("color", (0, 0, 0)))
+                        overall_pixels_map[(category, entity_id)] = vm.count_semantic_color_pixels(
+                            semantic_rgb, color
+                        )
 
-        with open(vm.semantic_masks_index_path(view_dir), "w", encoding="utf-8") as f:
-            json.dump({"objects": index_objects}, f, indent=2, ensure_ascii=False)
+        if isolated_masks:
+            with open(vm.semantic_masks_index_path(view_dir), "w", encoding="utf-8") as f:
+                json.dump({"objects": index_objects}, f, indent=2, ensure_ascii=False)
 
         if save_artifacts:
             semantic_path, metadata_path = self._semantic_outputs(output_path)
@@ -3878,7 +3904,8 @@ class BpySceneCtx:
             if bbox_overlay_path:
                 print(f"✅ Bounding box visualization: {bbox_overlay_path}")
             print(f"✅ Semantic map exported: {semantic_path}")
-            print(f"✅ Semantic masks exported: {masks_dir} ({len(index_objects)} items)")
+            if isolated_masks:
+                print(f"✅ Semantic masks exported: {masks_dir} ({len(index_objects)} items)")
 
         result = (semantic_rgb, objects, overall_pixels_map)
         self._semantic_view_cache[cache_key] = result
@@ -4685,6 +4712,7 @@ class BpySceneCtx:
         opencv_ref_look=None,
         opencv_ref_up=None,
         export_planar_faces: bool = False,
+        isolated_semantic_masks: bool = True,
     ) -> str:
         pano_output_path = self._pano_output_path(output_path)
         pano_dir = os.path.dirname(pano_output_path) or "."
@@ -4723,7 +4751,11 @@ class BpySceneCtx:
                 util_bpy.render_frame(write_still=True)
 
             if render_semantic or visible_geometry:
-                self.render_semantic_bundle(pano_output_path, save_artifacts=True)
+                self.render_semantic_bundle(
+                    pano_output_path,
+                    save_artifacts=True,
+                    isolated_masks=isolated_semantic_masks,
+                )
             if visible_geometry and (export_glb or export_point_cloud or export_voxel):
                 self.export_visible_geometry(
                     pano_dir,
@@ -4841,12 +4873,157 @@ class BpySceneCtx:
                 transparent_objects.add(obj)
         return transparent_objects
 
+    def _serialize_transparent_refs(
+        self,
+        wall_transparency_records,
+        object_transparency_records,
+    ) -> List[Dict[str, str]]:
+        """Stable refs for per-frame auto-transparency (persisted in camera_para.json)."""
+        refs: List[Dict[str, str]] = []
+        for wall_id in wall_transparency_records:
+            refs.append({"kind": "wall", "id": str(wall_id)})
+        for record in object_transparency_records:
+            obj = record.get("object")
+            if obj is None:
+                continue
+            floor_info = self.mesh_nodes.get("floor")
+            if floor_info and floor_info.get("node") == obj:
+                refs.append({"kind": "floor"})
+                continue
+            ceiling_info = self.mesh_nodes.get("ceiling")
+            if ceiling_info and ceiling_info.get("node") == obj:
+                refs.append({"kind": "ceiling"})
+                continue
+            refs.append({"kind": "object", "name": str(obj.name)})
+        return refs
+
+    def _resolve_transparent_refs(self, refs) -> set:
+        """Rebuild bpy object set from serialized transparent_refs."""
+        transparent_objects = set()
+        for ref in refs or []:
+            kind = ref.get("kind")
+            if kind == "wall":
+                wall_obj = self.mesh_nodes["walls"].get(ref.get("id"), {}).get("node")
+                if wall_obj is not None:
+                    transparent_objects.add(wall_obj)
+            elif kind == "floor":
+                floor_info = self.mesh_nodes.get("floor")
+                obj = floor_info.get("node") if floor_info else None
+                if obj is not None:
+                    transparent_objects.add(obj)
+            elif kind == "ceiling":
+                ceiling_info = self.mesh_nodes.get("ceiling")
+                obj = ceiling_info.get("node") if ceiling_info else None
+                if obj is not None:
+                    transparent_objects.add(obj)
+            elif kind == "object":
+                obj = bpy.data.objects.get(str(ref.get("name", "")))
+                if obj is not None:
+                    transparent_objects.add(obj)
+        return transparent_objects
+
+    def _transparent_objects_for_view(
+        self,
+        camera_position,
+        look_at_target,
+        transparent_alpha: float,
+        z_max: float,
+    ) -> set:
+        """Compute auto-transparency object set without leaving the scene modified."""
+        wall_transparency_records, object_transparency_records = self._apply_view_auto_transparency(
+            camera_position, look_at_target, transparent_alpha, z_max
+        )
+        try:
+            return self._collect_transparent_objects(
+                wall_transparency_records, object_transparency_records
+            )
+        finally:
+            self._restore_view_transparency(wall_transparency_records, object_transparency_records)
+
+    def _camera_para_with_transparent_refs(
+        self,
+        camera_para: Dict[str, Any],
+        wall_transparency_records,
+        object_transparency_records,
+    ) -> Dict[str, Any]:
+        out = dict(camera_para)
+        out["transparent_refs"] = self._serialize_transparent_refs(
+            wall_transparency_records, object_transparency_records
+        )
+        return out
+
+    def _transparent_objects_from_camera_para(
+        self,
+        para: Dict[str, Any],
+        *,
+        transparent_alpha: float = 0.0,
+    ) -> set:
+        if "transparent_refs" in para:
+            return self._resolve_transparent_refs(para.get("transparent_refs"))
+        cam_pos = np.asarray(para["camera_position"], dtype=float)
+        look_at = np.asarray(para["look_at_target"], dtype=float)
+        z_max = self.context["meta"]["z_max"]
+        return self._transparent_objects_for_view(
+            cam_pos, look_at, transparent_alpha, z_max
+        )
+
     def _restore_view_transparency(self, wall_transparency_records, object_transparency_records):
         for wall_id, slots in wall_transparency_records.items():
             wall_obj = self.mesh_nodes["walls"].get(wall_id, {}).get("node")
             util_bpy.restore_wall_transparency(wall_obj, slots)
         for record in object_transparency_records:
             util_bpy.restore_object_transparency(record)
+
+    def _sequence_frame_states_from_disk(
+        self,
+        seq_dir: str,
+        *,
+        width: int,
+        height: int,
+        auto_fov: bool,
+        manual_fov: Optional[float],
+        transparent_alpha: float = 0.0,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Rebuild per-frame camera state from saved PNG + camera_para (for deferred video geometry export)."""
+        try:
+            from .render_resume import list_primary_frames
+        except ImportError:
+            from render_resume import list_primary_frames  # type: ignore
+
+        frame_states: List[Dict[str, Any]] = []
+        pano_frame_states: List[Dict[str, Any]] = []
+        for png_path in list_primary_frames(seq_dir):
+            base = os.path.splitext(os.path.basename(png_path))[0]
+            para_path = os.path.join(seq_dir, f"{base}_camera_para.json")
+            with open(para_path, "r", encoding="utf-8") as f:
+                para = json.load(f)
+            cam_pos = para["camera_position"]
+            look_at = para["look_at_target"]
+            up_vec = para.get("world_up") or [0.0, 0.0, 1.0]
+            fov_y = para.get("fov_y")
+            _, _, camera_matrix, fov_y = self._build_view_camera_matrix_and_fov(
+                cam_pos,
+                look_at,
+                up_vec,
+                auto_fov=auto_fov if fov_y is None else False,
+                manual_fov=manual_fov if fov_y is None else float(fov_y),
+            )
+            transparent_objects = self._transparent_objects_from_camera_para(
+                para, transparent_alpha=transparent_alpha
+            )
+            state = {
+                "camera_matrix": camera_matrix.copy(),
+                "fov_y": float(fov_y),
+                "transparent_objects": transparent_objects,
+                "image_stamp": base,
+            }
+            frame_states.append(state)
+            pano_frame_states.append({
+                "camera_matrix": camera_matrix.copy(),
+                "transparent_objects": transparent_objects,
+                "image_stamp": base,
+            })
+        return frame_states, pano_frame_states
 
     def _render_view_sequence(
         self,
@@ -4886,20 +5063,40 @@ class BpySceneCtx:
         skip_render: bool = False,
         write_ssl: bool = True,
         write_camera_para: bool = True,
+        frame_start: Optional[int] = None,
+        frame_end: Optional[int] = None,
+        defer_geometry_export: bool = False,
+        geometry_export_only: bool = False,
+        isolated_semantic_masks: bool = True,
     ):
         """Multi-camera sequence: all frames in one sequence directory; visible geometry merged once there (multi-camera union).
 
         Default directory ``{timestamp}_seq``; ``view_dir_name`` can fix the name (e.g. ``auto_path_0008_seq``).
         When ``pano_only=True`` (``--video``), skip perspective RGB and render equirectangular pano per frame only.
+        Video chunks pass ``frame_start``/``frame_end`` + ``defer_geometry_export``; a final pass uses ``geometry_export_only``.
         """
         if pano_only:
             pano = True
+        orig_positions = list(camera_positions)
+        orig_look = list(look_at_targets)
+        orig_up = list(up_vectors)
+        if frame_start is not None:
+            frame_end = len(camera_positions) if frame_end is None else int(frame_end)
+            camera_positions = camera_positions[int(frame_start):frame_end]
+            look_at_targets = look_at_targets[int(frame_start):frame_end]
+            up_vectors = up_vectors[int(frame_start):frame_end]
+            defer_geometry_export = True
+            print(
+                f"🎬 Video chunk frames [{frame_start}:{frame_end}) "
+                f"({len(camera_positions)} frames in this subprocess)"
+            )
         total_start = time.perf_counter()
         seq_dir, dir_stamp = util.allocate_sequence_view_output_dir(output_root, view_dir_name)
         used_frame_stamps = {dir_stamp}
         n_frames = len(camera_positions)
+        skip_merged_glb = bool(view_dir_name and view_dir_name.startswith("video_"))
 
-        if view_dir_name:
+        if view_dir_name and not frame_start and not geometry_export_only:
             ts = util.log_timestamp()
             if view_dir_name.startswith("video_center_"):
                 pano_h = max(1, int(pano_resolution) // 2)
@@ -4920,14 +5117,14 @@ class BpySceneCtx:
                     f"({n_frames} frames, {width}×{height})"
                 )
 
-        world_cam0 = list(camera_positions[0])
-        world_look0 = list(look_at_targets[0])
-        world_up0 = list(up_vectors[0])
+        world_cam0 = list(orig_positions[0])
+        world_look0 = list(orig_look[0])
+        world_up0 = list(orig_up[0])
 
         with util_data.ViewSslSession(self, False) as vss:
             vss.setup(world_cam0, world_look0, world_up0)
 
-            if rebuild or self.mesh_nodes["floor"] is None:
+            if rebuild or self.mesh_nodes["floor"] is None or geometry_export_only:
                 self.construct_scene(
                     geometry_mode=geometry_mode,
                     show_wall=show_wall,
@@ -4935,7 +5132,7 @@ class BpySceneCtx:
                     show_door=show_door,
                     show_ceiling=show_ceiling,
                     align_height=align_height,
-                    rebuild=rebuild,
+                    rebuild=rebuild or geometry_export_only,
                 )
 
             for wall_info in self.mesh_nodes["walls"].values():
@@ -4953,9 +5150,10 @@ class BpySceneCtx:
             if use_HDRI:
                 hdri_path = self.config.get("hdri_path")
                 if hdri_path and util_bpy.apply_hdri_to_world(self.scene, hdri_path, strength=1.0):
-                    print(f"🌇 Using HDRI environment lighting: {hdri_path}")
+                    if not geometry_export_only:
+                        print(f"🌇 Using HDRI environment lighting: {hdri_path}")
                     self.scene.render.film_transparent = hdri_transparent_background
-                else:
+                elif not geometry_export_only:
                     print(f"⚠️ HDRI file unavailable or not configured: {hdri_path}")
 
             z_max = self.context["meta"]["z_max"]
@@ -4966,217 +5164,245 @@ class BpySceneCtx:
             if export_visible_point_cloud is not None:
                 do_visible_ply = bool(export_visible_point_cloud)
             do_planar = export_point_cloud if export_planar_faces is None else bool(export_planar_faces)
-            existing_frames: List[str] = []
-            if skip_render:
-                for name in sorted(os.listdir(seq_dir)):
-                    if not name.lower().endswith(".png"):
-                        continue
-                    if any(m in name for m in ("_depth", "_semantic", "_normal", "_lines", "_bbox_2d")):
-                        continue
-                    png_path = os.path.join(seq_dir, name)
-                    base = os.path.splitext(name)[0]
-                    para = os.path.join(seq_dir, f"{base}_camera_para.json")
-                    if os.path.isfile(para) and os.path.getsize(png_path) > 0:
-                        existing_frames.append(png_path)
 
-            for frame_idx, (cam_pos, look_at, up_vec) in enumerate(
-                zip(camera_positions, look_at_targets, up_vectors)
-            ):
-                world_cam = list(cam_pos)
-                world_look = list(look_at)
-                world_up = list(up_vec)
-                render_cam, render_look, render_up = cam_pos, look_at, up_vec
-
-                if skip_render and frame_idx < len(existing_frames):
-                    output_path = existing_frames[frame_idx]
-                    image_stamp = os.path.splitext(os.path.basename(output_path))[0]
-                    print(f"⏭️  Skipping sequence frame {frame_idx + 1}/{n_frames} Cycles render -> {output_path}")
-                else:
-                    image_stamp = util.allocate_millis_stamp(exclude=used_frame_stamps)
-                    used_frame_stamps.add(image_stamp)
-                    output_path = os.path.join(seq_dir, f"{image_stamp}.png")
-                    if pano_only:
-                        print(f"🎬 Video pano frame {frame_idx + 1}/{n_frames} -> {self._pano_output_path(output_path)}")
-                    else:
-                        print(f"🎬 Sequence frame {frame_idx + 1}/{n_frames} -> {output_path}")
-                view_dir = seq_dir
-
-                camera_position, look_at_target, camera_matrix, fov_y = self._build_view_camera_matrix_and_fov(
-                    render_cam, render_look, render_up, auto_fov=auto_fov, manual_fov=manual_fov
+            if geometry_export_only:
+                print(f"⏱️ [{util.log_timestamp()}] Video geometry export: {view_dir_name or seq_dir}")
+                frame_states, pano_frame_states = self._sequence_frame_states_from_disk(
+                    seq_dir,
+                    width=width,
+                    height=height,
+                    auto_fov=auto_fov,
+                    manual_fov=manual_fov,
+                    transparent_alpha=transparent_alpha,
                 )
+                if not frame_states:
+                    print("⚠️ Video geometry export skipped: no completed frames on disk")
+                    return
+                skip_render = True
+                defer_geometry_export = False
+            else:
+                existing_frames: List[str] = []
+                if skip_render:
+                    for name in sorted(os.listdir(seq_dir)):
+                        if not name.lower().endswith(".png"):
+                            continue
+                        if any(m in name for m in ("_depth", "_semantic", "_normal", "_lines", "_bbox_2d")):
+                            continue
+                        png_path = os.path.join(seq_dir, name)
+                        base = os.path.splitext(name)[0]
+                        para = os.path.join(seq_dir, f"{base}_camera_para.json")
+                        if os.path.isfile(para) and os.path.getsize(png_path) > 0:
+                            existing_frames.append(png_path)
 
-                wall_transparency_records = {}
-                object_transparency_records = []
-                if auto_transparent:
-                    wall_transparency_records, object_transparency_records = self._apply_view_auto_transparency(
-                        camera_position, look_at_target, transparent_alpha, z_max
+                for frame_idx, (cam_pos, look_at, up_vec) in enumerate(
+                    zip(camera_positions, look_at_targets, up_vectors)
+                ):
+                    world_cam = list(cam_pos)
+                    world_look = list(look_at)
+                    world_up = list(up_vec)
+                    render_cam, render_look, render_up = cam_pos, look_at, up_vec
+
+                    if skip_render and frame_idx < len(existing_frames):
+                        output_path = existing_frames[frame_idx]
+                        image_stamp = os.path.splitext(os.path.basename(output_path))[0]
+                        print(f"⏭️  Skipping sequence frame {frame_idx + 1}/{n_frames} Cycles render -> {output_path}")
+                    else:
+                        image_stamp = util.allocate_millis_stamp(exclude=used_frame_stamps)
+                        used_frame_stamps.add(image_stamp)
+                        output_path = os.path.join(seq_dir, f"{image_stamp}.png")
+                        if pano_only:
+                            print(f"🎬 Video pano frame {frame_idx + 1}/{n_frames} -> {self._pano_output_path(output_path)}")
+                        else:
+                            print(f"🎬 Sequence frame {frame_idx + 1}/{n_frames} -> {output_path}")
+                    view_dir = seq_dir
+
+                    camera_position, look_at_target, camera_matrix, fov_y = self._build_view_camera_matrix_and_fov(
+                        render_cam, render_look, render_up, auto_fov=auto_fov, manual_fov=manual_fov
                     )
 
-                transparent_objects = self._collect_transparent_objects(
-                    wall_transparency_records, object_transparency_records
-                )
-
-                if pano_only:
-                    try:
-                        self._render_pano_view_pass(
-                            output_path,
-                            camera_matrix,
-                            pano_resolution=pano_resolution,
-                            render_depth=render_depth,
-                            render_semantic=render_semantic,
-                            visible_geometry=False,
-                            export_glb=False,
-                            export_point_cloud=do_visible_ply,
-                            export_voxel=export_voxel,
-                            transparent_objects=transparent_objects,
-                            vss=vss,
-                            world_cam_w=world_cam,
-                            world_look_w=world_look,
-                            world_up_w=world_up,
-                            align_height=align_height,
-                            show_wall=show_wall,
-                            show_door=show_door,
-                            show_window=show_window,
-                            show_ceiling=show_ceiling,
-                            hdri_transparent_background=hdri_transparent_background,
-                            reference_frame=(frame_idx == 0),
-                            opencv_ref_camera=world_cam0,
-                            opencv_ref_look=world_look0,
-                            opencv_ref_up=world_up0,
-                            export_planar_faces=do_planar,
+                    wall_transparency_records = {}
+                    object_transparency_records = []
+                    if auto_transparent:
+                        wall_transparency_records, object_transparency_records = self._apply_view_auto_transparency(
+                            camera_position, look_at_target, transparent_alpha, z_max
                         )
-                        pano_frame_states.append({
+
+                    transparent_objects = self._collect_transparent_objects(
+                        wall_transparency_records, object_transparency_records
+                    )
+
+                    if pano_only:
+                        try:
+                            self._render_pano_view_pass(
+                                output_path,
+                                camera_matrix,
+                                pano_resolution=pano_resolution,
+                                render_depth=render_depth,
+                                render_semantic=render_semantic,
+                                visible_geometry=False,
+                                export_glb=False,
+                                export_point_cloud=do_visible_ply,
+                                export_voxel=export_voxel,
+                                transparent_objects=transparent_objects,
+                                vss=vss,
+                                world_cam_w=world_cam,
+                                world_look_w=world_look,
+                                world_up_w=world_up,
+                                align_height=align_height,
+                                show_wall=show_wall,
+                                show_door=show_door,
+                                show_window=show_window,
+                                show_ceiling=show_ceiling,
+                                hdri_transparent_background=hdri_transparent_background,
+                                reference_frame=(frame_idx == 0),
+                                opencv_ref_camera=world_cam0,
+                                opencv_ref_look=world_look0,
+                                opencv_ref_up=world_up0,
+                                export_planar_faces=do_planar,
+                                isolated_semantic_masks=isolated_semantic_masks,
+                            )
+                            pano_frame_states.append({
+                                "camera_matrix": camera_matrix.copy(),
+                                "transparent_objects": transparent_objects,
+                                "image_stamp": image_stamp,
+                            })
+                        finally:
+                            self._restore_view_transparency(wall_transparency_records, object_transparency_records)
+                        continue
+
+                    if skip_render:
+                        frame_states.append({
                             "camera_matrix": camera_matrix.copy(),
+                            "fov_y": fov_y,
                             "transparent_objects": transparent_objects,
                             "image_stamp": image_stamp,
                         })
+                        if pano:
+                            pano_frame_states.append({
+                                "camera_matrix": camera_matrix.copy(),
+                                "transparent_objects": transparent_objects,
+                            })
+                        continue
+
+                    camera_obj, camera_data, prev_camera = self._create_render_camera(
+                        camera_matrix, fov_y, width, height
+                    )
+                    self.scene.render.filepath = output_path
+                    render = self.scene.render
+                    render.image_settings.color_mode = 'RGBA'
+                    render.film_transparent = hdri_transparent_background
+
+                    depth_scale = None
+                    try:
+                        if render_depth:
+                            depth_path = os.path.join(
+                                view_dir,
+                                f"{image_stamp}_depth.png",
+                            )
+                            depth_scale = util_bpy.render_color_and_depth_png(
+                                self.scene, output_path, depth_path, skip_objects=transparent_objects
+                            )
+                        else:
+                            util_bpy.render_frame(write_still=True)
+
+                        if do_planar:
+                            self.export_planar_faces_and_lines(
+                                output_path,
+                                camera_obj,
+                                width,
+                                height,
+                                align_height=align_height,
+                                show_wall=show_wall,
+                                show_door=show_door,
+                                show_window=show_window,
+                                show_ceiling=show_ceiling,
+                                transparent_objects=transparent_objects,
+                            )
+                        if render_semantic or visible_geometry:
+                            self.render_semantic_bundle(
+                                output_path,
+                                save_artifacts=True,
+                                isolated_masks=isolated_semantic_masks,
+                            )
+
+                        frame_states.append({
+                            "camera_matrix": camera_matrix.copy(),
+                            "fov_y": fov_y,
+                            "transparent_objects": transparent_objects,
+                            "image_stamp": image_stamp,
+                        })
+
+                        if write_camera_para:
+                            para_path = self._camera_para_path(output_path)
+                            camera_para = vss.build_camera_para(
+                                world_cam,
+                                world_look,
+                                world_up,
+                                fov_y,
+                                float(width) / float(height),
+                                reference_frame=(frame_idx == 0),
+                                depth_scale=depth_scale,
+                                include_normal_fields=depth_scale is not None,
+                                width=width,
+                                height=height,
+                            )
+                            camera_para = self._camera_para_with_transparent_refs(
+                                camera_para,
+                                wall_transparency_records,
+                                object_transparency_records,
+                            )
+                            with open(para_path, 'w') as f:
+                                json.dump(camera_para, f, indent=4)
+                        if pano:
+                            if (
+                                view_dir_name
+                                and view_dir_name.startswith("video_center_")
+                                and not video_pano_logged
+                            ):
+                                pano_w, pano_h = self._pano_dimensions(pano_resolution)
+                                print(
+                                    f"⏱️ [{util.log_timestamp()}] Video pano pass: {view_dir_name} "
+                                    f"({n_frames} frames, {pano_w}×{pano_h})"
+                                )
+                                video_pano_logged = True
+                            self._render_pano_view_pass(
+                                output_path,
+                                camera_matrix,
+                                pano_resolution=pano_resolution,
+                                render_depth=render_depth,
+                                render_semantic=render_semantic,
+                                visible_geometry=False,
+                                export_glb=False,
+                                export_point_cloud=do_visible_ply,
+                                export_voxel=export_voxel,
+                                transparent_objects=transparent_objects,
+                                vss=vss,
+                                world_cam_w=world_cam,
+                                world_look_w=world_look,
+                                world_up_w=world_up,
+                                align_height=align_height,
+                                show_wall=show_wall,
+                                show_door=show_door,
+                                show_window=show_window,
+                                show_ceiling=show_ceiling,
+                                hdri_transparent_background=hdri_transparent_background,
+                                reference_frame=(frame_idx == 0),
+                                opencv_ref_camera=world_cam0,
+                                opencv_ref_look=world_look0,
+                                opencv_ref_up=world_up0,
+                                export_planar_faces=do_planar,
+                                isolated_semantic_masks=isolated_semantic_masks,
+                            )
+                            pano_frame_states.append({
+                                "camera_matrix": camera_matrix.copy(),
+                                "transparent_objects": transparent_objects,
+                            })
                     finally:
                         self._restore_view_transparency(wall_transparency_records, object_transparency_records)
-                    continue
+                        self._destroy_render_camera(camera_obj, camera_data, prev_camera, self.scene)
+                        util_bpy.cleanup_bpy_render_memory(self.scene)
 
-                if skip_render:
-                    frame_states.append({
-                        "camera_matrix": camera_matrix.copy(),
-                        "fov_y": fov_y,
-                        "transparent_objects": transparent_objects,
-                        "image_stamp": image_stamp,
-                    })
-                    if pano:
-                        pano_frame_states.append({
-                            "camera_matrix": camera_matrix.copy(),
-                            "transparent_objects": transparent_objects,
-                        })
-                    continue
-
-                camera_obj, camera_data, prev_camera = self._create_render_camera(
-                    camera_matrix, fov_y, width, height
-                )
-                self.scene.render.filepath = output_path
-                render = self.scene.render
-                render.image_settings.color_mode = 'RGBA'
-                render.film_transparent = hdri_transparent_background
-
-                depth_scale = None
-                try:
-                    if render_depth:
-                        depth_path = os.path.join(
-                            view_dir,
-                            f"{image_stamp}_depth.png",
-                        )
-                        depth_scale = util_bpy.render_color_and_depth_png(
-                            self.scene, output_path, depth_path, skip_objects=transparent_objects
-                        )
-                    else:
-                        util_bpy.render_frame(write_still=True)
-
-                    if do_planar:
-                        self.export_planar_faces_and_lines(
-                            output_path,
-                            camera_obj,
-                            width,
-                            height,
-                            align_height=align_height,
-                            show_wall=show_wall,
-                            show_door=show_door,
-                            show_window=show_window,
-                            show_ceiling=show_ceiling,
-                            transparent_objects=transparent_objects,
-                        )
-                    if render_semantic or visible_geometry:
-                        self.render_semantic_bundle(output_path, save_artifacts=True)
-
-                    frame_states.append({
-                        "camera_matrix": camera_matrix.copy(),
-                        "fov_y": fov_y,
-                        "transparent_objects": transparent_objects,
-                        "image_stamp": image_stamp,
-                    })
-
-                    if write_camera_para:
-                        para_path = self._camera_para_path(output_path)
-                        camera_para = vss.build_camera_para(
-                            world_cam,
-                            world_look,
-                            world_up,
-                            fov_y,
-                            float(width) / float(height),
-                            reference_frame=(frame_idx == 0),
-                            depth_scale=depth_scale,
-                            include_normal_fields=depth_scale is not None,
-                            width=width,
-                            height=height,
-                        )
-                        with open(para_path, 'w') as f:
-                            json.dump(camera_para, f, indent=4)
-                    if pano:
-                        if (
-                            view_dir_name
-                            and view_dir_name.startswith("video_center_")
-                            and not video_pano_logged
-                        ):
-                            pano_w, pano_h = self._pano_dimensions(pano_resolution)
-                            print(
-                                f"⏱️ [{util.log_timestamp()}] Video pano pass: {view_dir_name} "
-                                f"({n_frames} frames, {pano_w}×{pano_h})"
-                            )
-                            video_pano_logged = True
-                        self._render_pano_view_pass(
-                            output_path,
-                            camera_matrix,
-                            pano_resolution=pano_resolution,
-                            render_depth=render_depth,
-                            render_semantic=render_semantic,
-                            visible_geometry=False,
-                            export_glb=False,
-                            export_point_cloud=do_visible_ply,
-                            export_voxel=export_voxel,
-                            transparent_objects=transparent_objects,
-                            vss=vss,
-                            world_cam_w=world_cam,
-                            world_look_w=world_look,
-                            world_up_w=world_up,
-                            align_height=align_height,
-                            show_wall=show_wall,
-                            show_door=show_door,
-                            show_window=show_window,
-                            show_ceiling=show_ceiling,
-                            hdri_transparent_background=hdri_transparent_background,
-                            reference_frame=(frame_idx == 0),
-                            opencv_ref_camera=world_cam0,
-                            opencv_ref_look=world_look0,
-                            opencv_ref_up=world_up0,
-                            export_planar_faces=do_planar,
-                        )
-                        pano_frame_states.append({
-                            "camera_matrix": camera_matrix.copy(),
-                            "transparent_objects": transparent_objects,
-                        })
-                finally:
-                    self._restore_view_transparency(wall_transparency_records, object_transparency_records)
-                    self._destroy_render_camera(camera_obj, camera_data, prev_camera, self.scene)
-                    util_bpy.cleanup_bpy_render_memory(self.scene)
-
-            if visible_geometry and (export_glb or do_visible_ply or export_voxel) and frame_states and not pano_only:
+            if not defer_geometry_export and visible_geometry and (export_glb or do_visible_ply or export_voxel) and frame_states and not pano_only:
                 original_camera = self.scene.camera
                 camera_states = []
                 temp_cameras = []
@@ -5198,6 +5424,7 @@ class BpySceneCtx:
                         export_point_cloud=do_visible_ply,
                         export_voxel=export_voxel,
                         frame_infos=frame_infos,
+                        skip_merged_glb=skip_merged_glb,
                     )
                 finally:
                     for cam_obj, cam_data in reversed(temp_cameras):
@@ -5208,7 +5435,7 @@ class BpySceneCtx:
                                 self.scene.camera = None
                         self._remove_camera_blocks(cam_obj, cam_data)
 
-            if pano and visible_geometry and (export_glb or export_point_cloud or export_voxel) and pano_frame_states:
+            if not defer_geometry_export and pano and visible_geometry and (export_glb or export_point_cloud or export_voxel) and pano_frame_states:
                 pano_dir = f"{seq_dir}_pano"
                 original_camera = self.scene.camera
                 camera_states = []
@@ -5228,6 +5455,7 @@ class BpySceneCtx:
                         export_point_cloud=export_point_cloud,
                         export_voxel=export_voxel,
                         pano_resolution=pano_resolution,
+                        skip_merged_glb=skip_merged_glb,
                     )
                 finally:
                     for cam_obj, cam_data in reversed(temp_cameras):
@@ -5272,7 +5500,13 @@ class BpySceneCtx:
                     export_visible_point_cloud: Optional[bool] = None,
                     skip_render: bool = False,
                     write_ssl: bool = True,
-                    write_camera_para: bool = True):
+                    write_camera_para: bool = True,
+                    frame_start: Optional[int] = None,
+                    frame_end: Optional[int] = None,
+                    defer_geometry_export: bool = False,
+                    geometry_export_only: bool = False,
+                    isolated_semantic_masks: bool = True,
+                ):
         if self._is_view_sequence(camera_position, look_at_target, up_vector):
             cam_positions, look_ats, ups = self._expand_camera_sequence_args(
                 camera_position, look_at_target, up_vector
@@ -5314,6 +5548,11 @@ class BpySceneCtx:
                 skip_render=skip_render,
                 write_ssl=write_ssl,
                 write_camera_para=write_camera_para,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                defer_geometry_export=defer_geometry_export,
+                geometry_export_only=geometry_export_only,
+                isolated_semantic_masks=isolated_semantic_masks,
             )
 
         output_path = self._resolve_view_output_path(

@@ -372,6 +372,7 @@ def _apply_video_render_flags(spec: Dict[str, Any], target: Dict[str, Any]) -> N
     """Video views: center pano follows --pano; legacy tangent = pano-only."""
     if not spec.get("video"):
         return
+    target["isolated_semantic_masks"] = False
     if spec.get("video_trajectory") == "center":
         target.pop("pano_only", None)
         # Keep pano from job (--pano); do not force True
@@ -393,6 +394,11 @@ def _render_view_spec(
     extra: dict,
     view_dir_name: str,
     camera_kwargs: Optional[dict] = None,
+    *,
+    frame_start: Optional[int] = None,
+    frame_end: Optional[int] = None,
+    defer_geometry_export: bool = False,
+    geometry_export_only: bool = False,
 ) -> None:
     """Invoke render_view from a view spec (shared by auto / custom)."""
     camera_kwargs = camera_kwargs or {}
@@ -405,6 +411,14 @@ def _render_view_spec(
         view_dir_name=view_dir_name,
         **extra,
     )
+    if frame_start is not None:
+        common["frame_start"] = int(frame_start)
+        common["frame_end"] = int(frame_end) if frame_end is not None else None
+        common["defer_geometry_export"] = True
+    if defer_geometry_export:
+        common["defer_geometry_export"] = True
+    if geometry_export_only:
+        common["geometry_export_only"] = True
     if spec.get("manual_fov") is not None:
         common["manual_fov"] = float(spec["manual_fov"])
         common["auto_fov"] = False
@@ -448,9 +462,25 @@ def _render_auto_view_spec(
     extra: dict,
     view_dir_name: str,
     camera_kwargs: Optional[dict] = None,
+    *,
+    frame_start: Optional[int] = None,
+    frame_end: Optional[int] = None,
+    defer_geometry_export: bool = False,
+    geometry_export_only: bool = False,
 ) -> None:
     """Invoke render_view from an auto_view spec; output dir name is view_dir_name (e.g. auto_path_0004_seq)."""
-    _render_view_spec(ctx, output_dir, spec, extra, view_dir_name, camera_kwargs=camera_kwargs)
+    _render_view_spec(
+        ctx,
+        output_dir,
+        spec,
+        extra,
+        view_dir_name,
+        camera_kwargs=camera_kwargs,
+        frame_start=frame_start,
+        frame_end=frame_end,
+        defer_geometry_export=defer_geometry_export,
+        geometry_export_only=geometry_export_only,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +679,64 @@ def _drop_video_view_specs(
             names.remove(name)
 
 
-def worker_render_view(job_path: str, view_name: str) -> None:
+def _video_frame_chunk_size(job: dict) -> int:
+    try:
+        from .core.video_views import VIDEO_FRAME_CHUNK_SIZE
+    except (ImportError, ValueError):
+        from core.video_views import VIDEO_FRAME_CHUNK_SIZE  # type: ignore
+    return max(1, int(job.get("video_frame_chunk_size", VIDEO_FRAME_CHUNK_SIZE)))
+
+
+def _video_needs_deferred_geometry(job: dict) -> bool:
+    if not job.get("visible_geometry"):
+        return False
+    return bool(job.get("export_glb") or job.get("export_point_cloud") or job.get("export_voxel"))
+
+
+def _video_view_frame_count(spec: Optional[Dict[str, Any]]) -> int:
+    if not spec:
+        return 0
+    if spec.get("type") == "sequence":
+        return len(spec.get("camera_positions") or [])
+    return 1
+
+
+def _should_chunk_video_view(view_name: str, spec: Optional[Dict[str, Any]], job: dict) -> bool:
+    if not view_name.startswith("video_center_"):
+        return False
+    if not spec or spec.get("type") != "sequence":
+        return False
+    return _video_view_frame_count(spec) > _video_frame_chunk_size(job)
+
+
+def _should_record_view_complete(
+    job: dict,
+    view_name: str,
+    spec: Optional[Dict[str, Any]],
+    *,
+    frame_start: Optional[int],
+    frame_end: Optional[int],
+    geometry_export_only: bool,
+) -> bool:
+    if geometry_export_only:
+        return True
+    if frame_start is not None:
+        if _video_needs_deferred_geometry(job):
+            return False
+        n_frames = _video_view_frame_count(spec)
+        end = int(frame_end) if frame_end is not None else n_frames
+        return end >= n_frames
+    return True
+
+
+def worker_render_view(
+    job_path: str,
+    view_name: str,
+    *,
+    frame_start: Optional[int] = None,
+    frame_end: Optional[int] = None,
+    geometry_export_only: bool = False,
+) -> None:
     job = _load_job(job_path)
     ctx = _create_render_ctx(job)
     output_dir = job["output_dir"]
@@ -679,11 +766,13 @@ def worker_render_view(job_path: str, view_name: str) -> None:
     auto_specs = job.get("auto_view_specs") or {}
     custom_specs = job.get("custom_view_specs") or {}
     view_spec = auto_specs.get(view_name) or custom_specs.get(view_name)
-    if job.get("resume", True) and is_view_complete(
-        output_dir, view_name, job, auto_spec=view_spec
-    ):
-        print(f"⏭️  Skipping completed view: {view_name}")
-        return
+    is_chunk = frame_start is not None
+    if not is_chunk and not geometry_export_only:
+        if job.get("resume", True) and is_view_complete(
+            output_dir, view_name, job, auto_spec=view_spec
+        ):
+            print(f"⏭️  Skipping completed view: {view_name}")
+            return
 
     if job.get("resume", True):
         missing = missing_view_artifacts(
@@ -704,7 +793,25 @@ def worker_render_view(job_path: str, view_name: str) -> None:
 
     view_start = time.perf_counter()
     view_label = _describe_view_start(view_name, view_spec, job)
+    if is_chunk:
+        view_label += f" [frames {frame_start}:{frame_end})"
+    elif geometry_export_only:
+        view_label += " [geometry export]"
     print(f"⏱️ [{util.log_timestamp()}] Start view: {view_name} — {view_label}")
+
+    chunk_kwargs = dict(
+        frame_start=frame_start,
+        frame_end=frame_end,
+        geometry_export_only=geometry_export_only,
+    )
+    record_complete = _should_record_view_complete(
+        job,
+        view_name,
+        view_spec,
+        frame_start=frame_start,
+        frame_end=frame_end,
+        geometry_export_only=geometry_export_only,
+    )
 
     try:
         if view_name in auto_specs:
@@ -713,35 +820,53 @@ def worker_render_view(job_path: str, view_name: str) -> None:
             extra = dict(extra)
             _apply_video_render_flags(spec, extra)
             _apply_auto_path_pano_gate(view_name, spec, extra, job)
-            _render_auto_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
-            view_dir = view_dir_for(output_dir, view_name)
-            if spec.get("pano_only"):
-                try:
-                    from .core.render_resume import _pano_dir_for
-                except (ImportError, ValueError):
-                    from core.render_resume import _pano_dir_for  # type: ignore
-                main_pngs = list_primary_frames(_pano_dir_for(view_dir))
-            else:
-                main_pngs = list_primary_frames(view_dir)
-            record_view_complete(
+            _render_auto_view_spec(
+                ctx,
                 output_dir,
-                view_name,
-                view_dir=view_dir,
-                main_pngs=main_pngs,
+                spec,
+                extra,
+                view_dir_name=view_name,
+                camera_kwargs=camera_kwargs,
+                **chunk_kwargs,
             )
+            if record_complete:
+                view_dir = view_dir_for(output_dir, view_name)
+                if spec.get("pano_only"):
+                    try:
+                        from .core.render_resume import _pano_dir_for
+                    except (ImportError, ValueError):
+                        from core.render_resume import _pano_dir_for  # type: ignore
+                    main_pngs = list_primary_frames(_pano_dir_for(view_dir))
+                else:
+                    main_pngs = list_primary_frames(view_dir)
+                record_view_complete(
+                    output_dir,
+                    view_name,
+                    view_dir=view_dir,
+                    main_pngs=main_pngs,
+                )
             return
 
         if view_name in custom_specs:
             spec = dict(custom_specs[view_name])
             _apply_job_view_size(job, spec)
-            _render_view_spec(ctx, output_dir, spec, extra, view_dir_name=view_name, camera_kwargs=camera_kwargs)
-            view_dir = view_dir_for(output_dir, view_name)
-            record_view_complete(
+            _render_view_spec(
+                ctx,
                 output_dir,
-                view_name,
-                view_dir=view_dir,
-                main_pngs=list_primary_frames(view_dir),
+                spec,
+                extra,
+                view_dir_name=view_name,
+                camera_kwargs=camera_kwargs,
+                **chunk_kwargs,
             )
+            if record_complete:
+                view_dir = view_dir_for(output_dir, view_name)
+                record_view_complete(
+                    output_dir,
+                    view_name,
+                    view_dir=view_dir,
+                    main_pngs=list_primary_frames(view_dir),
+                )
             return
 
         if view_name == "topdown":
@@ -849,6 +974,10 @@ _WORKER_SEGV_RETRIES = 3
 _WORKER_SEGV_RETRY_DELAY_S = 3.0
 
 
+def _is_worker_retryable_error(exc: subprocess.CalledProcessError) -> bool:
+    return exc.returncode in (-signal.SIGSEGV, -signal.SIGKILL)
+
+
 def _is_worker_segv_error(exc: subprocess.CalledProcessError) -> bool:
     return exc.returncode == -signal.SIGSEGV
 
@@ -864,7 +993,7 @@ def _worker_env() -> dict:
 
 
 def _spawn_worker(cmd: List[str], *, label: str) -> None:
-    """Run a render worker subprocess; retry on intermittent Blender SIGSEGV."""
+    """Run a render worker subprocess; retry on intermittent Blender SIGSEGV / OOM SIGKILL."""
     last_exc: Optional[subprocess.CalledProcessError] = None
     for attempt in range(1, _WORKER_SEGV_RETRIES + 1):
         try:
@@ -872,10 +1001,11 @@ def _spawn_worker(cmd: List[str], *, label: str) -> None:
             return
         except subprocess.CalledProcessError as exc:
             last_exc = exc
-            if not _is_worker_segv_error(exc) or attempt >= _WORKER_SEGV_RETRIES:
+            if not _is_worker_retryable_error(exc) or attempt >= _WORKER_SEGV_RETRIES:
                 raise
+            reason = "SIGSEGV" if exc.returncode == -signal.SIGSEGV else "SIGKILL (likely OOM)"
             print(
-                f"⚠️  {label} crashed with SIGSEGV (attempt {attempt}/{_WORKER_SEGV_RETRIES}); "
+                f"⚠️  {label} crashed with {reason} (attempt {attempt}/{_WORKER_SEGV_RETRIES}); "
                 f"retrying in {_WORKER_SEGV_RETRY_DELAY_S:.0f}s..."
             )
             time.sleep(_WORKER_SEGV_RETRY_DELAY_S)
@@ -883,12 +1013,50 @@ def _spawn_worker(cmd: List[str], *, label: str) -> None:
         raise last_exc
 
 
-def _spawn_worker_view(job_path: str, view_name: str) -> None:
+def _spawn_worker_view(
+    job_path: str,
+    view_name: str,
+    *,
+    frame_start: Optional[int] = None,
+    frame_end: Optional[int] = None,
+    geometry_export_only: bool = False,
+) -> None:
+    kwargs: List[str] = []
+    if frame_start is not None:
+        kwargs.append(f"frame_start={int(frame_start)}")
+    if frame_end is not None:
+        kwargs.append(f"frame_end={int(frame_end)}")
+    if geometry_export_only:
+        kwargs.append("geometry_export_only=True")
+    kw = ", " + ", ".join(kwargs) if kwargs else ""
+    label = f"View {view_name!r}"
+    if frame_start is not None:
+        label += f" frames [{frame_start}:{frame_end})"
+    if geometry_export_only:
+        label += " geometry export"
     _spawn_worker([
         sys.executable, "-c",
         "from scenebuilder.render_ssl import worker_render_view; "
-        f"worker_render_view({job_path!r}, {view_name!r})",
-    ], label=f"View {view_name!r}")
+        f"worker_render_view({job_path!r}, {view_name!r}{kw})",
+    ], label=label)
+
+
+def _spawn_video_view_workers(job_path: str, view_name: str, spec: Dict[str, Any], job: dict) -> None:
+    n_frames = _video_view_frame_count(spec)
+    chunk_size = _video_frame_chunk_size(job)
+    if n_frames <= chunk_size:
+        _spawn_worker_view(job_path, view_name)
+        return
+    print(
+        f"🎬 Video chunking: {view_name} → {n_frames} frames in "
+        f"{(n_frames + chunk_size - 1) // chunk_size} subprocesses "
+        f"(chunk_size={chunk_size})"
+    )
+    for start in range(0, n_frames, chunk_size):
+        end = min(start + chunk_size, n_frames)
+        _spawn_worker_view(job_path, view_name, frame_start=start, frame_end=end)
+    if _video_needs_deferred_geometry(job):
+        _spawn_worker_view(job_path, view_name, geometry_export_only=True)
 
 
 def _spawn_worker_post(job_path: str) -> None:
@@ -1046,6 +1214,7 @@ def render_ssl(
     video: bool = False,
     video_frame_spacing: float = 0.2,
     video_frames: Optional[int] = None,
+    video_frame_chunk_size: Optional[int] = None,
 ):
     """Render a scene. ``input_text`` may be standard SSL text or a JSON string.
 
@@ -1081,6 +1250,14 @@ def render_ssl(
         auto_fov = False
     if visible_geometry:
         semantic = True
+    try:
+        from .core.video_views import VIDEO_FRAME_CHUNK_SIZE
+    except (ImportError, ValueError):
+        from core.video_views import VIDEO_FRAME_CHUNK_SIZE  # type: ignore
+    resolved_video_chunk_size = max(
+        1,
+        int(video_frame_chunk_size if video_frame_chunk_size is not None else VIDEO_FRAME_CHUNK_SIZE),
+    )
     if views == "auto":
         normalized_topdown = True
         floor_path = True
@@ -1283,6 +1460,7 @@ def render_ssl(
         "auto_view_specs": auto_view_specs,
         "custom_view_specs": custom_view_specs,
         "resume": resume,
+        "video_frame_chunk_size": resolved_video_chunk_size,
     }
     with open(job_path, "w", encoding="utf-8") as f:
         json.dump(job, f, indent=2, ensure_ascii=False)
@@ -1312,14 +1490,30 @@ def render_ssl(
             print(f"⏭️  Skipped {len(skipped_views)} completed views: {', '.join(skipped_views)}")
         if views_to_run:
             step = "Step 3: " if normalized_topdown else ""
-            print(f"🎨 {step}Multi-view rendering → {y_dir} ({len(views_to_run)} subprocesses)")
+            n_sub = 0
+            auto_specs = job.get("auto_view_specs") or {}
+            for view_name in views_to_run:
+                spec = auto_specs.get(view_name) or (job.get("custom_view_specs") or {}).get(view_name)
+                if _should_chunk_video_view(view_name, spec, job):
+                    n_frames = _video_view_frame_count(spec)
+                    chunk_size = _video_frame_chunk_size(job)
+                    n_sub += (n_frames + chunk_size - 1) // chunk_size
+                    if _video_needs_deferred_geometry(job):
+                        n_sub += 1
+                else:
+                    n_sub += 1
+            print(f"🎨 {step}Multi-view rendering → {y_dir} ({n_sub} subprocesses)")
             try:
                 from .core import util
             except (ImportError, ValueError):
                 from core import util  # type: ignore
             for view_name in views_to_run:
                 print(f"🔄 [{util.log_timestamp()}] Subprocess rendering: {view_name}")
-                _spawn_worker_view(job_path, view_name)
+                spec = auto_specs.get(view_name) or (job.get("custom_view_specs") or {}).get(view_name)
+                if _should_chunk_video_view(view_name, spec, job):
+                    _spawn_video_view_workers(job_path, view_name, spec, job)
+                else:
+                    _spawn_worker_view(job_path, view_name)
     elif not views_to_run and views == "auto":
         print("⏭️  Auto views not generated (backend does not support bpy)")
     elif not views_to_run and video:
@@ -1366,6 +1560,23 @@ def _read_jsonl_line(file_path: str, line_number: int) -> Dict[str, Any]:
     raise ValueError(f"Line number {line_number} is out of file range")
 
 
+def _find_scene_in_jsonl(
+    jsonl_path: str, ssl_id: str, room_index: int
+) -> Tuple[Dict[str, Any], int]:
+    """Find a room by ``room.id``; fall back to legacy line index."""
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if not line.strip():
+                continue
+            scene_data = json.loads(line.strip())
+            room_id = (scene_data.get("room") or {}).get("id")
+            if room_id == ssl_id:
+                return scene_data, i
+
+    scene_data = _read_jsonl_line(jsonl_path, room_index)
+    return scene_data, room_index
+
+
 def _load_scene_text_from_collection(ssl_id: str, collection_dir: str) -> Tuple[str, str]:
     """Load one room JSON line from ``{collection_dir}/{design_id}.jsonl``."""
     design_id, room_index = _parse_ssl_id(ssl_id)
@@ -1376,21 +1587,25 @@ def _load_scene_text_from_collection(ssl_id: str, collection_dir: str) -> Tuple[
         )
 
     try:
-        scene_data = _read_jsonl_line(jsonl_path, room_index)
+        scene_data, line_index = _find_scene_in_jsonl(jsonl_path, ssl_id, room_index)
     except ValueError as exc:
         raise ValueError(
-            f"Room index {room_index} out of range in {jsonl_path} for --ssl_id {ssl_id!r}"
+            f"Room {ssl_id!r} not found in {jsonl_path} (legacy index {room_index})"
         ) from exc
 
     room = scene_data.get("room") or {}
-    room_id = room.get("id")
-    if room_id and room_id != ssl_id:
+    if line_index != room_index:
         print(
-            f"⚠️  JSONL line {room_index} has room.id={room_id!r}, expected {ssl_id!r}; continuing"
+            f"📂 Loaded scene from {jsonl_path} line {line_index} "
+            f"by room.id={ssl_id!r} (legacy index {room_index})"
+        )
+    else:
+        print(
+            f"📂 Loaded scene from {jsonl_path} line {line_index} "
+            f"({room.get('room_type', 'unknown')})"
         )
 
     scene_text = json.dumps(scene_data, ensure_ascii=False)
-    print(f"📂 Loaded scene from {jsonl_path} line {room_index} ({room.get('room_type', 'unknown')})")
     return scene_text, jsonl_path
 
 
@@ -1604,6 +1819,13 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         default=0.2,
         help="Target arc-length spacing between video frames in meters (default: 0.2)",
     )
+    parser.add_argument(
+        "--video_chunk_size",
+        type=int,
+        default=None,
+        help="Split long video_center_* trajectories into subprocesses of this many frames "
+             "(default: 20; reduces OOM risk on heavy --semantic/--depth/--pano runs)",
+    )
 
     args = parser.parse_args()
     input_modes = [name for name, val in (
@@ -1650,6 +1872,8 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         parser.error("--video_spacing must be positive")
     if args.video_frames is not None and args.video_frames < 3:
         parser.error("--video_frames must be at least 3")
+    if args.video_chunk_size is not None and args.video_chunk_size < 1:
+        parser.error("--video_chunk_size must be at least 1")
     if args.pano_num < 1:
         parser.error("--pano_num must be at least 1")
 
@@ -1682,6 +1906,7 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         video=args.video,
         video_frame_spacing=args.video_spacing,
         video_frames=args.video_frames,
+        video_frame_chunk_size=args.video_chunk_size,
     )
     if args.samples is not None:
         render_kwargs["samples"] = args.samples

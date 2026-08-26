@@ -104,13 +104,15 @@ def _rgb_depth_frame_ok(
     return True
 
 
-def _semantic_frame_ok(png_path: str) -> bool:
+def _semantic_frame_ok(png_path: str, *, require_masks: bool = True) -> bool:
     view_dir = os.path.dirname(png_path)
     base = os.path.splitext(os.path.basename(png_path))[0]
     if not os.path.isfile(os.path.join(view_dir, f"{base}_semantic.png")):
         return False
     if not os.path.isfile(os.path.join(view_dir, f"{base}_semantic.json")):
         return False
+    if not require_masks:
+        return True
     index_path = os.path.join(view_dir, "semantic_masks", "index.json")
     if not os.path.isfile(index_path):
         return False
@@ -134,10 +136,11 @@ def _frame_artifacts_ok(
     *,
     semantic: bool,
     depth: bool,
+    require_semantic_masks: bool = True,
 ) -> bool:
     if not _rgb_depth_frame_ok(png_path, depth=depth):
         return False
-    if semantic and not _semantic_frame_ok(png_path):
+    if semantic and not _semantic_frame_ok(png_path, require_masks=require_semantic_masks):
         return False
     return True
 
@@ -152,11 +155,17 @@ def _pano_complete(
     *,
     semantic: bool,
     depth: bool,
+    require_semantic_masks: bool = True,
 ) -> bool:
     frames = list_primary_frames(_pano_dir_for(view_dir))
     if not frames:
         return False
-    return all(_frame_artifacts_ok(p, semantic=semantic, depth=depth) for p in frames)
+    return all(
+        _frame_artifacts_ok(
+            p, semantic=semantic, depth=depth, require_semantic_masks=require_semantic_masks
+        )
+        for p in frames
+    )
 
 
 def _pano_planar_ok(view_dir: str, *, n_expected: int = 1) -> bool:
@@ -309,16 +318,17 @@ def _semantic_frames_ok(
     view_name: str,
     *,
     n_expected: int = 1,
+    require_masks: bool = True,
 ) -> bool:
     if view_name == "topdown":
         png = os.path.join(view_dir, "topdown.png")
         if not os.path.isfile(png):
             return False
-        return _semantic_frame_ok(png)
+        return _semantic_frame_ok(png, require_masks=require_masks)
     frames = list_primary_frames(view_dir)
     if len(frames) < n_expected:
         return False
-    return all(_semantic_frame_ok(p) for p in frames)
+    return all(_semantic_frame_ok(p, require_masks=require_masks) for p in frames)
 
 
 def _camera_para_ok(
@@ -407,6 +417,7 @@ def missing_view_artifacts(
     n_expected = 1 if view_name == "topdown" else expected_frame_count(
         view_name, view_cameras, auto_spec
     )
+    require_semantic_masks = not is_video
 
     if is_tangent_video:
         pano_only = bool((auto_spec or {}).get("pano_only"))
@@ -419,12 +430,14 @@ def missing_view_artifacts(
             ):
                 missing.add("render")
             if semantic and not _semantic_frames_ok(
-                view_dir, view_name, n_expected=n_expected
+                view_dir, view_name, n_expected=n_expected, require_masks=require_semantic_masks
             ):
                 missing.add("semantic")
             if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
                 missing.add("camera_para")
-            if not _pano_complete(view_dir, semantic=False, depth=False):
+            if not _pano_complete(
+                view_dir, semantic=False, depth=False, require_semantic_masks=require_semantic_masks
+            ):
                 missing.add("pano")
     elif is_center_video:
         if not _render_frames_ok(
@@ -432,12 +445,14 @@ def missing_view_artifacts(
         ):
             missing.add("render")
         if semantic and not _semantic_frames_ok(
-            view_dir, view_name, n_expected=n_expected
+            view_dir, view_name, n_expected=n_expected, require_masks=require_semantic_masks
         ):
             missing.add("semantic")
         if not _camera_para_ok(view_dir, view_name, n_expected=n_expected):
             missing.add("camera_para")
-        if pano and not _pano_complete(view_dir, semantic=semantic, depth=depth):
+        if pano and not _pano_complete(
+            view_dir, semantic=semantic, depth=depth, require_semantic_masks=require_semantic_masks
+        ):
             missing.add("pano")
     else:
         if not _render_frames_ok(
@@ -446,7 +461,7 @@ def missing_view_artifacts(
             missing.add("render")
 
         if semantic and not _semantic_frames_ok(
-            view_dir, view_name, n_expected=n_expected
+            view_dir, view_name, n_expected=n_expected, require_masks=require_semantic_masks
         ):
             missing.add("semantic")
 
@@ -481,7 +496,9 @@ def missing_view_artifacts(
     # topdown view worker pops pano and never produces a pano directory
     if pano and view_name != "topdown" and not is_video:
         if _auto_path_needs_pano(view_name, job, auto_spec):
-            if not _pano_complete(view_dir, semantic=semantic, depth=depth):
+            if not _pano_complete(
+                view_dir, semantic=semantic, depth=depth, require_semantic_masks=require_semantic_masks
+            ):
                 missing.add("pano")
             elif export_point_cloud and not _pano_planar_ok(view_dir, n_expected=n_expected):
                 missing.add("pano_planar")
