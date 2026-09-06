@@ -31,10 +31,22 @@ except ImportError:
 DEFAULT_NAV_MASK_INSET_M = 0.15
 DEFAULT_POINT_SPACING_M = 0.3
 DEFAULT_DEPTH_TOLERANCE_M = 0.05
+DEFAULT_FALLBACK_DEPTH_TOLERANCE_M = 0.2
+DEFAULT_FALLBACK2_DEPTH_TOLERANCE_M = 0.4
 TRAJECTORY_STEP_PX = 1.0
 
 STRUCTURE_CATEGORIES = frozenset({"wall", "walls", "door", "doors", "window", "windows"})
 FLOOR_CATEGORIES = frozenset({"floor"})
+# Fallback-only: low-lying rug/mat boxes that occlude semantic floor in top-down view.
+_WALKABLE_SURFACE_LABEL_KEYWORDS = (
+    "floormat",
+    "floor_mat",
+    "floorrug",
+    "carpet",
+    "rug",
+    "arearug",
+    "area_rug",
+)
 
 
 def _normalize_category(name: str) -> str:
@@ -227,6 +239,19 @@ def _contour_to_xy(contour_yx: np.ndarray) -> np.ndarray:
     return np.column_stack([contour_yx[:, 1], contour_yx[:, 0]])
 
 
+def _largest_polygon(geom) -> Optional[Polygon]:
+    """Normalize Polygon / MultiPolygon / repaired geometry to a single Polygon."""
+    if geom is None or geom.is_empty:
+        return None
+    if geom.geom_type == "MultiPolygon":
+        if not geom.geoms:
+            return None
+        geom = max(geom.geoms, key=lambda g: g.area)
+    if geom.geom_type != "Polygon" or geom.is_empty:
+        return None
+    return geom
+
+
 def _mask_to_polygon_with_holes(mask: np.ndarray) -> Optional[Polygon]:
     """Build polygon with holes from binary mask (outer contour + interior holes)."""
     try:
@@ -249,7 +274,8 @@ def _mask_to_polygon_with_holes(mask: np.ndarray) -> Optional[Polygon]:
     ext_poly = Polygon(contours_xy[0])
     if not ext_poly.is_valid:
         ext_poly = ext_poly.buffer(0)
-    if ext_poly.is_empty:
+    ext_poly = _largest_polygon(ext_poly)
+    if ext_poly is None:
         return None
 
     holes: List[List[Tuple[float, float]]] = []
@@ -257,7 +283,8 @@ def _mask_to_polygon_with_holes(mask: np.ndarray) -> Optional[Polygon]:
         hole_poly = Polygon(xy)
         if not hole_poly.is_valid:
             hole_poly = hole_poly.buffer(0)
-        if hole_poly.is_empty:
+        hole_poly = _largest_polygon(hole_poly)
+        if hole_poly is None:
             continue
         if ext_poly.contains(hole_poly.centroid):
             holes.append(list(hole_poly.exterior.coords))
@@ -265,7 +292,8 @@ def _mask_to_polygon_with_holes(mask: np.ndarray) -> Optional[Polygon]:
     poly = Polygon(ext_poly.exterior.coords, holes)
     if not poly.is_valid:
         poly = poly.buffer(0)
-    return poly if not poly.is_empty else None
+    poly = _largest_polygon(poly)
+    return poly
 
 
 def _inset_boundary_ring(
@@ -571,10 +599,177 @@ def sample_path_on_nav_mask(
     return waypoints, trajectory, mask, sample_meta
 
 
+def _try_sample_path_on_nav_mask(
+    nav_mask: np.ndarray,
+    pixel2real_ratio: float,
+    *,
+    inset_m: float = DEFAULT_NAV_MASK_INSET_M,
+    point_spacing_m: float = DEFAULT_POINT_SPACING_M,
+) -> Tuple[List[List[int]], List[List[int]], np.ndarray, Dict[str, Any], bool]:
+    """Sample path; return success=False when too few points or trajectory leaves mask."""
+    try:
+        points_px, trajectory_px, mask, sample_meta = sample_path_on_nav_mask(
+            nav_mask,
+            pixel2real_ratio,
+            inset_m=inset_m,
+            point_spacing_m=point_spacing_m,
+        )
+        return points_px, trajectory_px, mask, sample_meta, len(points_px) >= MIN_PATH_POINTS
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "trajectory not fully inside nav mask" not in msg:
+            raise
+        mask, comp_meta = _largest_component(nav_mask.astype(bool))
+        sample_meta = {
+            "trajectory_validation_failed": msg,
+            "component": comp_meta,
+        }
+        return [], [], mask, sample_meta, False
+
+
 def save_nav_mask_png(nav_mask: np.ndarray, output_path: str) -> None:
     vis = np.zeros((*nav_mask.shape, 3), dtype=np.uint8)
     vis[nav_mask] = (0, 220, 80)
     util.write_image_array(output_path, vis)
+
+
+def _walkable_surface_entity_ids(meta: Dict[str, Any]) -> List[str]:
+    """Entity ids for rug/mat-like boxes (fallback only; normal floor mask unchanged)."""
+    ids: List[str] = []
+    for obj in meta.get("objects", []):
+        if _normalize_category(str(obj.get("category", ""))) != "boxes":
+            continue
+        label = str(obj.get("entity_id") or obj.get("label") or "").strip().lower()
+        if not label:
+            continue
+        compact = label.replace("_", "").replace("-", "")
+        if any(kw.replace("_", "") in compact for kw in _WALKABLE_SURFACE_LABEL_KEYWORDS):
+            ids.append(str(obj.get("entity_id") or obj.get("label")))
+    return ids
+
+
+def build_walkable_surface_mask(
+    semantic_png_path: str,
+    semantic_json_path: str,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Fallback-only mask for carpet/rug boxes that cover semantic floor."""
+    if not os.path.isfile(semantic_png_path):
+        raise FileNotFoundError(semantic_png_path)
+    if not os.path.isfile(semantic_json_path):
+        raise FileNotFoundError(semantic_json_path)
+
+    with open(semantic_json_path, "r", encoding="utf-8") as f:
+        meta = json.load(f)
+
+    walkable_ids = set(_walkable_surface_entity_ids(meta))
+    info: Dict[str, Any] = {
+        "walkable_entity_ids": sorted(walkable_ids),
+        "walkable_pixels": 0,
+    }
+    if not walkable_ids:
+        h = w = 0
+        img = util.read_image_array(semantic_png_path)
+        if img.ndim >= 2:
+            h, w = img.shape[:2]
+        return np.zeros((h, w), dtype=bool), info
+
+    img = util.read_image_array(semantic_png_path)
+    rgb = img[..., :3] if img.ndim == 3 else np.stack([img] * 3, axis=-1)
+    palette, categories = _build_semantic_palette(meta)
+    h, w = rgb.shape[:2]
+    pixels = rgb.reshape(-1, 3).astype(np.float32)
+    dist_sq = np.sum((pixels[:, None, :] - palette[None, :, :]) ** 2, axis=2)
+    nearest = np.argmin(dist_sq, axis=1)
+
+    walkable_flat = np.zeros(h * w, dtype=bool)
+    entity_colors: Dict[str, Tuple[int, int, int]] = {}
+    for obj in meta.get("objects", []):
+        entity_id = str(obj.get("entity_id") or obj.get("label") or "")
+        if entity_id not in walkable_ids:
+            continue
+        color = obj.get("color")
+        if color and len(color) == 3:
+            entity_colors[entity_id] = (int(color[0]), int(color[1]), int(color[2]))
+
+    for idx, cat in enumerate(categories):
+        if cat not in walkable_ids:
+            continue
+        walkable_flat[nearest == idx] = True
+
+    # Also match by explicit entity RGB when palette category name differs.
+    for entity_id, color in entity_colors.items():
+        if entity_id in categories:
+            continue
+        color_arr = np.asarray(color, dtype=np.float32)
+        match = np.all(np.abs(pixels - color_arr) <= 12.0, axis=1)
+        walkable_flat[match] = True
+
+    walkable = _clean_category_mask(walkable_flat.reshape(h, w), min_component_area=64)
+    info["walkable_pixels"] = int(walkable.sum())
+    return walkable, info
+
+
+def _fallback_tier_file_tag(tier: int) -> str:
+    return "fallback" if tier <= 1 else f"fallback{tier}"
+
+
+def _attempt_nav_mask_sampling_at_tolerance(
+    *,
+    output_dir: str,
+    depth_png: str,
+    semantic_png: str,
+    semantic_json: str,
+    camera_para: Dict[str, Any],
+    structure_mask: np.ndarray,
+    floor_mask: np.ndarray,
+    ratio: float,
+    inset_m: float,
+    spacing_m: float,
+    primary_tol_m: float,
+    fallback_tol_m: float,
+    tier: int,
+    tier_label: str,
+) -> Tuple[List[List[int]], List[List[int]], np.ndarray, Dict[str, Any], Dict[str, Any]]:
+    """Retry path sampling with wider depth tolerance (+ rug/mat walkable surfaces)."""
+    file_tag = _fallback_tier_file_tag(tier)
+    print(
+        f"⚠️  Nav mask sampling failed; trying fallback tier {tier} "
+        f"(depth_tol=±{fallback_tol_m}m + rug/mat surfaces, {tier_label})"
+    )
+
+    depth_mask, depth_info = build_nav_mask_from_depth(
+        depth_png, camera_para, tolerance_m=fallback_tol_m
+    )
+    walkable_mask, walkable_info = build_walkable_surface_mask(semantic_png, semantic_json)
+    effective_floor = floor_mask.astype(bool) | walkable_mask
+    nav_mask_raw, combine_info = combine_nav_mask(depth_mask, structure_mask, effective_floor)
+
+    save_nav_mask_png(depth_mask, os.path.join(output_dir, f"nav_mask_depth_{file_tag}.png"))
+    save_nav_mask_png(walkable_mask, os.path.join(output_dir, f"nav_mask_walkable_{file_tag}.png"))
+    save_nav_mask_png(nav_mask_raw, os.path.join(output_dir, f"nav_mask_{file_tag}.png"))
+    mask_largest, comp_meta = _largest_component(nav_mask_raw)
+    save_nav_mask_png(mask_largest, os.path.join(output_dir, f"nav_mask_largest_{file_tag}.png"))
+
+    points_px, trajectory_px, _, sample_meta, ok = _try_sample_path_on_nav_mask(
+        nav_mask_raw,
+        ratio,
+        inset_m=inset_m,
+        point_spacing_m=spacing_m,
+    )
+    fallback_info = {
+        "used": True,
+        "tier": int(tier),
+        "primary_depth_tolerance_m": float(primary_tol_m),
+        "fallback_depth_tolerance_m": float(fallback_tol_m),
+        "depth": depth_info,
+        "walkable_surface": walkable_info,
+        "combine": combine_info,
+        "component": comp_meta,
+        "num_waypoints": len(points_px),
+        "success": bool(ok),
+    }
+    sample_meta["fallback"] = fallback_info
+    return points_px, trajectory_px, nav_mask_raw, sample_meta, fallback_info
 
 
 def run_nav_mask_floor_path(
@@ -628,12 +823,65 @@ def run_nav_mask_floor_path(
     largest_path = os.path.join(output_dir, "nav_mask_largest.png")
     save_nav_mask_png(mask_largest, largest_path)
 
-    points_px, trajectory_px, _, sample_meta = sample_path_on_nav_mask(
+    points_px, trajectory_px, _, sample_meta, primary_ok = _try_sample_path_on_nav_mask(
         nav_mask_raw,
         ratio,
         inset_m=inset_m,
         point_spacing_m=spacing_m,
     )
+    fallback_info: Optional[Dict[str, Any]] = None
+    if not primary_ok:
+        fallback_tiers: List[Tuple[float, int, str]] = [
+            (
+                float(
+                    config.get(
+                        "nav_mask_fallback_depth_tolerance_m",
+                        DEFAULT_FALLBACK_DEPTH_TOLERANCE_M,
+                    )
+                ),
+                1,
+                "rug/mat surfaces",
+            ),
+            (
+                float(
+                    config.get(
+                        "nav_mask_fallback2_depth_tolerance_m",
+                        DEFAULT_FALLBACK2_DEPTH_TOLERANCE_M,
+                    )
+                ),
+                2,
+                "extended depth for low furniture tops",
+            ),
+        ]
+        prev_tol_m = tol_m
+        for fallback_tol_m, tier, tier_label in fallback_tiers:
+            if fallback_tol_m <= prev_tol_m + 1e-9:
+                continue
+            points_px, trajectory_px, nav_mask_raw, sample_meta, fallback_info = (
+                _attempt_nav_mask_sampling_at_tolerance(
+                    output_dir=output_dir,
+                    depth_png=depth_png,
+                    semantic_png=semantic_png,
+                    semantic_json=semantic_json,
+                    camera_para=camera_para,
+                    structure_mask=structure_mask,
+                    floor_mask=floor_mask,
+                    ratio=ratio,
+                    inset_m=inset_m,
+                    spacing_m=spacing_m,
+                    primary_tol_m=tol_m,
+                    fallback_tol_m=fallback_tol_m,
+                    tier=tier,
+                    tier_label=tier_label,
+                )
+            )
+            nav_mask_path = os.path.join(output_dir, "nav_mask.png")
+            save_nav_mask_png(nav_mask_raw, nav_mask_path)
+            mask_largest, _ = _largest_component(nav_mask_raw)
+            save_nav_mask_png(mask_largest, largest_path)
+            if len(points_px) >= MIN_PATH_POINTS:
+                break
+            prev_tol_m = fallback_tol_m
     if len(points_px) < MIN_PATH_POINTS:
         raise RuntimeError(
             f"nav mask sampling failed: only {len(points_px)} points (minimum {MIN_PATH_POINTS} required)"
@@ -652,9 +900,18 @@ def run_nav_mask_floor_path(
         "semantic": semantic_info,
         "combine": combine_info,
     }
+    if fallback_info is not None:
+        mask_info["fallback"] = fallback_info
+
+    method = "depth_semantic_nav_mask"
+    if fallback_info is not None:
+        if int(fallback_info.get("tier", 1)) >= 2:
+            method = "depth_semantic_nav_mask_extended_fallback"
+        else:
+            method = "depth_semantic_nav_mask_rug_fallback"
 
     result = {
-        "method": "depth_semantic_nav_mask",
+        "method": method,
         "path_points_px": points_px,
         "path_trajectory_px": trajectory_px,
         "path_points_ssl": points_ssl,

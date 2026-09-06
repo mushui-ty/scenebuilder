@@ -3,9 +3,9 @@
 #  1. pyrender config
 # scenebuilder-specific settings (not used in scenebuilder_bpy)
 # Asset paths are relative to scenebuilder package root (same level as config.yaml)
-floor_texture_path: assets/textures/floor_texture2.png
-ceiling_texture_path: assets/textures/wall_texture3.png
-wall_texture_path: assets/textures/wall_texture3.png
+floor_texture_path: assets/textures/floor_texture.png
+ceiling_texture_path: assets/textures/wall_texture.png
+wall_texture_path: assets/textures/wall_texture.png
 door_texture_path: assets/textures/door.png
 window_texture_path: assets/textures/window.png
 wall_color:  # Wall color; fallback in scenebuilder_bpy when material is missing
@@ -36,6 +36,7 @@ model_hole_path: /data-nas/data/dataset/qunhe/Manycore-Future/holes # Door/windo
 
 # Render settings
 array_light_intensity: 20.0 # Light intensity per lamp in array mode
+ambient_light_strength: 4.0 # World background strength (render_view, topdown, normalized topdown)
 blender_samples: 32 # Blender render sample count
 
 
@@ -50,12 +51,40 @@ outdoor_fov_scale: 1.1  # FOV scale factor when camera is outside room
 
 # 4. Normalized top-down floor path (depth nav mask)
 nav_mask_depth_tolerance_m: 0.05  # Walkable depth: camera-to-ground distance ± this value (m)
+nav_mask_fallback_depth_tolerance_m: 0.2  # Fallback tier 1 when primary path sampling fails
+nav_mask_fallback2_depth_tolerance_m: 0.4  # Fallback tier 2 for low furniture tops (~40cm)
 nav_mask_inset_m: 0.15           # Inset from outer boundary (m)
 nav_mask_point_spacing_m: 0.3    # Sample spacing along inner boundary (m)
-topdown_occluder_bottom_margin_m: 0.25       # Skip bbox near ceiling (top/bottom vs wall_height - margin)
+topdown_occluder_bottom_margin_m: 0.25       # Exclude bbox whose bottom is in upper band (wall_height - margin)
 topdown_occluder_min_floor_area_ratio: 0.10  # ...and XY footprint >= floor_area * this
 topdown_occluder_keyword_min_floor_area_ratio: 0.05  # Softer threshold when label hints ceiling
-topdown_occluder_large_footprint_ratio: 0.25  # Also skip if top near ceiling and XY >= floor * this
+topdown_occluder_large_footprint_ratio: 0.25  # Also skip large thin ceiling panels (bottom/height rules still apply)
+topdown_occluder_low_hanging_min_bottom_m: 2.0       # Mid/high thin panel: bottom_z >= this (m), fixed
+topdown_occluder_low_hanging_max_height_m: 0.35      # ...and thickness (scale_z) <= this (m)
+topdown_occluder_low_hanging_min_floor_area_ratio: 0.45  # ...and XY footprint >= floor_area * this
+topdown_occluder_enclosure_min_height_ratio: 0.95  # Only with enclosure label: height >= wall * this
+topdown_occluder_enclosure_min_floor_area_ratio: 0.95  # ...and XY footprint >= floor_area * this
+topdown_occluder_ceiling_slab_max_height_m: 1.0  # Large flat ceiling slab: thickness <= this (m)
+topdown_occluder_ceiling_slab_min_floor_area_ratio: 0.95  # ...and XY footprint >= floor_area * this
+topdown_occluder_full_height_min_height_ratio: 0.90  # Panel/divider: height >= wall * this
+topdown_occluder_full_height_min_floor_area_ratio: 0.95  # ...and XY footprint >= floor_area * this
+topdown_occluder_full_height_max_bottom_m: 0.15  # ...and bottom near floor (m); label must match panel keywords
+topdown_occluder_wide_footprint_min_ratio: 0.90  # Skip top-down depth blockers: XY footprint > this × floor area
+topdown_occluder_wide_footprint_min_top_m: 3.5  # ...and bbox top (m) above this fixed height
+topdown_occluder_wide_footprint_label_keywords: [pipe, ceiling]  # ...and label contains any keyword
+topdown_occluder_geom_eps_m: 0.01  # Tolerance (m) for height/band comparisons (float bbox noise)
+
+# Auto-path camera roll perturbation (around view axis; does not affect video / custom views)
+auto_path_roll_max_deg: 40.0   # Truncated-normal roll sample in [-max, max]; 0 disables
+auto_path_roll_std_deg: 16.0   # Std dev (deg); smaller => more samples near 0
+
+# auto_path_topdown: perturb completed topdown pose via topdown_view (occluder + ceiling logic; 1000²)
+topdown_pitch_max_deg: 20.0    # Truncated normal in [-max, max]; 0 disables
+topdown_yaw_max_deg: 20.0
+topdown_roll_max_deg: 180.0
+topdown_pitch_std_deg: 8.0     # Optional; defaults to max * 0.4 when omitted
+topdown_yaw_std_deg: 8.0
+topdown_roll_std_deg: 72.0
 
 # 5. Visible geometry mask criteria
 ratio_if_visible: 0.1             # visible mask / overall mask below this → mostly_occluded

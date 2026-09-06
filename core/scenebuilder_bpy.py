@@ -3292,11 +3292,14 @@ class BpySceneCtx:
     def setup_lighting(self, intensity: float = 250,
                       lighting_type: Literal["area", "array", "none"] = "array",
                       ambient_light_color: list = None,
-                      ambient_strength: float = 2.0):
+                      ambient_strength: Optional[float] = None):
         """Set scene lighting: single large area light, array lights, or none"""
         if self.if_set_lights:
             print("⚠️  Lighting already set, skipping duplicate setup")
             return
+
+        if ambient_strength is None:
+            ambient_strength = float(self.config.get("ambient_light_strength", 4.0))
         
         if lighting_type == "none":
             print("🌑 'none' mode selected, no artificial lights added")
@@ -3944,8 +3947,9 @@ class BpySceneCtx:
         """
         width = util_data.NORMALIZED_TOPDOWN_WIDTH
         height = util_data.NORMALIZED_TOPDOWN_HEIGHT
+        visible_geometry = bool(kwargs.pop("visible_geometry", False))
         for key in (
-            "export_glb", "export_point_cloud", "export_voxel", "visible_geometry",
+            "export_glb", "export_point_cloud", "export_voxel",
             "rebuild", "auto_fov", "manual_fov", "glb_path",
         ):
             kwargs.pop(key, None)
@@ -3988,7 +3992,7 @@ class BpySceneCtx:
             ceiling_info["node"].visible_shadow = visible_shadow
 
         if not self.if_set_lights:
-            self.setup_lighting(lighting_type=lighting_type, ambient_light_color=[1.0, 1.0, 1.0], ambient_strength=3.0)
+            self.setup_lighting(lighting_type=lighting_type, ambient_light_color=[1.0, 1.0, 1.0])
 
         self.scene.render.film_transparent = hdri_transparent_background
         if use_HDRI:
@@ -4120,6 +4124,8 @@ class BpySceneCtx:
     def topdown_view(self, output_path: str, width: int = 1024, height: int = 1024,
                      geometry_mode: str = "gltf", show_wall: bool = True, 
                      show_window: bool = True, show_door: bool = True, show_ceiling: bool = True,
+                     camera_position: list = None,
+                     look_at_target: list = None,
                      up_vector: list = None,
                      auto_fov: bool = True, manual_fov: float = None,
                      auto_transparent: bool = True, transparent_alpha: float = 0.0,
@@ -4139,19 +4145,35 @@ class BpySceneCtx:
                      export_visible_point_cloud: Optional[bool] = None,
                      skip_render: bool = False,
                      write_ssl: bool = True,
-                     write_camera_para: bool = True):
-        """Top-down render: when output_path is a directory, write single frame and artifacts to {output}/topdown/topdown.png."""
-        output_path = self._resolve_topdown_output_path(output_path)
+                     write_camera_para: bool = True,
+                     view_dir_name: str = "topdown",
+                     image_basename: Optional[str] = None):
+        """Top-down render: when output_path is a directory, write single frame and artifacts to {output}/{view_dir_name}/{basename}.png.
+
+        Default ``view_dir_name='topdown'`` + no custom pose reproduces the standard top-down view.
+        Pass ``camera_position`` / ``look_at_target`` / ``up_vector`` for perturbed variants (e.g. auto_path_topdown).
+        """
+        output_path = self._resolve_topdown_output_path(
+            output_path,
+            view_dir_name=view_dir_name,
+            image_basename=image_basename,
+        )
         view_dir = os.path.dirname(output_path) or "."
         total_start = time.perf_counter()
 
         meta_w = self.context["meta"]
-        world_cam_w = [
-            meta_w["center"][0],
-            meta_w["center"][1],
-            meta_w["z_max"] + max(meta_w["span"]) * 1.5,
-        ]
-        world_look_w = [meta_w["center"][0], meta_w["center"][1], 0.0]
+        if camera_position is not None:
+            world_cam_w = [float(x) for x in camera_position]
+        else:
+            world_cam_w = [
+                meta_w["center"][0],
+                meta_w["center"][1],
+                meta_w["z_max"] + max(meta_w["span"]) * 1.5,
+            ]
+        if look_at_target is not None:
+            world_look_w = [float(x) for x in look_at_target]
+        else:
+            world_look_w = [meta_w["center"][0], meta_w["center"][1], 0.0]
         world_up_raw = up_vector if up_vector else [0.0, 1.0, 0.0]
 
         exclude_box_ids = util.resolve_topdown_exclude_box_ids(
@@ -4191,7 +4213,7 @@ class BpySceneCtx:
             # Setup lighting
             setup_start = time.perf_counter()
             if not self.if_set_lights:
-                self.setup_lighting(lighting_type=lighting_type, ambient_light_color=[1.0, 1.0, 1.0], ambient_strength=3.0)
+                self.setup_lighting(lighting_type=lighting_type, ambient_light_color=[1.0, 1.0, 1.0])
 
             self.scene.render.film_transparent = hdri_transparent_background
 
@@ -4207,9 +4229,8 @@ class BpySceneCtx:
             z_max = self.context["meta"]["z_max"]
             bounds = self.context["meta"]["bounds"]
 
-            camera_height = z_max + max(span) * 1.5
-            camera_position = np.array([center[0], center[1], camera_height], dtype=float)
-            look_at_target = np.array([center[0], center[1], 0.0], dtype=float)
+            camera_position = np.array(world_cam_w, dtype=float)
+            look_at_target = np.array(world_look_w, dtype=float)
             up_vector = np.array(world_up_raw, dtype=float)
 
             up_norm = np.linalg.norm(up_vector)
@@ -4459,11 +4480,20 @@ class BpySceneCtx:
                 return frames[0]
         return util.resolve_view_image_path(output_path, view_dir_name=view_dir_name)
 
-    def _resolve_topdown_output_path(self, output_path: str) -> str:
-        """Top-down: when output_path is a directory, write single frame to {output}/topdown/topdown.png."""
+    def _resolve_topdown_output_path(
+        self,
+        output_path: str,
+        *,
+        view_dir_name: str = "topdown",
+        image_basename: Optional[str] = None,
+    ) -> str:
+        """Top-down: directory output → {output}/{view_dir_name}/{basename}.png (default topdown/topdown.png)."""
         if self._is_image_output_path(output_path):
             return output_path
-        return util.resolve_topdown_image_path(output_path)
+        basename = image_basename or view_dir_name
+        view_dir = os.path.join(output_path, view_dir_name)
+        os.makedirs(view_dir, exist_ok=True)
+        return os.path.join(view_dir, f"{basename}.png")
 
     @staticmethod
     def _camera_para_path(output_path: str) -> str:

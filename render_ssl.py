@@ -358,6 +358,13 @@ def _apply_auto_path_pano_gate(
     job: dict,
 ) -> None:
     """Only selected auto_path singles render pano (+ pano geometry); video views unchanged."""
+    try:
+        from .core.auto_views import AUTO_PATH_TOPDOWN_NAME
+    except (ImportError, ValueError):
+        from core.auto_views import AUTO_PATH_TOPDOWN_NAME  # type: ignore
+    if view_name == AUTO_PATH_TOPDOWN_NAME:
+        extra["pano"] = False
+        return
     if not view_name.startswith("auto_path_") or view_name.endswith("_seq"):
         return
     try:
@@ -497,6 +504,12 @@ def _describe_view_start(view_name: str, spec: Optional[Dict[str, Any]] = None, 
         if view_name.endswith("_seq"):
             n = len(spec.get("camera_positions") or [])
             return f"auto_path sequence ({n or '?'} frames, {size})"
+        try:
+            from .core.auto_views import AUTO_PATH_TOPDOWN_NAME
+        except (ImportError, ValueError):
+            from core.auto_views import AUTO_PATH_TOPDOWN_NAME  # type: ignore
+        if view_name == AUTO_PATH_TOPDOWN_NAME:
+            return f"auto_path_topdown ({size}, topdown_view + perturbation)"
         pano_note = ""
         if (job or {}).get("pano") and spec.get("render_pano"):
             pano_res = (job or {}).get("pano_resolution", 4096)
@@ -556,6 +569,7 @@ def _prepare_render_ctx(
     gen_texture: bool = False,
     image: Optional[str] = None,
     samples: Optional[int] = None,
+    scene_textures: Optional[Dict[str, str]] = None,
 ):
     if samples is not None and hasattr(ctx, "set_blender_samples"):
         ctx.set_blender_samples(samples)
@@ -583,6 +597,12 @@ def _prepare_render_ctx(
         except (ImportError, ValueError):
             from core.util_data import generate_texture  # type: ignore
         generate_texture(ctx, image)
+    else:
+        try:
+            from .core.auto_texture import apply_scene_textures_to_ctx
+        except (ImportError, ValueError):
+            from core.auto_texture import apply_scene_textures_to_ctx  # type: ignore
+        apply_scene_textures_to_ctx(ctx, scene_textures)
 
     ctx.normalize_scene_data()
     return ctx
@@ -605,6 +625,7 @@ def _create_render_ctx(job: dict):
         gen_texture=job.get("gen_texture", False),
         image=job.get("image"),
         samples=job.get("samples"),
+        scene_textures=job.get("scene_textures"),
     )
 
 
@@ -765,6 +786,22 @@ def worker_render_view(
 
     auto_specs = job.get("auto_view_specs") or {}
     custom_specs = job.get("custom_view_specs") or {}
+
+    try:
+        from .core.auto_views import AUTO_PATH_TOPDOWN_NAME, ensure_auto_path_topdown_spec
+    except (ImportError, ValueError):
+        from core.auto_views import AUTO_PATH_TOPDOWN_NAME, ensure_auto_path_topdown_spec  # type: ignore
+
+    if view_name == AUTO_PATH_TOPDOWN_NAME:
+        resolved = ensure_auto_path_topdown_spec(
+            output_dir, resume=bool(job.get("resume", True))
+        )
+        if resolved is None:
+            raise RuntimeError(
+                f"{AUTO_PATH_TOPDOWN_NAME} requires completed topdown/topdown_camera_para.json"
+            )
+        auto_specs[view_name] = resolved
+
     view_spec = auto_specs.get(view_name) or custom_specs.get(view_name)
     is_chunk = frame_start is not None
     if not is_chunk and not geometry_export_only:
@@ -814,6 +851,36 @@ def worker_render_view(
     )
 
     try:
+        if view_name == AUTO_PATH_TOPDOWN_NAME:
+            spec = dict(auto_specs[view_name])
+            td_extra = dict(extra)
+            td_extra.pop("pano", None)
+            td_extra.pop("pano_resolution", None)
+            ctx.topdown_view(
+                output_dir,
+                width=int(spec.get("width", 1000)),
+                height=int(spec.get("height", 1000)),
+                show_ceiling=False,
+                rebuild=True,
+                use_HDRI=False,
+                camera_position=spec["camera_position"],
+                look_at_target=spec["look_at_target"],
+                up_vector=spec.get("up_vector"),
+                manual_fov=spec.get("manual_fov"),
+                auto_fov=spec.get("manual_fov") is None,
+                view_dir_name=AUTO_PATH_TOPDOWN_NAME,
+                **td_extra,
+            )
+            if record_complete:
+                view_dir = view_dir_for(output_dir, view_name)
+                record_view_complete(
+                    output_dir,
+                    view_name,
+                    view_dir=view_dir,
+                    main_pngs=list_primary_frames(view_dir),
+                )
+            return
+
         if view_name in auto_specs:
             spec = dict(auto_specs[view_name])
             _apply_job_view_size(job, spec)
@@ -1120,6 +1187,7 @@ def render_normalized_topdown(
     hole_asset_dir: Optional[str] = None,
     texture_dir: Optional[str] = None,
     gen_texture: bool = False,
+    auto_texture: bool = True,
     image: Optional[str] = None,
     samples: Optional[int] = None,
     show_ceiling: bool = False,
@@ -1149,6 +1217,7 @@ def render_normalized_topdown(
         hole_asset_dir=hole_asset_dir,
         gen_3d_model=gen_3d_model,
         gen_texture=gen_texture,
+        auto_texture=auto_texture,
         texture_dir=texture_dir,
         correct_tilt=correct_tilt,
         correct_yaw=correct_yaw,
@@ -1185,6 +1254,7 @@ def render_ssl(
     hole_asset_dir: Optional[str] = None,
     gen_3d_model: Literal["hunyuan-3d-rapid", "hunyuan-3d-pro"] = "hunyuan-3d-pro",
     gen_texture: bool = False,
+    auto_texture: bool = True,
     texture_dir: Optional[str] = None,
     correct_tilt: bool = True,
     correct_yaw: bool = True,
@@ -1291,6 +1361,22 @@ def render_ssl(
     y_dir = resolve_output_dir(output_root, normalized_topdown)
     os.makedirs(y_dir, exist_ok=True)
 
+    try:
+        from .core.auto_texture import log_scene_textures, resolve_scene_textures
+    except (ImportError, ValueError):
+        from core.auto_texture import log_scene_textures, resolve_scene_textures  # type: ignore
+
+    scene_textures = resolve_scene_textures(
+        y_dir,
+        backend=backend,
+        auto_texture=auto_texture,
+        texture_dir=texture_dir,
+        gen_texture=gen_texture,
+        resume=resume,
+    )
+    if scene_textures:
+        log_scene_textures(scene_textures, source="auto_texture")
+
     room_type = scene_json["room"]["room_type"]
     ctx = _instantiate_ctx(backend, room_type, asset_dir, hole_asset_dir)
     _prepare_render_ctx(
@@ -1300,6 +1386,7 @@ def render_ssl(
         gen_texture=gen_texture,
         image=image,
         samples=samples,
+        scene_textures=scene_textures,
     )
 
     pixel_align: Optional[Dict[str, Any]] = None
@@ -1312,19 +1399,9 @@ def render_ssl(
             pixel_align["dy_ssl"],
         )
 
-    ssl_exclude_box_ids = None
-    if normalized_topdown:
-        try:
-            from .core import util as core_util
-        except (ImportError, ValueError):
-            from core import util as core_util  # type: ignore
-        ssl_exclude_box_ids = core_util.identify_topdown_occluding_box_ids(
-            ctx.context, getattr(ctx, "config", {})
-        ) or None
-
-    standard_ssl = format_standard_ssl(
-        context_for_ssl_export(ctx.context, ssl_exclude_box_ids)
-    )
+    # Root ssl.txt is always the full scene. Top-down occluder filtering applies only
+    # inside topdown_view / normalized_topdown_view (render + ssl_opencv there).
+    standard_ssl = format_standard_ssl(ctx.context)
     ssl_path = os.path.join(y_dir, "ssl.txt")
     with open(ssl_path, "w", encoding="utf-8") as f:
         f.write(standard_ssl)
@@ -1411,6 +1488,14 @@ def render_ssl(
                 video_frames=video_frames,
                 pano_num=pano_num,
             )
+            if views == "auto":
+                try:
+                    from .core.auto_views import try_add_auto_path_topdown_to_manifest
+                except (ImportError, ValueError):
+                    from core.auto_views import try_add_auto_path_topdown_to_manifest  # type: ignore
+                try_add_auto_path_topdown_to_manifest(
+                    y_dir, auto_view_specs, auto_view_names, resume=resume
+                )
 
     if camera_position is not None:
         custom_name, custom_spec = _build_custom_view_spec(
@@ -1438,6 +1523,8 @@ def render_ssl(
         "hole_asset_dir": hole_asset_dir,
         "texture_dir": texture_dir,
         "gen_texture": gen_texture,
+        "auto_texture": auto_texture,
+        "scene_textures": scene_textures,
         "image": image,
         "samples": samples,
         "export_glb": export_glb,
@@ -1468,8 +1555,14 @@ def render_ssl(
     views_to_run = _resolve_views_to_run(views, view_cameras)
     if views == "auto":
         if backend == "bpy":
-            # Regular topdown (Y/topdown/) + path-driven auto views (+ video when --video)
-            views_to_run = ["topdown"] + list(auto_view_names)
+            try:
+                from .core.auto_views import AUTO_PATH_TOPDOWN_NAME
+            except (ImportError, ValueError):
+                from core.auto_views import AUTO_PATH_TOPDOWN_NAME  # type: ignore
+            # topdown first, then perturbed topdown clone, then path-driven auto views
+            views_to_run = ["topdown", AUTO_PATH_TOPDOWN_NAME] + [
+                n for n in auto_view_names if n != AUTO_PATH_TOPDOWN_NAME
+            ]
         else:
             views_to_run = []
     elif video:
@@ -1752,6 +1845,11 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
     )
     parser.add_argument("--backend", choices=["bpy", "pyrender"], default="bpy", help="Render backend")
     parser.add_argument("--texture", default=None, help="Texture directory")
+    parser.add_argument(
+        "--no-auto-texture",
+        action="store_true",
+        help="Disable random bpy textures/HDRI; use config.yaml paths (default: auto_texture=True)",
+    )
     parser.add_argument("--assets", default=None, help="3D asset directory (auto-detected if omitted)")
     parser.add_argument(
         "--hole_assets",
@@ -1885,6 +1983,7 @@ Examples (equivalent to common commands in SpatialFactory/scripts/render_scene.p
         asset_dir=asset_dir,
         hole_asset_dir=args.hole_assets,
         texture_dir=texture_dir,
+        auto_texture=not args.no_auto_texture,
         views=views,
         export_glb=args.glb,
         export_point_cloud=args.ply,

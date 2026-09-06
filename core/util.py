@@ -3026,7 +3026,89 @@ def normal_map_camera_para_fields() -> Dict[str, Any]:
 
 DEFAULT_TOPDOWN_OCCLUDER_BOTTOM_MARGIN_M = 0.25
 DEFAULT_TOPDOWN_OCCLUDER_MIN_FLOOR_AREA_RATIO = 0.10
+DEFAULT_TOPDOWN_OCCLUDER_LOW_HANGING_MIN_BOTTOM_M = 2.0
+DEFAULT_TOPDOWN_OCCLUDER_LOW_HANGING_MAX_HEIGHT_M = 0.35
+DEFAULT_TOPDOWN_OCCLUDER_LOW_HANGING_MIN_FLOOR_AREA_RATIO = 0.45
+DEFAULT_TOPDOWN_OCCLUDER_ENCLOSURE_MIN_HEIGHT_RATIO = 0.95
+DEFAULT_TOPDOWN_OCCLUDER_ENCLOSURE_MIN_FLOOR_AREA_RATIO = 0.95
+DEFAULT_TOPDOWN_OCCLUDER_CEILING_SLAB_MAX_HEIGHT_M = 1.0
+DEFAULT_TOPDOWN_OCCLUDER_CEILING_SLAB_MIN_FLOOR_AREA_RATIO = 0.95
+DEFAULT_TOPDOWN_OCCLUDER_FULL_HEIGHT_MIN_HEIGHT_RATIO = 0.90
+DEFAULT_TOPDOWN_OCCLUDER_FULL_HEIGHT_MIN_FLOOR_AREA_RATIO = 0.95
+DEFAULT_TOPDOWN_OCCLUDER_FULL_HEIGHT_MAX_BOTTOM_M = 0.15
+DEFAULT_TOPDOWN_OCCLUDER_WIDE_FOOTPRINT_MIN_RATIO = 0.90
+DEFAULT_TOPDOWN_OCCLUDER_WIDE_FOOTPRINT_MIN_TOP_M = 3.5
+DEFAULT_TOPDOWN_OCCLUDER_WIDE_FOOTPRINT_LABEL_KEYWORDS = ("pipe", "ceiling")
+DEFAULT_TOPDOWN_OCCLUDER_GEOM_EPS_M = 0.01
+TOPDOWN_OCCLUDER_PANEL_LABEL_KEYWORDS = (
+    "wall panel",
+    "wall partition",
+    "room divider",
+    "partition wall",
+    "decorative panel",
+    "隔断",
+    "墙板",
+    "装饰墙板",
+)
+TOPDOWN_OCCLUDER_ENCLOSURE_LABEL_KEYWORDS = (
+    "sunroom",
+    "conservatory",
+    "greenhouse",
+    "glasshouse",
+    "glass cube",
+    "glasscube",
+    "玻璃房",
+    "阳光房",
+)
 TOPDOWN_OCCLUDER_LABEL_KEYWORDS = ("ceiling", "顶板", "吊顶", "天花板", "顶面")
+
+
+def _wide_footprint_label_match(label_text: str, keywords: Tuple[str, ...]) -> bool:
+    """True when compact label contains any wide-footprint keyword (e.g. pipe, ceiling)."""
+    compact = (label_text or "").lower().replace("_", "").replace("-", "").replace(" ", "")
+    if not compact:
+        return False
+    for kw in keywords:
+        token = (kw or "").lower().replace("_", "").replace("-", "").replace(" ", "")
+        if token and token in compact:
+            return True
+    return False
+
+
+def _label_caption_text(box: Dict[str, Any]) -> str:
+    return " ".join(
+        filter(
+            None,
+            [
+                str(box.get("label") or "").lower(),
+                str(box.get("caption") or "").lower(),
+            ],
+        )
+    )
+
+
+def _is_glass_enclosure_candidate(label_caption: str) -> bool:
+    return any(kw in label_caption for kw in TOPDOWN_OCCLUDER_ENCLOSURE_LABEL_KEYWORDS)
+
+
+def _is_panel_occluder_candidate(label_caption: str, *, label_only: str = "") -> bool:
+    """Match wall panel / partition labels.
+
+    ``normalize_scene_context`` may rename labels (e.g. ``wallpanel0``); match compact forms too.
+    """
+    texts: List[str] = []
+    for raw in (label_only, label_caption):
+        text = (raw or "").lower()
+        if not text:
+            continue
+        texts.append(text)
+        texts.append(text.replace("_", "").replace("-", "").replace(" ", ""))
+    for text in texts:
+        for kw in TOPDOWN_OCCLUDER_PANEL_LABEL_KEYWORDS:
+            k = kw.lower()
+            if k in text or k.replace(" ", "") in text:
+                return True
+    return False
 
 
 def identify_topdown_occluding_box_ids(
@@ -3074,6 +3156,86 @@ def identify_topdown_occluding_box_ids(
     min_xy_area = floor_area * min_area_ratio
     keyword_min_xy = floor_area * keyword_min_ratio
     bottom_threshold = wall_z_max - margin_m
+    thin_ceiling_max_height = margin_m * 2.0
+    low_hanging_min_bottom_m = float(
+        config.get(
+            "topdown_occluder_low_hanging_min_bottom_m",
+            DEFAULT_TOPDOWN_OCCLUDER_LOW_HANGING_MIN_BOTTOM_M,
+        )
+    )
+    low_hanging_max_height_m = float(
+        config.get(
+            "topdown_occluder_low_hanging_max_height_m",
+            DEFAULT_TOPDOWN_OCCLUDER_LOW_HANGING_MAX_HEIGHT_M,
+        )
+    )
+    low_hanging_min_area_ratio = float(
+        config.get(
+            "topdown_occluder_low_hanging_min_floor_area_ratio",
+            DEFAULT_TOPDOWN_OCCLUDER_LOW_HANGING_MIN_FLOOR_AREA_RATIO,
+        )
+    )
+    low_hanging_min_xy = floor_area * low_hanging_min_area_ratio
+    enclosure_min_area_ratio = float(
+        config.get(
+            "topdown_occluder_enclosure_min_floor_area_ratio",
+            DEFAULT_TOPDOWN_OCCLUDER_ENCLOSURE_MIN_FLOOR_AREA_RATIO,
+        )
+    )
+    enclosure_min_xy = floor_area * enclosure_min_area_ratio
+    ceiling_slab_max_height_m = float(
+        config.get(
+            "topdown_occluder_ceiling_slab_max_height_m",
+            DEFAULT_TOPDOWN_OCCLUDER_CEILING_SLAB_MAX_HEIGHT_M,
+        )
+    )
+    ceiling_slab_min_area_ratio = float(
+        config.get(
+            "topdown_occluder_ceiling_slab_min_floor_area_ratio",
+            DEFAULT_TOPDOWN_OCCLUDER_CEILING_SLAB_MIN_FLOOR_AREA_RATIO,
+        )
+    )
+    ceiling_slab_min_xy = floor_area * ceiling_slab_min_area_ratio
+    full_height_min_height_ratio = float(
+        config.get(
+            "topdown_occluder_full_height_min_height_ratio",
+            DEFAULT_TOPDOWN_OCCLUDER_FULL_HEIGHT_MIN_HEIGHT_RATIO,
+        )
+    )
+    full_height_min_area_ratio = float(
+        config.get(
+            "topdown_occluder_full_height_min_floor_area_ratio",
+            DEFAULT_TOPDOWN_OCCLUDER_FULL_HEIGHT_MIN_FLOOR_AREA_RATIO,
+        )
+    )
+    full_height_max_bottom_m = float(
+        config.get(
+            "topdown_occluder_full_height_max_bottom_m",
+            DEFAULT_TOPDOWN_OCCLUDER_FULL_HEIGHT_MAX_BOTTOM_M,
+        )
+    )
+    full_height_min_xy = floor_area * full_height_min_area_ratio
+    wide_footprint_min_ratio = float(
+        config.get(
+            "topdown_occluder_wide_footprint_min_ratio",
+            DEFAULT_TOPDOWN_OCCLUDER_WIDE_FOOTPRINT_MIN_RATIO,
+        )
+    )
+    wide_footprint_min_top_m = float(
+        config.get(
+            "topdown_occluder_wide_footprint_min_top_m",
+            DEFAULT_TOPDOWN_OCCLUDER_WIDE_FOOTPRINT_MIN_TOP_M,
+        )
+    )
+    wide_footprint_label_keywords = tuple(
+        config.get(
+            "topdown_occluder_wide_footprint_label_keywords",
+            DEFAULT_TOPDOWN_OCCLUDER_WIDE_FOOTPRINT_LABEL_KEYWORDS,
+        )
+    )
+    geom_eps_m = float(
+        config.get("topdown_occluder_geom_eps_m", DEFAULT_TOPDOWN_OCCLUDER_GEOM_EPS_M)
+    )
 
     excluded: Set[str] = set()
     for box_id, box in (context.get("boxes") or {}).items():
@@ -3084,13 +3246,75 @@ def identify_topdown_occluding_box_ids(
 
         bottom_z = float(center[2]) - float(scale[2]) / 2.0
         top_z = float(center[2]) + float(scale[2]) / 2.0
+        height_z = top_z - bottom_z
         xy_area = abs(float(scale[0]) * float(scale[1]))
         label = str(box.get("label") or box.get("caption") or "").lower()
+        label_caption = _label_caption_text(box)
 
-        # Use top or bottom: thin ceiling fixtures can have bottom below the band while
-        # still blocking the entire top-down depth pass (e.g. large ceiling panels).
-        in_upper_band = bottom_z >= bottom_threshold or top_z >= bottom_threshold
-        if in_upper_band and xy_area >= min_xy_area:
+        footprint_ratio = xy_area / floor_area if floor_area > 1e-6 else 0.0
+        if (
+            footprint_ratio > wide_footprint_min_ratio - 1e-9
+            and top_z > wide_footprint_min_top_m + geom_eps_m
+            and _wide_footprint_label_match(label, wide_footprint_label_keywords)
+        ):
+            excluded.add(box_id)
+            continue
+
+        # Ceiling-mounted: bottom in upper band. Tall floor furniture (bookshelf, wardrobe)
+        # can reach the ceiling (top_z in band) but must not be excluded.
+        bottom_in_upper_band = bottom_z >= bottom_threshold - geom_eps_m
+        thin_ceiling_fixture = (
+            top_z >= bottom_threshold - geom_eps_m
+            and height_z <= thin_ceiling_max_height + geom_eps_m
+        )
+        if (bottom_in_upper_band or thin_ceiling_fixture) and xy_area >= min_xy_area:
+            excluded.add(box_id)
+            continue
+
+        # Large flat ceiling slab: top near ceiling, huge footprint, modest thickness.
+        # Catches mis-scaled ceiling fixtures (e.g. full-room light panel) whose bottom
+        # sits slightly below the upper band but still blocks the entire top-down view.
+        if (
+            top_z >= bottom_threshold - geom_eps_m
+            and height_z <= ceiling_slab_max_height_m + geom_eps_m
+            and xy_area >= ceiling_slab_min_xy
+        ):
+            excluded.add(box_id)
+            continue
+
+        # Labeled wall panel / room divider covering most of the room (e.g. KTV decorative
+        # wall panel modeled as a floor-to-ceiling slab). Label-gated to avoid full-height
+        # wardrobes, beds, and kitchen units that also reach the ceiling.
+        if (
+            _is_panel_occluder_candidate(label_caption, label_only=label)
+            and xy_area >= full_height_min_xy
+            and bottom_z <= full_height_max_bottom_m + geom_eps_m
+            and height_z >= wall_z_max * full_height_min_height_ratio - geom_eps_m
+        ):
+            excluded.add(box_id)
+            continue
+
+        # Large thin panels hung mid/high (e.g. dropped ceiling soffits ~2m+ above floor).
+        if (
+            height_z <= low_hanging_max_height_m
+            and bottom_z >= low_hanging_min_bottom_m
+            and xy_area >= low_hanging_min_xy
+        ):
+            excluded.add(box_id)
+            continue
+
+        # Glass sunroom / conservatory: label match only + near full wall height + huge footprint.
+        enclosure_min_height_ratio = float(
+            config.get(
+                "topdown_occluder_enclosure_min_height_ratio",
+                DEFAULT_TOPDOWN_OCCLUDER_ENCLOSURE_MIN_HEIGHT_RATIO,
+            )
+        )
+        if (
+            _is_glass_enclosure_candidate(label_caption)
+            and xy_area >= enclosure_min_xy
+            and height_z >= wall_z_max * enclosure_min_height_ratio
+        ):
             excluded.add(box_id)
             continue
 
@@ -3098,13 +3322,22 @@ def identify_topdown_occluding_box_ids(
             config.get("topdown_occluder_large_footprint_ratio", 0.25)
         )
         near_ceiling_top = wall_z_max - margin_m * 4
-        if xy_area >= floor_area * large_footprint_ratio and top_z >= near_ceiling_top:
+        if (
+            xy_area >= floor_area * large_footprint_ratio
+            and top_z >= near_ceiling_top
+            and (bottom_in_upper_band or thin_ceiling_fixture)
+        ):
             excluded.add(box_id)
             continue
 
         if any(kw in label for kw in TOPDOWN_OCCLUDER_LABEL_KEYWORDS):
             kw_band = wall_z_max - margin_m * 2
-            if (bottom_z >= kw_band or top_z >= kw_band) and xy_area >= keyword_min_xy:
+            bottom_in_kw_band = bottom_z >= kw_band - geom_eps_m
+            thin_in_kw_band = (
+                top_z >= kw_band - geom_eps_m
+                and height_z <= thin_ceiling_max_height + geom_eps_m
+            )
+            if (bottom_in_kw_band or thin_in_kw_band) and xy_area >= keyword_min_xy:
                 excluded.add(box_id)
 
     return excluded
