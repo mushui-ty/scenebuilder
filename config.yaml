@@ -23,9 +23,9 @@ wall_edge_offset: 0.01  # Edge line inset toward room interior (m), avoids overl
     
     
 # 2. Config used in scenebuilder_bpy
-floor_blender_texture_path: assets/textures/oak_veneer_01_1k.blend/oak_veneer_01_1k.blend
-ceiling_blender_texture_path: assets/textures/polystyrene_1k.blend/polystyrene_1k.blend
-wall_blender_texture_path: assets/textures/polystyrene_1k.blend/polystyrene_1k.blend
+floor_blender_texture_path: assets/textures/floor/oak_veneer_01_1k.blend/oak_veneer_01_1k.blend
+ceiling_blender_texture_path: assets/textures/wall_ceiling/polystyrene_1k.blend/polystyrene_1k.blend
+wall_blender_texture_path: assets/textures/wall_ceiling/polystyrene_1k.blend/polystyrene_1k.blend
 hdri_path: assets/HDRIs/qwantani_sunset_puresky_1k.exr
 
 

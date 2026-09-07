@@ -27,7 +27,7 @@
 - **多视角**：俯视、预设相机、自定义相机、`--views auto` 路径驱动渲染
 - **导出**：RGB、深度、法线、语义 mask、全景、可见 GLB/PLY、256³ 体素
 - **路径规划**：像素对齐俯视 + nav-mask 地板闭环，用于覆盖式视频
-- **坐标系**：SSL 世界系 + OpenCV 相机副本（`ssl_opencv.txt`、`c2w`、`intrinsic`）
+- **坐标系**：SSL 世界系 + OpenCV 相机副本（`ssl_opencv.txt`、`c2w`、`intrinsic`）；**`ssl_opencv.txt` 中 Bbox 采用 OpenSpatial 9 参数约定**（内旋 zxy、`[xl, yl, zl]` 尺寸），与 3D Grounding 对齐 — 见 [§6.4.4](docs/doc.zh-CN.md#644-bbox-约定openspatial-9-参数--内旋-zxy)
 
 
 

@@ -1,4 +1,8 @@
-"""Export ssl_opencv.txt: scene geometry in OpenCV camera coordinates."""
+"""Export ssl_opencv.txt: scene geometry in OpenCV camera coordinates.
+
+Bbox entries use the OpenSpatial 9-parameter convention (center, xl/yl/zl scale,
+zxy intrinsic Euler angles). See ``core/bbox_convention.py`` and docs §6.4.4.
+"""
 
 from __future__ import annotations
 
@@ -19,6 +23,11 @@ try:
     from .util_data import _ssl_fmt_list, _ssl_fmt_num
 except ImportError:
     from util_data import _ssl_fmt_list, _ssl_fmt_num  # type: ignore
+
+try:
+    from .bbox_convention import scenebuilder_cam_to_openspatial
+except ImportError:
+    from bbox_convention import scenebuilder_cam_to_openspatial  # type: ignore
 
 try:
     from .util_data import context_for_ssl_export
@@ -113,7 +122,7 @@ def bbox_world_to_opencv_pose(
     look_at_target,
     world_up=(0.0, 0.0, 1.0),
 ) -> Tuple[List[float], List[float], List[float]]:
-    """World SSL bbox -> OpenCV center + scale + pose=[azimuth,polar,rotation]."""
+    """World SSL bbox -> OpenCV center + OpenSpatial scale/pose."""
     center_w = np.asarray(center, dtype=float).reshape(3)
     angle_rad = np.radians(float(angle_z_deg))
     rot_world = SciRotation.from_euler("z", angle_rad, degrees=False).as_matrix()
@@ -128,10 +137,12 @@ def bbox_world_to_opencv_pose(
     rot_cam = transform_cam[:3, :3]
     pose = rotation_matrix_to_semantic_pose(rot_cam)
     scale_list = [float(v) for v in scale]
-    return (
+    return scenebuilder_cam_to_openspatial(
         cam_center.tolist(),
         scale_list,
-        [float(v) for v in pose],
+        pose[0],
+        pose[1],
+        pose[2],
     )
 
 

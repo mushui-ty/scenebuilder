@@ -1221,122 +1221,54 @@ depth_m = imageio.imread("topdown_depth.png").astype(float) / cam["depth_scale"]
 | **Room**          | `Room(room_type="...")`                   | 增加 `world_up=[a,b,c]`                                |
 | **Wall**          | `p`, `q` 为 SSL 世界 XY（第三维常为 0）             | `p`, `q` 为 OpenCV 相机系 **3D** 端点                      |
 | **Door / Window** | `center` 为 SSL 世界坐标                       | `center` 为 OpenCV 相机坐标                               |
-| **Bbox**          | `center` + `angle_z`（度，绕 SSL +Z）+ `scale` | `center`（相机系）+ `pose=[roll,pitch,yaw]` + `scale`（不变） |
+| **Bbox**          | `center` + `angle_z`（度，绕 SSL +Z）+ `scale`（SceneBuilder 语义轴 `[left, back, top]`） | `center`（相机系）+ `pose=[roll,pitch,yaw]` + `scale=[xl,yl,zl]`（**OpenSpatial 约定**，见 §6.4.4） |
 
 
-`width` / `height`（门窗）、墙 `height`、bbox `scale` 等**标量尺寸不变**（局部几何长度，米）。
+`width` / `height`（门窗）、墙 `height` 等标量尺寸不变（米）。Bbox 的 `scale` / `pose` 在写出 `ssl_opencv.txt` 时会从内部 SceneBuilder 语义表示转为 **OpenSpatial** 9 参数约定，以便与 OpenSpatial 3D Grounding 数据混合训练。
 
-#### 6.4.4 Bbox `pose` 约定（标准面对面位姿 + 内旋 XYZ）
+#### 6.4.4 Bbox 约定（OpenSpatial 9 参数 + 内旋 zxy）
+
+`ssl_opencv.txt` 中每个 Bbox 与 OpenSpatial 3D Grounding 的 9 参数 `[cx, cy, cz, xl, yl, zl, roll, pitch, yaw]` 对齐（相机系 OpenCV，单位米 / 弧度）：
 
 ```ssl
-Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.3, -0.05, 0.1], scale=[3.05, 0.93, 1.21], asset_id="17116819")
+Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[-0.15, 0.42, 0.02], scale=[3.05, 1.21, 0.93], asset_id="17116819")
 ```
-
-
 
 ##### 字段含义
 
+| 字段 | 含义 |
+| --- | --- |
+| `center = [cx, cy, cz]` | 盒体中心在 OpenCV 相机系下的坐标（米）；`cz` 为深度 |
+| `scale = [xl, yl, zl]` | 零姿态下沿盒体局部 **X / Y / Z** 轴的全长（米） |
+| `pose = [roll, pitch, yaw]` | 零姿态（局部轴与相机轴对齐）到实际姿态的 **内旋 zxy** 欧拉角（弧度） |
 
-| 字段                          | 含义                                     |
-| --------------------------- | -------------------------------------- |
-| `pose = [roll, pitch, yaw]` | 从标准面对面位姿到实际位姿的 **内旋 XYZ** 欧拉角，单位**弧度** |
-| `scale = [xl, yl, zl]`      | 沿盒体**自身局部轴**的全长（米），不是相机轴上的投影宽度         |
-| `roll`                      | 第一步，绕当前 OA/local **X(front)** 轴内旋      |
-| `pitch`                     | 第二步，绕已转动后的 OA/local **Y(left)** 轴内旋    |
-| `yaw`                       | 第三步，绕已转动后的 OA/local **Z(top)** 轴内旋     |
+OpenCV 相机系：`+X` 右、`+Y` 下、`+Z` 前（深度为正）。**零姿态**时盒体局部轴与相机轴对齐（OpenSpatial 标准）。
 
+SciPy 小写 `"zxy"` 表示内旋：先绕当前局部 Z，再绕转后的 X，再绕转后的 Y。
 
-这里的 `pose` 是有物理语义的欧拉角：先定义一个与观察者面对面的 OA/local 标准坐标系，再从这个标准位姿出发，按 `X -> Y -> Z` 的动轴顺序内旋到物体在当前 OpenCV 相机系下的实际位姿。
+根目录 `ssl.txt` 仍使用 SceneBuilder 约定：`angle_z`（度）+ `scale=[left, back, top]`（沿语义轴 left/back/top）。
 
-SSL bbox 的三根语义轴为：
+##### 与 SceneBuilder 内部表示的对应关系
 
+渲染管线内部先将 SSL 世界系 bbox 变换到 OpenCV 相机系，得到 SceneBuilder 语义的 `scale=[left,back,top]` 与内旋 **XYZ** 的 `pose`；写出 `ssl_opencv.txt` 时再经 `core/bbox_convention.py` 转为 OpenSpatial：
 
-| 语义轴     | bbox 局部轴   |
-| ------- | ---------- |
-| `front` | `local -Y` |
-| `left`  | `local +X` |
-| `back`  | `local +Y` |
-| `top`   | `local +Z` |
+- 尺寸重排：`[xl, yl, zl] = [left, top, back] = [s0, s2, s1]`
+- 旋转：SceneBuilder 语义姿态（内旋 XYZ）→ OpenSpatial 相机系（内旋 zxy）
+- 数值保留 **2 位小数**
 
+已渲染的旧产物（SceneBuilder 约定）可用 `scripts/postprocess_manycore2k_labels.py --euler-only` 批量补转换。
 
-OpenCV 相机系为 `+X` 右、`+Y` 下、`+Z` 前。因此：
+##### 从世界 SSL 如何算出 Bbox
 
-OA 的标准位姿为：
+1. 世界系 OBB：`angle_z` → 绕 SSL +Z 的 `R_world_box`，平移 `center`，尺寸 `scale=[left,back,top]`。
+2. `T_cam_box = inv(c2w) @ T_world_box`：bbox 局部系 → OpenCV 相机系。
+3. 由 `R_cam_box` 分解 SceneBuilder 语义 `pose`（内旋 XYZ），再转为 OpenSpatial 的 `pose`（内旋 zxy）与 `scale=[xl,yl,zl]`。
 
-- `front -> camera -Z`：物体正面对着我们。
-- `left -> camera +X`：物体左侧投到图像右边。
-- `top -> camera -Y`：物体上方投到图像上方。
-
-这三根轴构成右手系：`front x left = top`，即 `camera -Z x camera +X = camera -Y`。
-
-设标准位姿矩阵：
-
-```python
-R0 = [front0, left0, top0]
-   = [camera -Z, camera +X, camera -Y]
-```
-
-实际位姿矩阵：
-
-```python
-R_actual = [front_cam, left_cam, top_cam]
-```
-
-相对旋转为：
-
-```python
-R_delta = R0.T @ R_actual
-pose = as_euler("XYZ", R_delta) = [roll, pitch, yaw]
-```
-
-还原时：
-
-```python
-R_actual = R0 @ Rotation.from_euler("XYZ", pose).as_matrix()
-```
-
-SciPy 大写 `"XYZ"` 表示内旋，即从标准 local 坐标系出发，依次绕当前 `X(front)`、转后的 `Y(left)`、再转后的 `Z(top)` 旋转。
-
-##### 欧拉角主值与万向节锁
-
-本仓库采用 SciPy `"XYZ"` 的主值规范导出唯一文本表示：
-
-
-| 分量      | 主值范围          |
-| ------- | ------------- |
-| `roll`  | `[-π, π]`     |
-| `pitch` | `[-π/2, π/2]` |
-| `yaw`   | `[-π, π]`     |
-
-
-当 `pitch` 接近 `+π/2` 或 `-π/2` 时发生万向节锁：最终 3D 姿态仍然唯一，但 `roll` 与 `yaw` 的欧拉角分配不唯一。此时本仓库采用规范解：
-
-- 固定 `yaw = 0`
-- 将剩余自由度合并到 `roll`
-
-例如 topdown 视角下，很多落地物体会出现 `pitch=π/2`；打印机示例可规范表示为 `pose=[π/2, π/2, 0]`。若用于训练/评估，建议用由 `pose` 还原出的旋转矩阵或 `front/left/top` 三轴方向计算误差，而不是直接对欧拉角做 L1/L2。
-
-##### 从世界 SSL 如何算出 `pose`
-
-1. 世界系 OBB：`angle_z` → 仅绕 SSL +Z 的 `R_world_box`，平移 `t_world = center`，尺寸 `scale`。
-2. `T_world_box = [R_world_box | t_world]` 表示 **bbox 局部系 → SSL 世界系**；`T_cam_box = inv(c2w) @ T_world_box` 表示 **bbox 局部系 → OpenCV 相机系**。
-3. 从 `R_cam_box = T_cam_box[:3,:3]` 提取语义轴：
-
-```python
-front_cam = R_cam_box @ [0, -1, 0]
-left_cam  = R_cam_box @ [1,  0, 0]
-top_cam   = R_cam_box @ [0,  0, 1]
-```
-
-1. 由 `R_delta = R0.T @ [front_cam,left_cam,top_cam]` 分解 `pose=[roll,pitch,yaw]`；`scale` 不变。
-
-这里 `R_world_box = Rz(angle_z)` 是局部轴到 SSL 世界轴的旋转。它与“`angle_z=0°` 时物体面向 −Y”并不矛盾：前向向量不是局部 +X，而是 `R_world_box @ [0, -1, 0]`。
-
-这个表示既保留欧拉角的完整 3D 姿态表达，又有明确的物理零姿态。例如物体正面对着相机且 `left/top` 与图像右/上对齐时 `pose=[0,0,0]`；topdown 打印机这类极端俯视姿态也可以解释为从面对面标准位姿经过内旋到实际 `front/left/top` 三轴。
+实现：`core/ssl_opencv.py`（导出）、`core/bbox_convention.py`（约定转换）。
 
 #### 6.4.5 示例片段
 
-世界 SSL（根目录）：
+世界 SSL（根目录，SceneBuilder）：
 
 ```ssl
 Room(room_type="dining room")
@@ -1344,12 +1276,12 @@ Wall(label="wall0", p=[0.0, 0.0, 0], q=[5.0, 0.0, 0], height=2.7)
 Bbox(label="dining table0", center=[5.1, 2.77, 0.6], angle_z=0, scale=[3.05, 0.93, 1.21], asset_id="17116819")
 ```
 
-同一视角 `ssl_opencv.txt`（示意数值）：
+同一视角 `ssl_opencv.txt`（OpenSpatial 约定，示意数值）：
 
 ```ssl
 Room(room_type="dining room", world_up=[0.12, -0.98, 0.05])
 Wall(label="wall0", p=[1.2, 0.3, 4.5], q=[-0.8, 0.3, 2.1], height=2.7)
-Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.42, -0.15, 0.02], scale=[3.05, 0.93, 1.21], asset_id="17116819")
+Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[-0.15, 0.42, 0.02], scale=[3.05, 1.21, 0.93], asset_id="17116819")
 ```
 
 
@@ -1367,7 +1299,7 @@ Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.42, -0.15, 0.02], s
 | `Y/ssl.txt`（根）           | ❌ 仍为世界 SSL       |
 
 
-实现：`core/ssl_opencv.py`；由 `BpySceneCtx.write_opencv_ssl_for_view()` / `SceneCtx.write_opencv_ssl_for_view()` 在渲染保存阶段调用。
+实现：`core/ssl_opencv.py`、`core/bbox_convention.py`；由 `BpySceneCtx.write_opencv_ssl_for_view()` / `SceneCtx.write_opencv_ssl_for_view()` 在渲染保存阶段调用。
 
 **三类点云的区别：**
 

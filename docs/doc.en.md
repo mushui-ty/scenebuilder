@@ -1220,122 +1220,54 @@ Reference camera is the same camera described by `c2w` in `{basename}_camera_par
 | **Room** | `Room(room_type="...")` | Adds `world_up=[a,b,c]` |
 | **Wall** | `p`, `q` SSL world XY (third dim often 0) | `p`, `q` OpenCV camera **3D** endpoints |
 | **Door / Window** | `center` SSL world coords | `center` OpenCV camera coords |
-| **Bbox** | `center` + `angle_z` (deg, around SSL +Z) + `scale` | `center` (camera frame) + `pose=[roll,pitch,yaw]` + `scale` (unchanged) |
+| **Bbox** | `center` + `angle_z` (deg, around SSL +Z) + `scale` (SceneBuilder semantic `[left, back, top]`) | `center` (camera frame) + `pose=[roll,pitch,yaw]` + `scale=[xl,yl,zl]` (**OpenSpatial** convention, §6.4.4) |
 
 
-Scalar dimensions `width` / `height` (doors/windows), wall `height`, bbox `scale` **unchanged** (local geometric lengths, meters).
+Scalar dimensions for doors/windows (`width` / `height`) and wall `height` are unchanged (meters). Bbox `scale` / `pose` are converted from the internal SceneBuilder semantic representation to the **OpenSpatial** 9-parameter convention when writing `ssl_opencv.txt`, for mixed training with OpenSpatial 3D Grounding data.
 
-#### 6.4.4 Bbox `pose` Convention (Standard Face-to-Face Pose + Intrinsic XYZ Rotation)
+#### 6.4.4 Bbox Convention (OpenSpatial 9-Parameter + Intrinsic zxy)
+
+Each Bbox in `ssl_opencv.txt` aligns with OpenSpatial 3D Grounding 9 parameters `[cx, cy, cz, xl, yl, zl, roll, pitch, yaw]` (OpenCV camera frame; meters / radians):
 
 ```ssl
-Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.3, -0.05, 0.1], scale=[3.05, 0.93, 1.21], asset_id="17116819")
+Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[-0.15, 0.42, 0.02], scale=[3.05, 1.21, 0.93], asset_id="17116819")
 ```
-
-
 
 ##### Field Meanings
 
-
 | Field | Meaning |
-| --------------------------- | -------------------------------------- |
-| `pose = [roll, pitch, yaw]` | **Intrinsic XYZ** Euler angles from standard face-to-face pose to actual pose, in **radians** |
-| `scale = [xl, yl, zl]` | Full length along box **local axes** (meters), not projected width on camera axes |
-| `roll` | Step 1, intrinsic rotation around current OA/local **X(front)** |
-| `pitch` | Step 2, intrinsic rotation around rotated OA/local **Y(left)** |
-| `yaw` | Step 3, intrinsic rotation around rotated OA/local **Z(top)** |
+| --- | --- |
+| `center = [cx, cy, cz]` | Box center in OpenCV camera coordinates (meters); `cz` is depth |
+| `scale = [xl, yl, zl]` | Full edge lengths (meters) along local **X / Y / Z** at zero pose |
+| `pose = [roll, pitch, yaw]` | **Intrinsic zxy** Euler angles (radians) from zero pose to actual pose |
 
+OpenCV camera frame: +X right, +Y down, +Z forward (depth positive). At **zero pose**, box local axes align with camera axes (OpenSpatial standard).
 
-Here `pose` is a physically meaningful Euler angle: first define an OA/local standard frame face-to-face with the observer, then rotate from that standard pose along moving axes `X -> Y -> Z` to the object's actual pose in the current OpenCV camera frame.
+SciPy lowercase `"zxy"` means intrinsic rotation: first about current local Z, then rotated X, then rotated Y.
 
-SSL bbox semantic axes:
+Root `ssl.txt` still uses SceneBuilder convention: `angle_z` (degrees) + `scale=[left, back, top]`.
 
+##### Relation to Internal SceneBuilder Representation
 
-| Semantic Axis | Bbox Local Axis |
-| ------- | ---------- |
-| `front` | `local -Y` |
-| `left`  | `local +X` |
-| `back`  | `local +Y` |
-| `top`   | `local +Z` |
+The render pipeline first transforms SSL world bboxes to OpenCV camera frame with SceneBuilder semantic `scale=[left,back,top]` and intrinsic **XYZ** `pose`; `ssl_opencv.txt` export then converts via `core/bbox_convention.py`:
 
+- Size reorder: `[xl, yl, zl] = [left, top, back] = [s0, s2, s1]`
+- Rotation: SceneBuilder semantic pose (intrinsic XYZ) → OpenSpatial camera frame (intrinsic zxy)
+- Values rounded to **2 decimal places**
 
-OpenCV camera frame: `+X` right, `+Y` down, `+Z` forward. Therefore:
+Legacy renders (SceneBuilder convention) can be batch-converted with `scripts/postprocess_manycore2k_labels.py --euler-only`.
 
-Standard OA pose:
+##### How Bbox Is Computed from World SSL
 
-- `front -> camera -Z`: object front faces us.
-- `left -> camera +X`: object left projects to image right.
-- `top -> camera -Y`: object top projects to image top.
+1. World OBB: `angle_z` → `R_world_box` around SSL +Z, translation `center`, size `scale=[left,back,top]`.
+2. `T_cam_box = inv(c2w) @ T_world_box`: bbox local frame → OpenCV camera frame.
+3. Decompose SceneBuilder semantic `pose` (intrinsic XYZ) from `R_cam_box`, then convert to OpenSpatial `pose` (intrinsic zxy) and `scale=[xl,yl,zl]`.
 
-These three axes form a right-handed system: `front x left = top`, i.e. `camera -Z x camera +X = camera -Y`.
-
-Standard pose matrix:
-
-```python
-R0 = [front0, left0, top0]
-   = [camera -Z, camera +X, camera -Y]
-```
-
-Actual pose matrix:
-
-```python
-R_actual = [front_cam, left_cam, top_cam]
-```
-
-Relative rotation:
-
-```python
-R_delta = R0.T @ R_actual
-pose = as_euler("XYZ", R_delta) = [roll, pitch, yaw]
-```
-
-Recovery:
-
-```python
-R_actual = R0 @ Rotation.from_euler("XYZ", pose).as_matrix()
-```
-
-SciPy uppercase `"XYZ"` means intrinsic rotation: from standard local frame, rotate sequentially around current `X(front)`, then rotated `Y(left)`, then rotated `Z(top)`.
-
-##### Euler Principal Values and Gimbal Lock
-
-This repo uses SciPy `"XYZ"` principal value convention for unique text representation:
-
-
-| Component | Principal Range |
-| ------- | ------------- |
-| `roll`  | `[-π, π]`     |
-| `pitch` | `[-π/2, π/2]` |
-| `yaw`   | `[-π, π]`     |
-
-
-When `pitch` approaches `+π/2` or `-π/2`, gimbal lock occurs: final 3D pose is still unique, but `roll` and `yaw` Euler allocation is not unique. This repo uses canonical solution:
-
-- Fix `yaw = 0`
-- Merge remaining freedom into `roll`
-
-For example in topdown view, many floor objects have `pitch=π/2`; printer example can be canonically `pose=[π/2, π/2, 0]`. For training/eval, prefer rotation matrix or `front/left/top` axis directions recovered from `pose` for error metrics, not direct L1/L2 on Euler angles.
-
-##### How `pose` Is Computed from World SSL
-
-1. World OBB: `angle_z` → `R_world_box` rotation around SSL +Z only, translation `t_world = center`, size `scale`.
-2. `T_world_box = [R_world_box | t_world]` means **bbox local → SSL world**; `T_cam_box = inv(c2w) @ T_world_box` means **bbox local → OpenCV camera**.
-3. Extract semantic axes from `R_cam_box = T_cam_box[:3,:3]`:
-
-```python
-front_cam = R_cam_box @ [0, -1, 0]
-left_cam  = R_cam_box @ [1,  0, 0]
-top_cam   = R_cam_box @ [0,  0, 1]
-```
-
-4. Decompose `pose=[roll,pitch,yaw]` from `R_delta = R0.T @ [front_cam,left_cam,top_cam]`; `scale` unchanged.
-
-Here `R_world_box = Rz(angle_z)` rotates local axes to SSL world axes. This does not contradict "`angle_z=0°` object faces −Y": forward vector is not local +X but `R_world_box @ [0, -1, 0]`.
-
-This representation preserves full 3D pose via Euler angles with a clear physical zero pose. E.g. object front facing camera with `left/top` aligned to image right/top → `pose=[0,0,0]`; topdown printer extreme overhead pose can be interpreted as intrinsic rotation from face-to-face standard to actual `front/left/top` axes.
+Implementation: `core/ssl_opencv.py` (export), `core/bbox_convention.py` (convention conversion).
 
 #### 6.4.5 Example Snippet
 
-World SSL (root):
+World SSL (root, SceneBuilder):
 
 ```ssl
 Room(room_type="dining room")
@@ -1343,12 +1275,12 @@ Wall(label="wall0", p=[0.0, 0.0, 0], q=[5.0, 0.0, 0], height=2.7)
 Bbox(label="dining table0", center=[5.1, 2.77, 0.6], angle_z=0, scale=[3.05, 0.93, 1.21], asset_id="17116819")
 ```
 
-Same view `ssl_opencv.txt` (illustrative values):
+Same view `ssl_opencv.txt` (OpenSpatial convention, illustrative values):
 
 ```ssl
 Room(room_type="dining room", world_up=[0.12, -0.98, 0.05])
 Wall(label="wall0", p=[1.2, 0.3, 4.5], q=[-0.8, 0.3, 2.1], height=2.7)
-Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.42, -0.15, 0.02], scale=[3.05, 0.93, 1.21], asset_id="17116819")
+Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[-0.15, 0.42, 0.02], scale=[3.05, 1.21, 0.93], asset_id="17116819")
 ```
 
 
@@ -1366,7 +1298,7 @@ Bbox(label="dining table0", center=[0.5, -0.1, 2.3], pose=[0.42, -0.15, 0.02], s
 | `Y/ssl.txt` (root)       | ❌ remains world SSL |
 
 
-Implementation: `core/ssl_opencv.py`; called by `BpySceneCtx.write_opencv_ssl_for_view()` / `SceneCtx.write_opencv_ssl_for_view()` during render save.
+Implementation: `core/ssl_opencv.py`, `core/bbox_convention.py`; called by `BpySceneCtx.write_opencv_ssl_for_view()` / `SceneCtx.write_opencv_ssl_for_view()` during render save.
 
 **Three types of point clouds:**
 

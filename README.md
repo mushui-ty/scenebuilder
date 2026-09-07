@@ -29,7 +29,7 @@ Build indoor scenes from SSL text (walls, doors, windows, furniture), then rende
 - **Views**: topdown, preset cameras, custom camera, `--views auto` path-driven rendering
 - **Exports**: RGB, depth, normals, semantic masks, panorama, visible GLB/PLY, 256³ voxels
 - **Path planning**: pixel-aligned topdown + nav-mask floor loop for coverage video
-- **Coordinates**: SSL world space + OpenCV camera copies (`ssl_opencv.txt`, `c2w`, `intrinsic`)
+- **Coordinates**: SSL world space + OpenCV camera copies (`ssl_opencv.txt`, `c2w`, `intrinsic`); **`ssl_opencv.txt` Bbox uses OpenSpatial 9-parameter convention** (zxy Euler, `[xl, yl, zl]` scale) for 3D Grounding alignment — see [§6.4.4](docs/doc.en.md#644-bbox-convention-openspatial-9-parameter--intrinsic-zxy)
 
 
 
